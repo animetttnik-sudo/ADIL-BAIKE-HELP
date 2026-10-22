@@ -61,6 +61,13 @@ export function monthTotals(expenses, paydays) {
 /** Тап по кнопке: не ✓ → ✓, ✓ → пусто. */
 export const toggledStatus = (status) => (status === 'paid' ? null : 'paid');
 
+/** Тап по кнопке статуса: переключить ✓ у расхода id. Неизвестный id — тот же объект (без перерисовки). */
+export function toggleInState(state, id) {
+  const list = state && Array.isArray(state.expenses) ? state.expenses : null;
+  if (!list || !list.some((e) => e && e.id === id)) return state;
+  return { ...state, expenses: list.map((e) => (e && e.id === id ? { ...e, status: toggledStatus(e.status) } : e)) };
+}
+
 /**
  * «Не плачу»: переносит расход на следующую зарплату (+14 дней — тот же день внутри периода,
  * зарплаты идут строго через 14 дней от ANCHOR). id сохраняется; статус снимается;

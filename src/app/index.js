@@ -69,7 +69,7 @@ import {
   paydayTotals,
   shouldAutoAdvance,
   summaryView,
-  toggledStatus,
+  toggleInState,
   undoCarry,
 } from '../lib/totals';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
@@ -145,8 +145,8 @@ const SHEET_IN = { duration: 320, easing: Easing.out(Easing.cubic) };
 const SHEET_OUT = { duration: 220, easing: Easing.in(Easing.cubic) };
 const BACK_IN = { duration: 240 };
 
-const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-const hapticSelect = () => Haptics.selectionAsync();
+const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 
 /** Резинка: до SWIPE — 1:1, дальше — нарастающее сопротивление (макс. +36px). */
 function rubber(t) {
@@ -638,17 +638,35 @@ function useArcCtl(onPick) {
 const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
   const paid = useSharedValue(status === 'paid' ? 1 : 0);
   const press = useSharedValue(0);
-  const { open, cx, cy, left, midY, dir, hover, cur, hold, pick } = arc;
-  const curIdx = status === 'paid' ? 0 : 2;
+  const { open, cx, cy, left, midY, dir, hover, cur, hold } = arc;
+  // текущий статус для жеста — shared value: жест не пересоздаётся от тапа по нему же
+  const curIdx = useSharedValue(status === 'paid' ? 0 : 2);
 
   useEffect(() => {
     paid.value = withTiming(status === 'paid' ? 1 : 0, STATUS_IN);
-  }, [status, paid]);
+    curIdx.value = status === 'paid' ? 0 : 2;
+  }, [status, paid, curIdx]);
 
+  // JS-обработчики — через ref: в ворклет уходят только стабильные функции-обёртки
+  const cbRef = useRef(null);
+  cbRef.current = { id, onToggle, pick: arc.pick };
   const toggle = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onToggle(id);
-  }, [id, onToggle]);
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      const c = cbRef.current;
+      c.onToggle(c.id);
+    } catch (err) {
+      console.warn('status toggle failed', err);
+    }
+  }, []);
+  const choose = useCallback((i) => {
+    try {
+      const c = cbRef.current;
+      c.pick(c.id, i);
+    } catch (err) {
+      console.warn('status pick failed', err);
+    }
+  }, []);
 
   const gesture = useMemo(() => {
     const tap = Gesture.Tap()
@@ -675,7 +693,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
         dir.value = d;
         left.value = Math.min(Math.max(12, x0 - ISL_W / 2), SCREEN_W - 12 - ISL_W);
         midY.value = y0 - d * (26 + ISL_GAP + ISL_H / 2);
-        cur.value = curIdx;
+        cur.value = curIdx.value;
         hover.value = -1;
         press.value = withTiming(0, { duration: 160 });
         open.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
@@ -690,7 +708,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
       })
       .onEnd(() => {
         const h = hover.value;
-        if (h >= 0) scheduleOnRN(pick, id, h);
+        if (h >= 0) scheduleOnRN(choose, h);
       })
       .onFinalize(() => {
         // отпустили (или жест отменён) — остров исчезает в любом случае
@@ -699,7 +717,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
         hover.value = -1;
       });
     return Gesture.Exclusive(hold, tap);
-  }, [press, toggle, open, cx, cy, left, midY, dir, hover, cur, hold, pick, id, curIdx]);
+  }, [press, toggle, choose, open, cx, cy, left, midY, dir, hover, cur, hold, curIdx]);
 
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: 1 - 0.1 * press.value }] }));
   const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - paid.value }));
@@ -865,6 +883,8 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
+      {/* стекло не кладём прямо в вид с layout-анимациями — между ними обычный View */}
+      <View collapsable={false}>
       <Glass style={styles.eCard} intensity={34}>
         <Pressable style={({ pressed }) => [styles.itemPress, pressed && styles.rowPressed]} onPress={edit}>
           <View style={styles.whenCol}>
@@ -890,6 +910,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
         </Pressable>
         <StatusButton id={id} status={st === 'paid' ? 'paid' : null} onToggle={onToggle} arc={arc} />
       </Glass>
+      </View>
     </Animated.View>
   );
 });
@@ -1790,12 +1811,12 @@ const PAGE_SPRING = { damping: 34, stiffness: 300, mass: 0.9, overshootClamping:
 const AUTO_NEXT_MS = 900;
 
 /** Большая карточка зарплаты — часть страницы, уезжает и приезжает вместе с ней. */
-const PayCard = memo(function PayCard({ payday, t, accent, par }) {
+const PayCard = memo(function PayCard({ payday, t, accent }) {
   const sv = summaryView(t);
   const nextP = PAYDAYS[PAYDAYS.indexOf(payday) + 1] || addDays(payday, 14);
   return (
     <Glass style={styles.balance} intensity={42}>
-      <Animated.View style={par}>
+      <View>
         <Text style={styles.period} numberOfLines={1}>
           К зарплате {fmtShort(payday)}
         </Text>
@@ -1817,7 +1838,7 @@ const PayCard = memo(function PayCard({ payday, t, accent, par }) {
         >
           {sv.big}
         </Text>
-      </Animated.View>
+      </View>
       <Meter value={sv.progress} color={accent} />
       <View style={styles.statRow}>
         <Stat k="Расходы за зарплату" v={sv.total} />
@@ -1836,15 +1857,13 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, accent, on
       transform: [{ translateX: d * (PAGE_W + PAGE_GAP) }, { scale: 1 - 0.07 * a }],
     };
   });
-  // лёгкий параллакс заголовка и суммы внутри карточки
-  const par = useAnimatedStyle(() => ({ transform: [{ translateX: (k - pos.value) * 40 }] }));
   const t = useMemo(() => paydayTotals(list, earned), [list, earned]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
-            <PayCard payday={payday} t={t} accent={accent} par={par} />
+            <PayCard payday={payday} t={t} accent={accent} />
             {list.length === 0 ? (
               <ItemCard>
                 <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
@@ -1868,6 +1887,8 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
   const sx = useSharedValue(0);
   const sy = useSharedValue(0);
   const drag0 = useSharedValue(0);
+  const islHold = arc.hold;
+  const islOpen = arc.open;
   const gesture = useMemo(
     () =>
       Gesture.Pan()
@@ -1878,7 +1899,7 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
           sy.value = t.absoluteY;
         })
         .onTouchesMove((e, mgr) => {
-          if (arc.hold.value || arc.open.value > 0) return mgr.fail(); // остров статуса открыт — не листаем
+          if (islHold.value || islOpen.value > 0) return mgr.fail(); // остров статуса открыт — не листаем
           const t = e.allTouches[0];
           const dx = t.absoluteX - sx.value;
           const dy = t.absoluteY - sy.value;
@@ -1910,7 +1931,7 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
             scheduleOnRN(onPage, target);
           }
         }),
-    [sx, sy, drag0, pos, cur, lo, hi, arc, onPage]
+    [sx, sy, drag0, pos, cur, lo, hi, islHold, islOpen, onPage]
   );
   return (
     <GestureDetector gesture={gesture}>
@@ -2238,9 +2259,14 @@ export default function App() {
   /** Страница уже выбрана (жестом — анимация идёт на UI); досеять соседей и обновить состояние. */
   const onPage = useCallback(
     (k) => {
-      Haptics.selectionAsync();
-      patch((p) => seedPaydays(p, PAYDAYS.slice(Math.max(0, k - 1), k + 2)));
-      setPi(k);
+      try {
+        if (!Number.isInteger(k) || k < 0 || k >= PAYDAYS.length) return;
+        Haptics.selectionAsync().catch(() => {});
+        patch((p) => (p ? seedPaydays(p, PAYDAYS.slice(Math.max(0, k - 1), k + 2)) : p));
+        setPi(k);
+      } catch (err) {
+        console.warn('page change failed', err);
+      }
     },
     [patch]
   );
@@ -2281,7 +2307,11 @@ export default function App() {
     lastShown.current = next;
     if (!shouldAutoAdvance(prev, next) || pi == null || !range || pi >= range.hi) return;
     const t = setTimeout(() => {
-      if (piRef.current === pi) goPayIdx(pi + 1);
+      try {
+        if (piRef.current === pi) goPayIdx(pi + 1);
+      } catch (err) {
+        console.warn('auto-advance failed', err);
+      }
     }, AUTO_NEXT_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2401,10 +2431,7 @@ export default function App() {
   // тап по кнопке статуса: пусто/✕ → ✓, ✓ → пусто (лёгкая вибрация — в самой кнопке)
   const toggleStatus = useCallback(
     (id) => {
-      patch((p) => ({
-        ...p,
-        expenses: p.expenses.map((e) => (e.id === id ? { ...e, status: toggledStatus(e.status) } : e)),
-      }));
+      patch((p) => (p ? toggleInState(p, id) : p));
     },
     [patch]
   );
@@ -2432,9 +2459,13 @@ export default function App() {
   // выбор в веере: 0 ✓, 1 → перенести, 2 без отметки
   const onArcPick = useCallback(
     (id, i) => {
-      if (i === 1) return carryExpenseNow(id);
-      Haptics.selectionAsync();
-      setStatusDirect(id, i === 0 ? 'paid' : null);
+      try {
+        if (i === 1) return carryExpenseNow(id);
+        Haptics.selectionAsync().catch(() => {});
+        setStatusDirect(id, i === 0 ? 'paid' : null);
+      } catch (err) {
+        console.warn('status pick failed', err);
+      }
     },
     [carryExpenseNow, setStatusDirect]
   );

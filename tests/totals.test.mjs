@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   carryExpense, carryInState, expensesInPeriod, monthTotals, monthView, origDate, paydayOf, paydayTotals, summaryView,
   toggledStatus, undoCarry, defaultPayday, shouldAutoAdvance, pagerRange, paydayMode,
+  toggleInState,
 } from '../src/lib/totals.js';
 import { defaultState, seedMonth, seedPaydays, PAYDAYS, ANCHOR } from '../src/lib/periods.js';
 import { applyImport, previewImport } from '../src/lib/planImport.js';
@@ -234,4 +235,28 @@ test('границы листания и досев месяцев страни�
   assert.ok(s.expenses.some((e) => e.date === '2026-11-07'));
   assert.ok(s.expenses.some((e) => e.date === '2026-10-26'));
   assert.equal(seedPaydays(s, ['2026-10-30']), s); // повторно — тот же объект
+});
+
+test('тап по ✓: переключение, без лишних перерисовок, автопереход только на последнем', () => {
+  const p = '2026-10-16';
+  let app = { expenses: [
+    { id: 'a', date: '2026-10-17', amount: 10, status: null },
+    { id: 'b', date: '2026-10-20', amount: 5, status: 'missed' },
+  ] };
+  assert.equal(toggleInState(app, 'nope'), app);
+  assert.equal(toggleInState(null, 'a'), null);
+  assert.equal(toggleInState({}, 'a').expenses, undefined);
+  const snap = () => ({ payday: p, mode: paydayMode(app.expenses, p) });
+  let prev = snap();
+  app = toggleInState(app, 'a');
+  assert.equal(app.expenses[0].status, 'paid');
+  assert.equal(shouldAutoAdvance(prev, snap()), false);
+  prev = snap();
+  app = toggleInState(app, 'b'); // legacy 'missed' → ✓
+  assert.equal(app.expenses[1].status, 'paid');
+  assert.equal(shouldAutoAdvance(prev, snap()), true);
+  prev = snap();
+  app = toggleInState(app, 'b'); // снятие ✓ — обратно «к оплате», без перехода
+  assert.equal(app.expenses[1].status, null);
+  assert.equal(shouldAutoAdvance(prev, snap()), false);
 });
