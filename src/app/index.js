@@ -57,6 +57,8 @@ import Animated, {
     withTiming
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
+import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
+import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
     CALC_ITEMS,
     CALC_KEY,
@@ -2367,6 +2369,14 @@ export default function App() {
           { key: 'recurring', title: 'Постоянные платежи', sub: `${(state.recurring || []).length} шт. · каждый месяц` },
           { key: 'analysis', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
           { key: 'stats', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
+          {
+            key: 'plan',
+            title: 'Импорт плана',
+            sub:
+              state.plan?.id === PLAN_ID
+                ? `добавлено ${state.plan.added ?? ''} · ${fmtShort(state.plan.importedAt.slice(0, 10))}`
+                : 'расходы сен 2026 – сен 2027 из заметки',
+          },
         ];
         return {
           title: 'Настройки',
@@ -2605,6 +2615,100 @@ export default function App() {
                 }}
               >
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Добавить платёж</Text>
+              </ScaleButton>
+            </>
+          ),
+        };
+      }
+
+      case 'plan': {
+        const pv = previewImport(state, PLAN_BLOCKS);
+        const done = state.plan?.id === PLAN_ID;
+        const addSum = pv.add.reduce((a, x) => a + x.amount, 0);
+        const paidN = pv.add.filter((x) => x.paid).length;
+        const noName = pv.add.filter((x) => !x.title);
+        return {
+          title: 'Импорт плана',
+          onClose: toSettings,
+          body: (
+            <>
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <Text style={styles.k}>{done ? 'План уже импортирован' : 'Будет добавлено'}</Text>
+                <Text style={[styles.bigPay, { marginTop: 4, color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+                  {pv.add.length} {pv.add.length === 1 ? 'расход' : pv.add.length < 5 && pv.add.length > 1 ? 'расхода' : 'расходов'}
+                </Text>
+                <Text style={styles.calcMeta}>
+                  на {money(addSum)} сом · {paidN} уже оплачены ✓ · пропущено {pv.dups.length + pv.similar.length}
+                </Text>
+              </ItemCard>
+              <Text style={styles.hint}>
+                Каждый расход встанет под ту же зарплату, что в заметке. Существующие расходы не меняются,
+                точные дубли (дата + сумма + название) пропускаются. В месяцах плана «Постоянные платежи»
+                больше не добавляются сами — план уже содержит их.
+              </Text>
+              <Text style={styles.sectionLabel}>По месяцам</Text>
+              <ItemCard style={styles.listCard}>
+                {pv.months.map((k, i) => {
+                  const m = pv.byMonth[k];
+                  return (
+                    <View key={k} style={[styles.lRow, i < pv.months.length - 1 && styles.lRowSep]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.lTitle}>{monthTitle(k)}</Text>
+                        <Text style={styles.lSub}>
+                          {m.add ? `+${m.add} · ${money(m.sum)} сом` : 'нечего добавлять'}
+                          {m.skip ? ` · уже есть ${m.skip}` : ''}
+                        </Text>
+                      </View>
+                      <Text style={[styles.lVal, !m.add && { opacity: 0.4 }]}>+{m.add}</Text>
+                    </View>
+                  );
+                })}
+              </ItemCard>
+              {pv.similar.length > 0 && (
+                <>
+                  <Text style={styles.sectionLabel}>Уже есть похожие — пропущены</Text>
+                  <ItemCard style={styles.listCard}>
+                    {pv.similar.map((d, i) => (
+                      <View key={i} style={[styles.lRow, i < pv.similar.length - 1 && styles.lRowSep]}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.lTitle}>
+                            {fmtShort(d.plan.date)} · {d.plan.title || 'Без названия'}
+                          </Text>
+                          <Text style={styles.lSub}>
+                            в плане {money(d.plan.amount)}, в приложении {money(d.existing.amount)}
+                            {d.existing.date !== d.plan.date ? ` (${fmtShort(d.existing.date)})` : ''}
+                          </Text>
+                        </View>
+                      </View>
+                    ))}
+                  </ItemCard>
+                </>
+              )}
+              {noName.length > 0 && (
+                <Text style={styles.hint}>
+                  Без названия: {noName.map((x) => `${fmtShort(x.date)} — ${money(x.amount)}`).join(', ')}
+                </Text>
+              )}
+              <ScaleButton
+                style={[styles.actBtn, { backgroundColor: accent }, !pv.add.length && { opacity: 0.45 }]}
+                onPress={() => {
+                  if (!pv.add.length) return;
+                  Alert.alert('Импорт плана', `Добавить ${pv.add.length} расходов в «Расходы»?`, [
+                    { text: 'Отмена', style: 'cancel' },
+                    {
+                      text: 'Добавить',
+                      onPress: () => {
+                        patch((p) => seedMonth(applyImport(p, PLAN_BLOCKS, uid, PLAN_ID), viewY, viewM));
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                        closeThen(() => goPage(0));
+                      },
+                    },
+                  ]);
+                }}
+              >
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>
+                  {pv.add.length ? `Добавить ${pv.add.length}` : 'Всё уже добавлено'}
+                </Text>
               </ScaleButton>
             </>
           ),
