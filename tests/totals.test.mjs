@@ -87,3 +87,50 @@ test('перенос не ломает досев постоянных и пов
   pl = carryInState(carryInState(pl, it.id).state, it.id).state;
   assert.equal(previewImport(pl, PLAN_BLOCKS).add.length, 0);
 });
+
+test('карточка: ✓ на всё → «Всё оплачено», снятие ✓ (тапом или «Без отметки») → снова красный «−X», многократно', async () => {
+  const { summaryView } = await import('../src/lib/totals.js');
+  const base = [
+    { id: 'a', date: '2026-10-30', amount: 1387, status: null },
+    { id: 'b', date: '2026-11-04', amount: 5667 }, // без поля status
+  ];
+  const nb = (s) => s.replace(/\s/g, ' ');
+  let list = base;
+  const view = () => summaryView(paydayTotals(list, 10000));
+  const set = (id, status) => {
+    list = list.map((e) => (e.id === id ? { ...e, status } : e));
+  };
+  const tap = (id) => set(id, toggledStatus(list.find((e) => e.id === id).status)); // тап по кнопке
+  let v = view();
+  assert.equal(v.mode, 'due');
+  assert.equal(nb(v.big), '−7 054');
+  assert.equal(v.bigTone, 'bad');
+  assert.equal(v.progress, 0);
+  for (let round = 0; round < 3; round++) {
+    tap('a');
+    tap('b');
+    v = view();
+    assert.deepEqual([v.mode, v.big, v.bigTone, v.tag, v.progress], ['done', 'Всё оплачено', 'good', 'всё оплачено', 1]);
+    // снять ✓ — по очереди тапом и веером «Без отметки» (null)
+    if (round % 2) tap('b');
+    else set('b', null);
+    v = view();
+    assert.equal(v.mode, 'due');
+    assert.equal(nb(v.big), '−5 667');
+    assert.equal(v.bigTone, 'bad');
+    assert.equal(v.sub, 'не оплачено · 1 платёж');
+    assert.equal(v.tag, 'хватает');
+    assert.ok(Math.abs(v.progress - 1387 / 7054) < 1e-9);
+    tap('a');
+    v = view();
+    assert.equal(nb(v.big), '−7 054');
+    assert.equal(v.progress, 0);
+  }
+  // старое «не оплатил вовремя» тоже снимает «всё оплачено»
+  list = base.map((e) => ({ ...e, status: 'paid' }));
+  assert.equal(view().mode, 'done');
+  set('a', 'missed');
+  assert.equal(nb(view().big), '−1 387');
+  assert.equal(summaryView(paydayTotals([])).mode, 'empty');
+  assert.equal(summaryView(paydayTotals(base, 1000)).tag, 'не хватает');
+});

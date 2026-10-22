@@ -76,3 +76,38 @@ export function undoCarry(app, prev) {
   if (!prev || !(app.expenses || []).some((x) => x.id === prev.id)) return app;
   return { ...app, expenses: app.expenses.map((x) => (x.id === prev.id ? prev : x)) };
 }
+
+export function plural(n, one, few, many) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
+
+/**
+ * Всё, что показывает карточка «К зарплате», из итогов paydayTotals — одной чистой функцией,
+ * без кэшей: каждый рендер пересчитывается с нуля (✓ ↔ пусто работают в обе стороны).
+ * mode: 'due' (есть неоплаченные — красный «−X»), 'done' (всё оплачено), 'empty' (платежей нет).
+ */
+export function summaryView(t) {
+  const mode = t.planned <= 0 ? 'empty' : t.unpaid > 0 ? 'due' : 'done';
+  const enough = t.free >= 0;
+  return {
+    mode,
+    big: mode === 'due' ? `−${fmt(t.unpaid)}` : mode === 'done' ? 'Всё оплачено' : fmt(0),
+    bigTone: mode === 'due' ? 'bad' : 'good',
+    sub:
+      mode === 'due'
+        ? `не оплачено · ${t.open} ${plural(t.open, 'платёж', 'платежа', 'платежей')}`
+        : mode === 'done'
+          ? 'все платежи этой зарплаты оплачены'
+          : 'платежей к этой зарплате нет',
+    tag: mode === 'done' ? 'всё оплачено' : enough ? 'хватает' : 'не хватает',
+    tagTone: mode === 'done' || enough ? 'good' : 'bad',
+    progress: t.planned > 0 ? Math.min(1, t.paid / t.planned) : 0,
+    paidLine: `оплачено ${fmt(t.paid)} из ${fmt(t.planned)}`,
+  };
+}

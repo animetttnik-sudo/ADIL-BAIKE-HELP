@@ -60,7 +60,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
-import { carryInState, expensesInPeriod, paydayTotals, toggledStatus, undoCarry } from '../lib/totals';
+import { carryInState, expensesInPeriod, paydayTotals, summaryView, toggledStatus, undoCarry } from '../lib/totals';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
     CALC_ITEMS,
@@ -118,13 +118,6 @@ const ACCENT_PRESETS = [{ h: 145 }, { h: 210 }, { h: 280 }, { h: 30 }, { h: 350 
 const INIT_Y = 2026;
 const INIT_M = 8;
 
-function plural(n, one, few, many) {
-  const m10 = n % 10;
-  const m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return one;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
-  return many;
-}
 // старый ✕ ('missed', «не оплатил вовремя») показывается как неотмеченный
 function displayStatus(e) {
   return e.status === 'paid' ? 'paid' : 'none';
@@ -180,24 +173,41 @@ function useRowSwipe(x, id, onEdit, onDelete) {
 const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
 
 /** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
-function Glass({ children, style, intensity = 38, tint }) {
+function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false }) {
   if (LG && GlassView) {
     return (
-      <GlassView glassEffectStyle="regular" colorScheme="dark" tintColor={tint} style={[styles.glassBase, style]}>
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme="dark"
+        tintColor={tint}
+        isInteractive={interactive}
+        style={[styles.glassBase, style]}
+      >
         {children}
       </GlassView>
     );
   }
+  // запасной вариант (нет Liquid Glass): blur + подкраска + блик сверху + тонкая кромка
+  const r = StyleSheet.flatten(style)?.borderRadius;
   return (
     <View style={[styles.glassBase, style]}>
       <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
       <View style={styles.glassFill} pointerEvents="none" />
+      {tint ? (
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: tintFallback || tint }]} pointerEvents="none" />
+      ) : null}
       <View style={styles.glassTopEdge} pointerEvents="none" />
-      <View style={styles.glassBorder} pointerEvents="none" />
+      <View style={[styles.glassBorder, r != null && { borderRadius: r }]} pointerEvents="none" />
       {children}
     </View>
   );
 }
+
+// подкраска стекла (как у дока: настоящий GlassView + tintColor, иначе blur + слой цвета)
+const GLASS_GREEN = 'rgba(48,209,88,0.55)';
+const GLASS_GREEN_FB = 'rgba(48,209,88,0.32)';
+const GLASS_BLUE = 'rgba(10,132,255,0.55)';
+const GLASS_BLUE_FB = 'rgba(10,132,255,0.32)';
 
 /** Лёгкая карточка записи — без тяжёлого blur на каждой строке */
 function ItemCard({ children, style }) {
@@ -700,12 +710,14 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
   return (
     <GestureDetector gesture={gesture}>
       <View collapsable={false} style={styles.sBtnHit}>
-        <Animated.View style={[styles.sBtn, btnStyle]}>
-          <View style={styles.sBtnEdge} pointerEvents="none" />
-          <Animated.View style={[styles.sRing, ringStyle]} />
-          <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
-            <Text style={styles.sGlyph}>✓</Text>
-          </Animated.View>
+        {/* scale — на обёртке, само стекло не трансформируем и не делаем полупрозрачным */}
+        <Animated.View style={btnStyle}>
+          <Glass style={styles.sBtn} intensity={40} tint="rgba(48,209,88,0.32)" tintFallback="rgba(48,209,88,0.16)">
+            <Animated.View style={[styles.sRing, ringStyle]} />
+            <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
+              <Text style={styles.sGlyph}>✓</Text>
+            </Animated.View>
+          </Glass>
         </Animated.View>
       </View>
     </GestureDetector>
@@ -721,18 +733,22 @@ function ArcOption({ i, arc }) {
       if (on !== was) h.value = withSpring(on ? 1 : 0, ARC_SPRING);
     }
   );
+  // Стекло (GlassView/BlurView) ломается от полупрозрачности предков на iOS, поэтому
+  // появление — без плавной opacity: 0/1 ступенькой + вылет из центра кнопки и рост из 0.3.
   const st = useAnimatedStyle(() => {
     // все три выезжают в одном кадре; сдвиг по фазе ≤ ~10 мс на вариант
     const p = Math.min(1, Math.max(0, (open.value - i * 0.06) / 0.88));
     return {
-      opacity: p,
+      opacity: p > 0.02 ? 1 : 0,
       transform: [
         { translateX: cx.value - ARC_OPT / 2 + arcX(i, side.value) * p },
         { translateY: cy.value - ARC_OPT / 2 + arcY(i, dir.value) * p },
-        { scale: (0.4 + 0.6 * p) * (1 + 0.15 * h.value) },
+        { scale: 0.3 + 0.7 * p },
       ],
     };
   });
+  // увеличение под пальцем — отдельная обёртка над стеклом
+  const grow = useAnimatedStyle(() => ({ transform: [{ scale: 1 + 0.15 * h.value }] }));
   const ring = useAnimatedStyle(() => ({ opacity: cur.value === i ? 1 : 0 }));
   const glow = useAnimatedStyle(() => ({ opacity: h.value }));
   // подпись — с внешней стороны веера, чтобы не наезжать на соседние кружки
@@ -743,14 +759,24 @@ function ArcOption({ i, arc }) {
   const o = ARC_OPTS[i];
   return (
     <Animated.View style={[styles.arcOpt, st]} pointerEvents="none">
-      <View style={[styles.arcDot, i === 0 && styles.arcDotPaid, i === 1 && styles.arcDotMove]}>
-        <Animated.View style={[StyleSheet.absoluteFill, styles.arcGlow, glow]} />
-        {i === 2 ? <View style={styles.arcEmpty} /> : <Text style={styles.arcGlyph}>{o.glyph}</Text>}
-        <Animated.View style={[StyleSheet.absoluteFill, styles.arcCur, ring]} />
-      </View>
-      <Animated.View style={[styles.arcLblWrap, lbl]}>
-        <Text style={styles.arcLbl} numberOfLines={1}>{o.label}</Text>
-        {o.sub ? <Text style={styles.arcSub} numberOfLines={1}>{o.sub}</Text> : null}
+      <Animated.View style={grow}>
+        <Glass
+          style={styles.arcDot}
+          intensity={55}
+          interactive
+          tint={i === 0 ? GLASS_GREEN : i === 1 ? GLASS_BLUE : undefined}
+          tintFallback={i === 0 ? GLASS_GREEN_FB : i === 1 ? GLASS_BLUE_FB : undefined}
+        >
+          <Animated.View style={[StyleSheet.absoluteFill, styles.arcGlow, glow]} />
+          {i === 2 ? <View style={styles.arcEmpty} /> : <Text style={styles.arcGlyph}>{o.glyph}</Text>}
+          <Animated.View style={[StyleSheet.absoluteFill, styles.arcCur, ring]} />
+        </Glass>
+      </Animated.View>
+      <Animated.View style={[styles.arcLblPos, lbl]}>
+        <Glass style={styles.arcLblWrap} intensity={50}>
+          <Text style={styles.arcLbl} numberOfLines={1}>{o.label}</Text>
+          {o.sub ? <Text style={styles.arcSub} numberOfLines={1}>{o.sub}</Text> : null}
+        </Glass>
       </Animated.View>
     </Animated.View>
   );
@@ -2365,7 +2391,7 @@ export default function App() {
   const focus = pays.find((p) => p >= todayIso()) || pays[pays.length - 1];
   // Большая цифра: «Не оплачено −X», X — сумма неотмеченных расходов этой зарплаты.
   const ft = paydayTotals(focus ? expensesForPayday(focus) : [], focus ? earnedForPayday(focus) : 0);
-  const allPaid = ft.planned > 0 && ft.unpaid <= 0;
+  const sv = summaryView(ft);
   const balanceOk = ft.free >= 0;
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
@@ -3233,30 +3259,26 @@ export default function App() {
                 <Glass style={styles.balance} intensity={42}>
                   <View style={styles.cardHead}>
                     <Text style={styles.period}>К зарплате {fmtShort(focus)}</Text>
-                    <View style={[styles.tag, allPaid || balanceOk ? styles.tagGood : styles.tagBad]}>
-                      <Text style={[styles.tagTxt, allPaid || balanceOk ? styles.good : styles.bad]}>
-                        {allPaid ? 'всё оплачено' : balanceOk ? 'хватает' : 'не хватает'}
-                      </Text>
+                    <View style={[styles.tag, sv.tagTone === 'good' ? styles.tagGood : styles.tagBad]}>
+                      <Text style={[styles.tagTxt, sv.tagTone === 'good' ? styles.good : styles.bad]}>{sv.tag}</Text>
                     </View>
                   </View>
-                  <Text style={styles.paySub}>
-                    {allPaid
-                      ? 'все платежи этой зарплаты оплачены'
-                      : ft.planned > 0
-                        ? `не оплачено · ${ft.open} ${plural(ft.open, 'платёж', 'платежа', 'платежей')}`
-                        : 'платежей к этой зарплате нет'}
-                  </Text>
+                  <Text style={styles.paySub}>{sv.sub}</Text>
+                  {/* Без adjustsFontSizeToFit: на Fabric/iOS он кэширует замер текста, и после
+                      «Всё оплачено» красное «−X» не возвращалось. key — свежий узел на каждую смену. */}
                   <Text
-                    style={[styles.bigPay, { color: ft.unpaid > 0 ? '#ff453a' : '#30d158' }]}
+                    key={sv.big}
+                    style={[
+                      styles.bigPay,
+                      sv.mode === 'done' && styles.bigPayWord,
+                      { color: sv.bigTone === 'bad' ? '#ff453a' : '#30d158' },
+                    ]}
                     numberOfLines={1}
-                    adjustsFontSizeToFit
                   >
-                    {ft.unpaid > 0 ? `−${money(ft.unpaid)}` : allPaid ? 'Всё оплачено' : money(0)}
+                    {sv.big}
                   </Text>
-                  <Meter value={ft.planned > 0 ? ft.paid / ft.planned : 0} color={accent} />
-                  <Text style={styles.calcMeta}>
-                    оплачено {money(ft.paid)} из {money(ft.planned)}
-                  </Text>
+                  <Meter value={sv.progress} color={accent} />
+                  <Text style={styles.calcMeta}>{sv.paidLine}</Text>
                   <View style={styles.statRow}>
                     <Stat k="Заработано" v={money(ft.earned)} tone={balanceOk ? 'good' : 'bad'} />
                     <Stat k="К оплате" v={money(ft.planned)} />
@@ -3649,18 +3671,8 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  sBtnEdge: {
-    position: 'absolute',
-    top: 0,
-    left: 6,
-    right: 6,
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.35)',
   },
   sRing: {
     width: 26,
@@ -3688,32 +3700,19 @@ const styles = StyleSheet.create({
     borderRadius: ARC_OPT / 2,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(44,44,52,0.96)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
   },
-  arcDotPaid: { backgroundColor: 'rgba(36,150,66,0.97)' },
-  arcDotMove: { backgroundColor: 'rgba(30,110,190,0.97)' },
-  arcGlow: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  arcGlow: { backgroundColor: 'rgba(255,255,255,0.16)', borderRadius: ARC_OPT / 2 },
   arcCur: { borderRadius: ARC_OPT / 2, borderWidth: 2, borderColor: '#fff' },
   arcGlyph: { color: '#fff', fontSize: 22, fontWeight: '800' },
   arcEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: 'rgba(48,209,88,0.9)' },
+  arcLblPos: { position: 'absolute', top: ARC_OPT + 4, width: 104, alignItems: 'center' },
   arcLblWrap: {
-    position: 'absolute',
-    top: ARC_OPT + 4,
-    width: 84,
+    minWidth: 64,
     height: 32,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: 8,
-    backgroundColor: 'rgba(20,20,26,0.85)',
+    paddingHorizontal: 10,
+    borderRadius: 12,
   },
   arcLbl: { color: '#fff', fontSize: 11, fontWeight: '700' },
   arcSub: { color: 'rgba(235,235,245,0.6)', fontSize: 10 },
@@ -4130,6 +4129,7 @@ const styles = StyleSheet.create({
 
   // Расчёт
   bigPay: { fontSize: 52, fontWeight: '800', letterSpacing: -1.6, marginTop: 10 },
+  bigPayWord: { fontSize: 38, letterSpacing: -1, lineHeight: 62 },
   calcMeta: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
   calcSegs: { flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 6 },
   calcBtns: { flexDirection: 'row', gap: 10 },
