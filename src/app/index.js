@@ -51,12 +51,12 @@ import Animated, {
     LayoutAnimationConfig,
     LinearTransition,
     useAnimatedKeyboard,
-    useAnimatedStyle, useSharedValue,
+    useAnimatedStyle, useReducedMotion, useSharedValue,
     withSequence,
     withSpring,
     withTiming
 } from 'react-native-reanimated';
-import { scheduleOnRN } from 'react-native-worklets';
+import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
@@ -779,7 +779,38 @@ function SegLabel({ label, index, pos, fontSize }) {
  * shared value — быстрые тапы не путаются со старыми пропсами.
  * glass — настоящий Liquid Glass (GlassView, иначе BlurView) для дока.
  */
-function SegmentCapsule({ value, labels, onChange, height = 56, glass = false, fontSize }) {
+/** Смещение и время перехода между вкладками дока. */
+const TAB_SHIFT = 28;
+const TAB_IN = { duration: 260, easing: Easing.out(Easing.cubic) };
+const TAB_OUT = { duration: 200, easing: Easing.out(Easing.quad) };
+const TAB_FADE = { duration: 180, easing: Easing.inOut(Easing.quad) };
+
+/**
+ * Вкладка: всегда смонтирована и разложена (без display:none — иначе при показе
+ * Yoga заново раскладывает всё дерево вкладки в кадре переключения, это и был «лаг»).
+ * Видимость/сдвиг — только shared values на UI-потоке.
+ */
+const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
+  const st = useAnimatedStyle(() => {
+    const v = vis.value;
+    return {
+      opacity: v,
+      transform: reduce ? [] : [{ translateX: x.value }, { scale: 0.985 + 0.015 * v }],
+    };
+  });
+  return (
+    <Animated.View
+      style={[StyleSheet.absoluteFill, st]}
+      pointerEvents={active ? 'auto' : 'none'}
+      accessibilityElementsHidden={!active}
+      importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
+    >
+      {children}
+    </Animated.View>
+  );
+});
+
+function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
   const n = labels.length;
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
@@ -808,6 +839,8 @@ function SegmentCapsule({ value, labels, onChange, height = 56, glass = false, f
       pos.value = withSpring(p, capSpring);
       if (p !== target.value) {
         target.value = p;
+        // контент вкладок стартует в этом же кадре UI-потока, JS — следом
+        if (onPickUI) onPickUI(p);
         scheduleOnRN(commit, p);
       }
     };
@@ -845,7 +878,7 @@ function SegmentCapsule({ value, labels, onChange, height = 56, glass = false, f
         press.value = withTiming(0, { duration: 160 });
       });
     return Gesture.Race(pan, tap);
-  }, [n, pos, target, drag0, press, segW, commit]);
+  }, [n, pos, target, drag0, press, segW, commit, onPickUI]);
 
   const ind = useAnimatedStyle(() => ({
     width: segW.value,
@@ -1645,15 +1678,59 @@ export default function App() {
   const [mounted, setMounted] = useState({ 0: true });
   const mountedRef = useRef(mounted);
   mountedRef.current = mounted;
+  // Переход вкладок: у каждой своя видимость и сдвиг (shared values). Новая
+  // въезжает с той стороны, куда идём, старая уезжает в другую; повторные тапы
+  // просто перенацеливают анимации с текущих значений — без рывков и «застреваний».
+  const reduceMotion = useReducedMotion();
+  const tv0 = useSharedValue(1);
+  const tv1 = useSharedValue(0);
+  const tv2 = useSharedValue(0);
+  const tx0 = useSharedValue(0);
+  const tx1 = useSharedValue(0);
+  const tx2 = useSharedValue(0);
+  const tabCur = useSharedValue(0);
+  const tabAnim = useMemo(() => {
+    const vis = [tv0, tv1, tv2];
+    const xs = [tx0, tx1, tx2];
+    const shift = reduceMotion ? 0 : TAB_SHIFT;
+    return (k) => {
+      'worklet';
+      const from = tabCur.value;
+      if (k === from) return;
+      const dir = k > from ? 1 : -1;
+      tabCur.value = k;
+      for (let i = 0; i < 3; i++) {
+        if (i === k) {
+          if (vis[i].value < 0.05) xs[i].value = dir * shift;
+          vis[i].value = withTiming(1, reduceMotion ? TAB_FADE : TAB_IN);
+          xs[i].value = withTiming(0, TAB_IN);
+        } else if (vis[i].value > 0) {
+          vis[i].value = withTiming(0, reduceMotion ? TAB_FADE : TAB_OUT);
+          xs[i].value = withTiming(-dir * shift, TAB_OUT);
+        }
+      }
+    };
+  }, [reduceMotion, tv0, tv1, tv2, tx0, tx1, tx2, tabCur]);
+  const tabSV = useMemo(
+    () => [
+      [tv0, tx0],
+      [tv1, tx1],
+      [tv2, tx2],
+    ],
+    [tv0, tv1, tv2, tx0, tx1, tx2]
+  );
+
   const onDock = useCallback((i) => {
+    // анимация уже идёт (стартовала на UI-потоке из жеста дока); здесь — только состояние
     Keyboard.dismiss();
     setPage(i);
     if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => ({ ...m, [i]: true })), 280);
   }, []);
   const goPage = useCallback((i) => {
     setMounted((m) => (m[i] ? m : { ...m, [i]: true }));
+    scheduleOnUI(tabAnim, i); // переход не из дока (бейдж, «Открыть в Расчёте») — та же анимация
     setPage(i);
-  }, []);
+  }, [tabAnim]);
 
   // обработчики Расчёта, которые объявлены ниже guard'а — стабильные обёртки,
   // чтобы memo(CalcView) не перерисовывался от каждого рендера App
@@ -2943,8 +3020,9 @@ export default function App() {
           mainScrollTop.current = e.nativeEvent.layout.y;
         }}
       >
+        <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion}>
         <ScrollView
-          style={[styles.pages, page !== 0 && styles.hidden]}
+          style={styles.pages}
           contentContainerStyle={styles.pagesContent}
           showsVerticalScrollIndicator={false}
         >
@@ -3031,9 +3109,12 @@ export default function App() {
           </LayoutAnimationConfig>
         </ScrollView>
 
+        </TabPane>
+
         {mounted[1] && (
+          <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion}>
           <ScrollView
-            style={[styles.pages, page !== 1 && styles.hidden]}
+            style={styles.pages}
             contentContainerStyle={styles.pagesContent}
             showsVerticalScrollIndicator={false}
           >
@@ -3107,11 +3188,13 @@ export default function App() {
               </View>
             </LayoutAnimationConfig>
           </ScrollView>
+          </TabPane>
         )}
 
         {mounted[2] && (
+          <TabPane vis={tabSV[2][0]} x={tabSV[2][1]} active={page === 2} reduce={reduceMotion}>
           <ScrollView
-            style={[styles.pages, page !== 2 && styles.hidden]}
+            style={styles.pages}
             contentContainerStyle={styles.pagesContent}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
@@ -3151,13 +3234,14 @@ export default function App() {
               </View>
             </LayoutAnimationConfig>
           </ScrollView>
+          </TabPane>
         )}
       </View>
 
       {/* Dock */}
       <View style={styles.dock}>
         <View style={styles.capsuleWrap}>
-          <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} />
+          <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
           <Glass style={styles.gearInner} intensity={50}>
