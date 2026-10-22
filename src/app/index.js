@@ -62,10 +62,12 @@ import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
 import {
   carryInState,
+  defaultPayday,
   expensesInPeriod,
-  monthTotals,
-  monthView,
+  pagerRange,
+  paydayMode,
   paydayTotals,
+  shouldAutoAdvance,
   summaryView,
   toggledStatus,
   undoCarry,
@@ -106,6 +108,7 @@ import {
   periodsTouchingMonth,
   defaultState,
   seedMonth,
+  seedPaydays,
   paydayForDate,
   normalizeApp,
 } from '../lib/periods';
@@ -215,13 +218,6 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
 // Цветное стекло: GlassView/BlurView как у дока + плотная цветная заливка сестринским слоем
 // (не opacity родителя — она ломает стекло) + блик сверху и светлая кромка.
 // Один tintColor у GlassView в Expo Go почти не виден — поэтому заливка.
-const TINT_GREEN = 'rgba(36,150,66,0.9)'; // ✓ Оплачено
-const TINT_BLUE = 'rgba(30,110,190,0.9)'; // → Не плачу — тот самый синий из b5072bf
-const TINT_NEUTRAL = 'rgba(78,78,92,0.88)'; // ○ Без отметки
-const TINT_LABEL = 'rgba(24,24,30,0.82)';
-const TINT_GREEN_SOFT = 'rgba(48,209,88,0.24)'; // кнопка статуса без отметки
-const ARC_FILL = [TINT_GREEN, TINT_BLUE, TINT_NEUTRAL];
-
 function TintGlass({ style, fill, radius, interactive = false, children }) {
   return (
     <Glass style={[style, { borderRadius: radius }]} intensity={50} interactive={interactive}>
@@ -577,106 +573,72 @@ const ROW_LAYOUT = LinearTransition.duration(220);
 
 const STATUS_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
 
-// ── Веерное меню статуса ────────────────────────────────────────────────
-// Варианты: 0 ✓ Оплачено, 1 → Не плачу (перенести), 2 ○ Без отметки.
-const ARC_R = 110; // радиус веера от центра кнопки
-const ARC_OPT = 56; // диаметр кружка варианта
-// Симметричный веер: центр — направление 150° (вверх-влево от кнопки у правого края),
-// шаг 48° поровну: 102° / 150° / 198°. Для левого края/верха экрана зеркалится.
-const ARC_MID = 150;
-const ARC_STEP = 48;
-const ARC_ANG = [ARC_MID - ARC_STEP, ARC_MID, ARC_MID + ARC_STEP];
-const ARC_LBL_W = 104;
-const ARC_LBL_H = 32;
-const ARC_HIT = 52; // радиус захвата варианта пальцем
-const ARC_CANCEL = 30; // палец на самой кнопке — отмена
-const ARC_FLIP_Y = 290; // кнопка выше этого y — веер раскрывается вниз (иначе верх уходит за экран)
-const ARC_SPRING = { damping: 24, stiffness: 320, mass: 0.7, overshootClamping: true };
-const ARC_OPTS = [
-  { glyph: '✓', label: 'Оплачено', sub: null },
-  { glyph: '→', label: 'Не плачу', sub: 'перенести' },
-  { glyph: '', label: 'Без отметки', sub: null },
-];
+// ── Остров статуса ──────────────────────────────────────────────────────
+// Удержание кнопки статуса → над ней (или под ней у верха экрана) стеклянный остров,
+// как док: внутри по дуге ✓ / → / ○ и стеклянная плашка выбора, которая едет за пальцем.
+// Отпустили на варианте — выбран; отпустили, не доведя до варианта, — остров просто исчезает.
+const ISL_W = 236;
+const ISL_H = 84;
+const ISL_R = ISL_H / 2;
+const ISL_OPT = 54; // диаметр варианта
+const ISL_PILL = 66; // плашка выбора
+const ISL_X = [46, 118, 190]; // центры вариантов от левого края острова
+const ISL_BEND = [7, -7, 7]; // дуга: середина дальше от кнопки, края ближе
+const ISL_GAP = 16; // зазор между кнопкой и островом
+const ISL_FLIP_Y = 240; // кнопка выше — остров открывается вниз
+const ISL_BAND = 14; // насколько ниже/выше острова палец ещё «на острове»
+const ISL_SPRING = { damping: 26, stiffness: 340, mass: 0.7, overshootClamping: true };
+const ISL_FILL = ['#30d158', 'rgba(30,110,190,0.9)', 'rgba(58,58,66,0.95)']; // ✓ зелёный · → синий из b5072bf · ○ пусто
 
-function arcX(i, side) {
+/** Вариант под пальцем: −1 — ни один. lx/ly — от левого края / центра острова. */
+function islandHit(px, py, left, midY, dir, cx, cy) {
   'worklet';
-  return -side * Math.cos((ARC_ANG[i] * Math.PI) / 180) * ARC_R;
-}
-/**
- * Центр подписи относительно центра кружка: с внешней стороны веера —
- * над/под кружком, если луч в основном вертикальный, иначе сбоку (без наездов на кружки).
- */
-function arcLbl(i, dir, side) {
-  'worklet';
-  const a = (ARC_ANG[i] * Math.PI) / 180;
-  const ux = -side * Math.cos(a);
-  const uy = -dir * Math.sin(a);
-  if (Math.abs(uy) >= 0.6) return { x: 0, y: Math.sign(uy) * (ARC_OPT / 2 + 6 + ARC_LBL_H / 2) };
-  return { x: Math.sign(ux) * (ARC_OPT / 2 + 6 + ARC_LBL_W / 2), y: 0 };
-}
-function arcY(i, dir) {
-  'worklet';
-  return -dir * Math.sin((ARC_ANG[i] * Math.PI) / 180) * ARC_R;
-}
-/** Какой вариант под пальцем: −1 — ни один (или палец на кнопке). */
-function arcHit(px, py, cx, cy, dir, side) {
-  'worklet';
-  const dx = px - cx;
-  const dy = py - cy;
-  if (dx * dx + dy * dy < ARC_CANCEL * ARC_CANCEL) return -1;
-  let best = -1;
-  let bd = ARC_HIT * ARC_HIT;
-  for (let i = 0; i < 3; i++) {
-    const ox = dx - arcX(i, side);
-    const oy = dy - arcY(i, dir);
-    const d = ox * ox + oy * oy;
-    if (d < bd) {
-      bd = d;
-      best = i;
-    }
-  }
+  const bx = px - cx;
+  const by = py - cy;
+  if (bx * bx + by * by < 30 * 30) return -1; // палец на самой кнопке
+  const lx = px - left;
+  const ly = (py - midY) * dir; // >0 — в сторону кнопки
+  if (ly > ISL_H / 2 + ISL_BAND || ly < -(ISL_H / 2 + 40)) return -1;
+  if (lx < -24 || lx > ISL_W + 24) return -1;
+  let best = 0;
+  for (let i = 1; i < 3; i++) if (Math.abs(lx - ISL_X[i]) < Math.abs(lx - ISL_X[best])) best = i;
   return best;
 }
 
 /**
- * Общие shared values меню (создаются один раз в App). Кнопки пишут в них прямо из
- * жестов на UI-потоке, оверлей <ArcMenu> читает — список при этом не перерисовывается.
+ * Общие shared values острова (создаются один раз в App). Кнопки пишут в них из жестов
+ * на UI-потоке, оверлей <IslandMenu> читает — список при этом не перерисовывается.
  */
 function useArcCtl(onPick) {
   const open = useSharedValue(0);
   const cx = useSharedValue(0);
   const cy = useSharedValue(0);
-  const dir = useSharedValue(1); // 1 — вверх, −1 — вниз
-  const side = useSharedValue(-1); // −1 — влево, 1 — вправо
+  const left = useSharedValue(0); // левый край острова (окно)
+  const midY = useSharedValue(0); // центр острова по вертикали (окно)
+  const dir = useSharedValue(1); // 1 — остров над кнопкой, −1 — под ней
   const hover = useSharedValue(-1);
   const cur = useSharedValue(-1); // текущий статус расхода (0 или 2)
+  const hold = useSharedValue(0); // палец держит кнопку с островом (сразу, без анимации) — пейджер не листает
   const pickRef = useRef(onPick);
   pickRef.current = onPick;
-  const stickyRef = useRef(null);
   return useMemo(
-    () => ({
-      open, cx, cy, dir, side, hover, cur,
-      pick: (id, i) => pickRef.current(id, i),
-      sticky: (id) => stickyRef.current?.(id),
-      stickyRef,
-    }),
+    () => ({ open, cx, cy, left, midY, dir, hover, cur, hold, pick: (id, i) => pickRef.current(id, i) }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
 }
 
 /**
- * Зелёная стеклянная кнопка статуса. Один жест-оркестр на UI-потоке:
+ * Кнопка статуса — как в самом первом варианте (e937f17): мягкий зелёный круг с кромкой,
+ * зелёное кольцо; оплачено — сплошной зелёный кружок с ✓.
  *  • тап — ✓/пусто;
- *  • удержание 400 мс — веер (Pan.activateAfterLongPress); не отпуская палец, ведите к варианту,
- *    отпустите — выбран; отпустили на кнопке не сдвигая палец — веер остаётся, можно тапнуть;
- *  • любой сдвиг пальца до 400 мс (скролл, свайп карточки) — жесты кнопки отваливаются.
+ *  • удержание 400 мс — остров; не отпуская, ведите к варианту и отпустите;
+ *  • любой сдвиг пальца до 400 мс (скролл, листание) — жесты кнопки отваливаются.
  */
 const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
   const paid = useSharedValue(status === 'paid' ? 1 : 0);
   const press = useSharedValue(0);
-  const moved = useSharedValue(0);
-  const { open, cx, cy, dir, side, hover, cur, pick, sticky } = arc;
+  const { open, cx, cy, left, midY, dir, hover, cur, hold, pick } = arc;
   const curIdx = status === 'paid' ? 0 : 2;
 
   useEffect(() => {
@@ -706,22 +668,21 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
         // центр кнопки в координатах окна (детектор = зона 52×52)
         const x0 = e.absoluteX - e.x + 26;
         const y0 = e.absoluteY - e.y + 26;
+        const d = y0 < ISL_FLIP_Y ? -1 : 1;
+        hold.value = 1;
         cx.value = x0;
         cy.value = y0;
-        dir.value = y0 < ARC_FLIP_Y ? -1 : 1;
-        side.value = x0 > SCREEN_W / 2 ? -1 : 1;
+        dir.value = d;
+        left.value = Math.min(Math.max(12, x0 - ISL_W / 2), SCREEN_W - 12 - ISL_W);
+        midY.value = y0 - d * (26 + ISL_GAP + ISL_H / 2);
         cur.value = curIdx;
         hover.value = -1;
-        moved.value = 0;
         press.value = withTiming(0, { duration: 160 });
-        open.value = withTiming(1, { duration: 170, easing: Easing.out(Easing.cubic) });
+        open.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
         scheduleOnRN(hapticMedium);
       })
       .onUpdate((e) => {
-        const dx = e.absoluteX - cx.value;
-        const dy = e.absoluteY - cy.value;
-        if (dx * dx + dy * dy > 144) moved.value = 1;
-        const h = arcHit(e.absoluteX, e.absoluteY, cx.value, cy.value, dir.value, side.value);
+        const h = islandHit(e.absoluteX, e.absoluteY, left.value, midY.value, dir.value, cx.value, cy.value);
         if (h !== hover.value) {
           hover.value = h;
           if (h >= 0) scheduleOnRN(hapticSelect);
@@ -729,25 +690,19 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
       })
       .onEnd(() => {
         const h = hover.value;
-        if (h >= 0) {
-          scheduleOnRN(pick, id, h);
-          open.value = withTiming(0, { duration: 150 });
-        } else if (!moved.value) {
-          scheduleOnRN(sticky, id); // подняли палец на кнопке — веер ждёт тапа
-        } else {
-          open.value = withTiming(0, { duration: 150 });
-        }
-        hover.value = -1;
+        if (h >= 0) scheduleOnRN(pick, id, h);
       })
-      .onFinalize((_e, ok) => {
-        if (!ok) press.value = withTiming(0, { duration: 160 });
+      .onFinalize(() => {
+        // отпустили (или жест отменён) — остров исчезает в любом случае
+        if (hold.value) open.value = withTiming(0, { duration: 150, easing: Easing.in(Easing.quad) });
+        hold.value = 0;
+        hover.value = -1;
       });
     return Gesture.Exclusive(hold, tap);
-  }, [press, toggle, open, cx, cy, dir, side, hover, cur, moved, pick, sticky, id, curIdx]);
+  }, [press, toggle, open, cx, cy, left, midY, dir, hover, cur, hold, pick, id, curIdx]);
 
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: 1 - 0.1 * press.value }] }));
   const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - paid.value }));
-  const paidFillStyle = useAnimatedStyle(() => ({ opacity: paid.value }));
   const paidStyle = useAnimatedStyle(() => ({
     opacity: paid.value,
     transform: [{ scale: 0.55 + 0.45 * paid.value }],
@@ -756,113 +711,105 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
   return (
     <GestureDetector gesture={gesture}>
       <View collapsable={false} style={styles.sBtnHit}>
-        {/* scale — на обёртке, само стекло не трансформируем и не делаем полупрозрачным */}
-        <Animated.View style={btnStyle}>
-          <TintGlass style={styles.sBtn} fill={TINT_GREEN_SOFT} radius={22}>
-            <Animated.View style={[StyleSheet.absoluteFill, styles.sPaidFill, paidFillStyle]} />
-            <Animated.View style={[styles.sRing, ringStyle]} />
-            <Animated.View style={[styles.sFill, paidStyle]}>
-              <Text style={styles.sGlyph}>✓</Text>
-            </Animated.View>
-          </TintGlass>
+        <Animated.View style={[styles.sBtn, btnStyle]}>
+          <View style={styles.sBtnEdge} pointerEvents="none" />
+          <Animated.View style={[styles.sRing, ringStyle]} />
+          <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
+            <Text style={styles.sGlyph}>✓</Text>
+          </Animated.View>
         </Animated.View>
       </View>
     </GestureDetector>
   );
 });
 
-function ArcOption({ i, arc }) {
-  const { open, cx, cy, dir, side, hover, cur } = arc;
+/** Вариант внутри острова: цветной круг; под пальцем чуть растёт. */
+function IslandOption({ i, arc }) {
+  const { hover, cur, dir } = arc;
   const h = useSharedValue(0);
   useAnimatedReaction(
     () => hover.value === i,
     (on, was) => {
-      if (on !== was) h.value = withSpring(on ? 1 : 0, ARC_SPRING);
+      if (on !== was) h.value = withSpring(on ? 1 : 0, ISL_SPRING);
     }
   );
-  // Стекло (GlassView/BlurView) ломается от полупрозрачности предков на iOS, поэтому
-  // появление — без плавной opacity: 0/1 ступенькой + вылет из центра кнопки и рост из 0.3.
-  const st = useAnimatedStyle(() => {
-    // все три выезжают в одном кадре; сдвиг по фазе ≤ ~10 мс на вариант
-    const p = Math.min(1, Math.max(0, (open.value - i * 0.06) / 0.88));
-    return {
-      opacity: p > 0.02 ? 1 : 0,
-      transform: [
-        { translateX: cx.value - ARC_OPT / 2 + arcX(i, side.value) * p },
-        { translateY: cy.value - ARC_OPT / 2 + arcY(i, dir.value) * p },
-        { scale: 0.3 + 0.7 * p },
-      ],
-    };
-  });
-  // увеличение под пальцем — отдельная обёртка над стеклом
-  const grow = useAnimatedStyle(() => ({ transform: [{ scale: 1 + 0.15 * h.value }] }));
+  const st = useAnimatedStyle(() => ({
+    transform: [{ translateY: ISL_BEND[i] * dir.value }, { scale: 1 + 0.14 * h.value }],
+  }));
   const ring = useAnimatedStyle(() => ({ opacity: cur.value === i ? 1 : 0 }));
-  const glow = useAnimatedStyle(() => ({ opacity: h.value }));
-  // подпись — с внешней стороны веера, чтобы не наезжать на соседние кружки
-  const lbl = useAnimatedStyle(() => {
-    const l = arcLbl(i, dir.value, side.value);
-    return { left: ARC_OPT / 2 + l.x - ARC_LBL_W / 2, top: ARC_OPT / 2 + l.y - ARC_LBL_H / 2 };
-  });
-  const o = ARC_OPTS[i];
   return (
-    <Animated.View style={[styles.arcOpt, st]} pointerEvents="none">
-      <Animated.View style={grow}>
-        <TintGlass style={styles.arcDot} fill={ARC_FILL[i]} radius={ARC_OPT / 2} interactive>
-          <Animated.View style={[StyleSheet.absoluteFill, styles.arcGlow, glow]} />
-          {i === 2 ? <View style={styles.arcEmpty} /> : <Text style={styles.arcGlyph}>{o.glyph}</Text>}
-          <Animated.View style={[StyleSheet.absoluteFill, styles.arcCur, ring]} />
-        </TintGlass>
-      </Animated.View>
-      <Animated.View style={[styles.arcLblPos, lbl]}>
-        <TintGlass style={styles.arcLblWrap} fill={TINT_LABEL} radius={12}>
-          <Text style={styles.arcLbl} numberOfLines={1}>{o.label}</Text>
-          {o.sub ? <Text style={styles.arcSub} numberOfLines={1}>{o.sub}</Text> : null}
-        </TintGlass>
-      </Animated.View>
+    <Animated.View style={[styles.islOpt, { left: ISL_X[i] - ISL_OPT / 2 }, st]}>
+      <View style={[styles.islDot, { backgroundColor: ISL_FILL[i] }]}>
+        <View style={styles.islDotShine} />
+        {i === 2 ? <View style={styles.islEmpty} /> : <Text style={styles.islGlyph}>{i === 0 ? '✓' : '→'}</Text>}
+      </View>
+      <Animated.View style={[styles.islCur, ring]} />
     </Animated.View>
   );
 }
 
-/** Оверлей веера поверх всего. Сам по себе не ловит касания, пока не «залип» (палец подняли на кнопке). */
-const ArcMenu = memo(function ArcMenu({ arc }) {
-  const [stickyId, setStickyId] = useState(null);
-  const { open, cx, cy, dir, side, pick } = arc;
-  useEffect(() => {
-    arc.stickyRef.current = setStickyId;
-    return () => {
-      arc.stickyRef.current = null;
-    };
-  }, [arc]);
-  const tapPick = useCallback(
-    (i) => {
-      const id = stickyId;
-      setStickyId(null);
-      if (i >= 0 && id) pick(id, i);
-    },
-    [stickyId, pick]
-  );
-  const tap = useMemo(
-    () =>
-      Gesture.Tap()
-        .maxDistance(16)
-        .onEnd((e) => {
-          const i = arcHit(e.absoluteX, e.absoluteY, cx.value, cy.value, dir.value, side.value);
-          open.value = withTiming(0, { duration: 150 });
-          scheduleOnRN(tapPick, i);
-        }),
-    [cx, cy, dir, side, open, tapPick]
+/** Оверлей острова поверх всего; касаний не ловит — палец всё время у жеста кнопки. */
+const IslandMenu = memo(function IslandMenu({ arc }) {
+  const { open, left, midY, dir, hover } = arc;
+  const sel = useSharedValue(0);
+  const selOn = useSharedValue(0);
+  useAnimatedReaction(
+    () => hover.value,
+    (h, was) => {
+      if (h === was) return;
+      if (h >= 0) {
+        // первая цель — плашка появляется на месте, дальше едет как плашка дока
+        if (selOn.value < 0.05) sel.value = h;
+        else sel.value = withSpring(h, ISL_SPRING);
+        selOn.value = withTiming(1, { duration: 120 });
+      } else {
+        selOn.value = withTiming(0, { duration: 120 });
+      }
+    }
   );
   const back = useAnimatedStyle(() => ({ opacity: open.value }));
+  // стекло не делаем полупрозрачным: видимость ступенькой, появление — рост из кнопки
+  const box = useAnimatedStyle(() => {
+    const o = open.value;
+    return {
+      opacity: o > 0.02 ? 1 : 0,
+      transform: [
+        { translateX: left.value },
+        { translateY: midY.value - ISL_H / 2 + dir.value * 26 * (1 - o) },
+        { scale: 0.55 + 0.45 * o },
+      ],
+    };
+  });
+  const pill = useAnimatedStyle(() => {
+    // позиция плашки — интерполяция по центрам вариантов (с дугой)
+    const s = sel.value;
+    const k = Math.min(1, Math.max(0, s - Math.floor(s)));
+    const a = Math.min(2, Math.floor(s));
+    const b = Math.min(2, a + 1);
+    const x = ISL_X[a] + (ISL_X[b] - ISL_X[a]) * k;
+    const y = (ISL_BEND[a] + (ISL_BEND[b] - ISL_BEND[a]) * k) * dir.value;
+    return {
+      opacity: selOn.value,
+      transform: [
+        { translateX: x - ISL_PILL / 2 },
+        { translateY: ISL_H / 2 - ISL_PILL / 2 + y },
+        { scale: 0.85 + 0.15 * selOn.value },
+      ],
+    };
+  });
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents={stickyId ? 'auto' : 'none'}>
-      <GestureDetector gesture={tap}>
-        <View style={StyleSheet.absoluteFill}>
-          <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, back]} />
-          <ArcOption i={0} arc={arc} />
-          <ArcOption i={1} arc={arc} />
-          <ArcOption i={2} arc={arc} />
-        </View>
-      </GestureDetector>
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, back]} />
+      <Animated.View style={[styles.islBox, box]}>
+        <TintGlass style={styles.island} fill="rgba(30,30,38,0.62)" radius={ISL_R} interactive>
+          <Animated.View style={[styles.islPill, pill]}>
+            <View style={styles.segIndEdge} />
+          </Animated.View>
+          <IslandOption i={0} arc={arc} />
+          <IslandOption i={1} arc={arc} />
+          <IslandOption i={2} arc={arc} />
+        </TintGlass>
+      </Animated.View>
     </View>
   );
 });
@@ -908,60 +855,41 @@ const CARD_EXIT = () => {
   };
 };
 
-/** Отдельная стеклянная карточка расхода. Свайп вправо — изменить, влево — удалить, тап — изменить. */
-const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle, arc }) {
-  const x = useSharedValue(0);
+/**
+ * Отдельная стеклянная карточка расхода. Горизонтальный свайп отдан листанию зарплат,
+ * поэтому: тап по карточке — изменить (там же «Удалить расход»), кнопка — статус.
+ */
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
   const st = displayStatus(item);
   const id = item.id;
-  const pan = useRowSwipe(x, id, onEdit, onDelete);
-  const rowStyle = useAnimatedStyle(() => ({ transform: [{ translateX: x.value }] }));
-  const leftStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(x.value, [0, SWIPE * 0.4], [0, 1], Extrapolation.CLAMP),
-  }));
-  const rightStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(x.value, [-SWIPE * 0.4, 0], [1, 0], Extrapolation.CLAMP),
-  }));
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
-
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
-      <View style={styles.eCardWrap}>
-        <Animated.View style={[styles.revealLeft, leftStyle]}>
-          <Text style={styles.revealTxt}>Изменить</Text>
-        </Animated.View>
-        <Animated.View style={[styles.revealRight, rightStyle]}>
-          <Text style={styles.revealTxt}>Удалить</Text>
-        </Animated.View>
-        <GestureDetector gesture={pan}>
-          <Animated.View style={rowStyle}>
-            <Glass style={styles.eCard} intensity={34}>
-              <Pressable style={styles.itemPress} onPress={edit}>
-                <View style={styles.whenCol}>
-                  <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
-                  <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
-                </View>
-                <View style={styles.mid}>
-                  <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
-                    {item.title || 'Без названия'}
-                  </Text>
-                  <Text style={styles.meta} numberOfLines={1}>
-                    {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
-                    {st === 'paid' ? <Text style={styles.good}> · оплачено</Text> : null}
-                  </Text>
-                  {item.movedFrom ? (
-                    <Text style={styles.metaMoved} numberOfLines={1}>
-                      ↪ перенесено с {fmtShort(item.movedFrom)}
-                      {item.moves > 1 ? ` · ${item.moves}×` : ''}
-                    </Text>
-                  ) : null}
-                </View>
-                <Text style={[styles.amt, st === 'paid' && styles.amtPaid]}>{money(item.amount)}</Text>
-              </Pressable>
-              <StatusButton id={id} status={st === 'paid' ? 'paid' : null} onToggle={onToggle} arc={arc} />
-            </Glass>
-          </Animated.View>
-        </GestureDetector>
-      </View>
+      <Glass style={styles.eCard} intensity={34}>
+        <Pressable style={({ pressed }) => [styles.itemPress, pressed && styles.rowPressed]} onPress={edit}>
+          <View style={styles.whenCol}>
+            <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
+            <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
+          </View>
+          <View style={styles.mid}>
+            <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
+              {item.title || 'Без названия'}
+            </Text>
+            <Text style={styles.meta} numberOfLines={1}>
+              {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
+              {st === 'paid' ? <Text style={styles.good}> · оплачено</Text> : null}
+            </Text>
+            {item.movedFrom ? (
+              <Text style={styles.metaMoved} numberOfLines={1}>
+                ↪ перенесено с {fmtShort(item.movedFrom)}
+                {item.moves > 1 ? ` · ${item.moves}×` : ''}
+              </Text>
+            ) : null}
+          </View>
+          <Text style={[styles.amt, st === 'paid' && styles.amtPaid]}>{money(item.amount)}</Text>
+        </Pressable>
+        <StatusButton id={id} status={st === 'paid' ? 'paid' : null} onToggle={onToggle} arc={arc} />
+      </Glass>
     </Animated.View>
   );
 });
@@ -1853,6 +1781,199 @@ const CalcView = memo(function CalcView({
   );
 });
 
+// ── Расходы: зарплаты-«папки», листание вбок ────────────────────────────
+// pos — дробный индекс в PAYDAYS (UI-поток). Страница k стоит в (k − pos)·ширина и чуть
+// уменьшается у края — как смена трека в Apple Music. Смонтированы только pi−1, pi, pi+1.
+const PAGE_W = SCREEN_W;
+const PAGE_GAP = 14;
+const PAGE_SPRING = { damping: 34, stiffness: 300, mass: 0.9, overshootClamping: true };
+const AUTO_NEXT_MS = 900;
+
+/** Большая карточка зарплаты — часть страницы, уезжает и приезжает вместе с ней. */
+const PayCard = memo(function PayCard({ payday, t, accent, par }) {
+  const sv = summaryView(t);
+  const nextP = PAYDAYS[PAYDAYS.indexOf(payday) + 1] || addDays(payday, 14);
+  return (
+    <Glass style={styles.balance} intensity={42}>
+      <Animated.View style={par}>
+        <Text style={styles.period} numberOfLines={1}>
+          К зарплате {fmtShort(payday)}
+        </Text>
+        <View style={styles.paySubRow}>
+          <Text style={styles.paySubL} numberOfLines={1}>
+            расходы {fmtRange(payday, addDays(nextP, -1))}
+          </Text>
+          <View style={[styles.tag, sv.tagTone === 'good' ? styles.tagGood : styles.tagBad]}>
+            <Text style={[styles.tagTxt, sv.tagTone === 'good' ? styles.good : styles.bad]} numberOfLines={1}>
+              {sv.tag}
+            </Text>
+          </View>
+        </View>
+        {/* Без adjustsFontSizeToFit (Fabric кэширует замер); key — свежий узел на каждую смену. */}
+        <Text
+          key={sv.big}
+          style={[styles.bigPay, sv.mode === 'done' && styles.bigPayWord, { color: sv.bigTone === 'bad' ? '#ff453a' : '#30d158' }]}
+          numberOfLines={1}
+        >
+          {sv.big}
+        </Text>
+      </Animated.View>
+      <Meter value={sv.progress} color={accent} />
+      <View style={styles.statRow}>
+        <Stat k="Расходы за зарплату" v={sv.total} />
+        <Stat k="Оплачено" v={sv.paid} tone="good" />
+      </View>
+      {sv.earned ? <Text style={styles.calcMeta}>заработано за смены · {sv.earned}</Text> : null}
+    </Glass>
+  );
+});
+
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, accent, onEdit, onToggle, arc }) {
+  const st = useAnimatedStyle(() => {
+    const d = k - pos.value;
+    const a = Math.min(1, Math.abs(d));
+    return {
+      transform: [{ translateX: d * (PAGE_W + PAGE_GAP) }, { scale: 1 - 0.07 * a }],
+    };
+  });
+  // лёгкий параллакс заголовка и суммы внутри карточки
+  const par = useAnimatedStyle(() => ({ transform: [{ translateX: (k - pos.value) * 40 }] }));
+  const t = useMemo(() => paydayTotals(list, earned), [list, earned]);
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, st]}>
+      <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
+        <LayoutAnimationConfig skipEntering skipExiting>
+          <View>
+            <PayCard payday={payday} t={t} accent={accent} par={par} />
+            {list.length === 0 ? (
+              <ItemCard>
+                <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
+              </ItemCard>
+            ) : (
+              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} arc={arc} />)
+            )}
+            <Text style={[styles.hint, styles.pageHint]}>
+              Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
+              ✓ / → перенести / ○.
+            </Text>
+          </View>
+        </LayoutAnimationConfig>
+      </ScrollView>
+    </Animated.View>
+  );
+});
+
+/** Пейджер: свой жест с ручной активацией — вбок только явным горизонтальным движением. */
+const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, onEdit, onToggle, arc, onPage }) {
+  const sx = useSharedValue(0);
+  const sy = useSharedValue(0);
+  const drag0 = useSharedValue(0);
+  const gesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .manualActivation(true)
+        .onTouchesDown((e) => {
+          const t = e.allTouches[0];
+          sx.value = t.absoluteX;
+          sy.value = t.absoluteY;
+        })
+        .onTouchesMove((e, mgr) => {
+          if (arc.hold.value || arc.open.value > 0) return mgr.fail(); // остров статуса открыт — не листаем
+          const t = e.allTouches[0];
+          const dx = t.absoluteX - sx.value;
+          const dy = t.absoluteY - sy.value;
+          if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) mgr.fail();
+          else if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.3) mgr.activate();
+        })
+        .onStart(() => {
+          drag0.value = pos.value; // перехват на лету — с текущего места, без рывка
+        })
+        .onUpdate((e) => {
+          const c = cur.value;
+          const a = Math.max(lo.value, c - 1);
+          const b = Math.min(hi.value, c + 1);
+          let p = drag0.value - e.translationX / PAGE_W;
+          // за краями — резинка
+          if (p < a) p = a - (1 - Math.exp(-(a - p) * 2.2)) * 0.18;
+          if (p > b) p = b + (1 - Math.exp(-(p - b) * 2.2)) * 0.18;
+          pos.value = p;
+        })
+        .onEnd((e) => {
+          const c = cur.value;
+          const a = Math.max(lo.value, c - 1);
+          const b = Math.min(hi.value, c + 1);
+          const proj = pos.value - (e.velocityX / PAGE_W) * 0.22;
+          const target = Math.max(a, Math.min(b, Math.round(proj)));
+          pos.value = withSpring(target, { ...PAGE_SPRING, velocity: -e.velocityX / PAGE_W });
+          if (target !== c) {
+            cur.value = target;
+            scheduleOnRN(onPage, target);
+          }
+        }),
+    [sx, sy, drag0, pos, cur, lo, hi, arc, onPage]
+  );
+  return (
+    <GestureDetector gesture={gesture}>
+      <View style={styles.pager} collapsable={false}>
+        {pages.map((pg) => (
+          <PayPage
+            key={pg.payday}
+            k={pg.k}
+            pos={pos}
+            payday={pg.payday}
+            list={pg.list}
+            earned={pg.earned}
+            accent={accent}
+            onEdit={onEdit}
+            onToggle={onToggle}
+            arc={arc}
+          />
+        ))}
+      </View>
+    </GestureDetector>
+  );
+});
+
+/** Месяц в центре шапки: меняется с перекрёстным проявлением при листании через месяцы. */
+function PayHeader({ payday }) {
+  if (!payday) return <View style={styles.hCenter} />;
+  const d = parse(payday);
+  const y = d.getFullYear();
+  const m = d.getMonth();
+  const inMonth = paydaysInMonth(y, m);
+  return (
+    <View style={styles.hCenter}>
+      <Animated.View
+        key={`${y}-${m}`}
+        entering={FadeIn.duration(220)}
+        exiting={FadeOut.duration(160)}
+        style={styles.hCenterIn}
+      >
+        <Text style={styles.eyebrow} numberOfLines={1}>
+          Расходы · {y}
+        </Text>
+        <Text style={styles.h1C} numberOfLines={1}>
+          {MONTHS[m]}
+        </Text>
+        <View style={styles.hDots}>
+          {inMonth.map((p) => (
+            <View key={p} style={[styles.hDot, p === payday && styles.hDotOn]} />
+          ))}
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
+/** Дата нового расхода: сегодня, если сегодня в показанной зарплате, иначе день самой зарплаты. */
+function newExpenseDate(k) {
+  const today = todayIso();
+  const p = k != null ? PAYDAYS[k] : null;
+  if (!p) return today;
+  const nextP = PAYDAYS[k + 1] || addDays(p, 14);
+  return today >= p && today < nextP ? today : p;
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState(0);
@@ -1862,6 +1983,14 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
   const [toast, setToast] = useState(null); // { k, text, undo }
+  // Расходы: показанная зарплата (индекс в PAYDAYS) + shared values пейджера
+  const [pi, setPi] = useState(null);
+  const pagePos = useSharedValue(0);
+  const pageCur = useSharedValue(0);
+  const pageLo = useSharedValue(0);
+  const pageHi = useSharedValue(PAYDAYS.length - 1);
+  const piRef = useRef(null);
+  piRef.current = pi;
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
@@ -2060,8 +2189,17 @@ export default function App() {
       } catch {
         loaded = defaultState();
       }
-      // досеиваем стартовый месяц до первого рендера списка
-      const seeded = seedMonth(loaded, INIT_Y, INIT_M);
+      // досеиваем стартовый месяц и месяцы вокруг сегодняшней зарплаты до первого рендера
+      const today = todayIso();
+      const ti = Math.max(0, PAYDAYS.indexOf(paydayOnOrBefore(today)));
+      let seeded = seedMonth(loaded, INIT_Y, INIT_M);
+      seeded = seedPaydays(seeded, PAYDAYS.slice(Math.max(0, ti - 3), ti + 4));
+      // по умолчанию — ближайшая зарплата с неотмеченными (или текущая/следующая)
+      const { lo: lo0 } = pagerRange(seeded.expenses, ANCHOR);
+      const p0 = Math.max(lo0, PAYDAYS.indexOf(defaultPayday(seeded.expenses, today)));
+      seeded = seedPaydays(seeded, PAYDAYS.slice(Math.max(0, p0 - 1), p0 + 2));
+      pagePos.value = p0;
+      pageCur.value = p0;
       let calcLoaded;
       try {
         const rawC = await AsyncStorage.getItem(CALC_KEY);
@@ -2073,8 +2211,10 @@ export default function App() {
       const linked = syncCalcShifts(seeded, calcLoaded, paydayForDate, uid);
       if (linked !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
       setCalc(calcLoaded);
+      setPi(p0);
       setState(linked);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const patch = useCallback((fn) => {
@@ -2087,6 +2227,65 @@ export default function App() {
 
   const stateRef = useRef(null);
   stateRef.current = state;
+
+  // ── Пейджер зарплат
+  const range = useMemo(() => (state ? pagerRange(state.expenses, ANCHOR) : null), [state?.expenses]);
+  useEffect(() => {
+    if (!range) return;
+    pageLo.value = range.lo;
+    pageHi.value = range.hi;
+  }, [range, pageLo, pageHi]);
+  /** Страница уже выбрана (жестом — анимация идёт на UI); досеять соседей и обновить состояние. */
+  const onPage = useCallback(
+    (k) => {
+      Haptics.selectionAsync();
+      patch((p) => seedPaydays(p, PAYDAYS.slice(Math.max(0, k - 1), k + 2)));
+      setPi(k);
+    },
+    [patch]
+  );
+  /** Перейти программно (автопереход) — та же пружина, что и у жеста. */
+  const goPayIdx = useCallback(
+    (k) => {
+      pageCur.value = k;
+      pagePos.value = withSpring(k, PAGE_SPRING);
+      onPage(k);
+    },
+    [onPage, pageCur, pagePos]
+  );
+  const shownPay = pi != null ? PAYDAYS[pi] : null;
+  const pages = useMemo(() => {
+    if (!state || pi == null) return [];
+    const out = [];
+    for (let k = pi - 1; k <= pi + 1; k++) {
+      if (k < (range?.lo ?? 0) || k > (range?.hi ?? PAYDAYS.length - 1)) continue;
+      const p = PAYDAYS[k];
+      const per = workPeriod(p);
+      const earned = state.shifts
+        .filter((x) => x.date >= per.start && x.date <= per.end)
+        .reduce((a, x) => a + (Number(x.amount) || 0), 0);
+      out.push({ k, payday: p, list: expensesInPeriod(state.expenses, p), earned });
+    }
+    return out;
+  }, [state?.expenses, state?.shifts, pi, range]);
+  // Автопереход: отметили последний расход показанной зарплаты → через ~0.9 с следующая.
+  // Снятие ✓ в паузе / листание отменяют таймер (смена зависимостей → cleanup).
+  const shownMode = useMemo(
+    () => (state && shownPay ? paydayMode(state.expenses, shownPay) : null),
+    [state?.expenses, shownPay]
+  );
+  const lastShown = useRef(null);
+  useEffect(() => {
+    const prev = lastShown.current;
+    const next = { payday: shownPay, mode: shownMode };
+    lastShown.current = next;
+    if (!shouldAutoAdvance(prev, next) || pi == null || !range || pi >= range.hi) return;
+    const t = setTimeout(() => {
+      if (piRef.current === pi) goPayIdx(pi + 1);
+    }, AUTO_NEXT_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownPay, shownMode]);
   const formRefs = useRef({});
 
   // ── Расчёт → Смены: связанная смена обновляется сама (с задержкой, пока вводят)
@@ -2165,7 +2364,7 @@ export default function App() {
     const st = stateRef.current;
     const e = id
       ? st.expenses.find((x) => x.id === id)
-      : { date: todayIso(), amount: '', title: '', type: 'unexpected' };
+      : { date: newExpenseDate(piRef.current), amount: '', title: '', type: 'unexpected' };
     if (!e) return;
     setEditId(id || null);
     setForm({
@@ -2428,13 +2627,6 @@ export default function App() {
     }
   };
 
-  const pays = paydaysInMonth(viewY, viewM);
-  const focus = pays.find((p) => p >= todayIso()) || pays[pays.length - 1];
-  // Большая цифра: «Не оплачено −X», X — сумма неотмеченных расходов этой зарплаты.
-  const ft = paydayTotals(focus ? expensesForPayday(focus) : [], focus ? earnedForPayday(focus) : 0);
-  const sv = summaryView(ft);
-  // итоги месяца — те же правила, сумма по зарплатам месяца (как группы ниже)
-  const mv = monthView(monthTotals(state.expenses, pays));
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
   const rec = paid.filter((e) => e.type === 'recurring');
@@ -3249,32 +3441,39 @@ export default function App() {
       )}
 
       <View style={styles.header}>
-        <View style={styles.monthWrap}>
-          <ScaleButton
-            style={styles.navHit}
-            onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, -1)) : goMonth(-1))}
-          >
-            <Glass style={styles.navGlass} intensity={40}>
-              <Text style={styles.navTxt}>‹</Text>
-            </Glass>
-          </ScaleButton>
-          <View style={styles.monthBlock}>
-            <Text style={styles.eyebrow} numberOfLines={1}>
-              {DOCK_LABELS[page]} · {page === 2 ? DOW_FULL[parse(calcDate).getDay()] : viewY}
-            </Text>
-            <Text style={styles.h1} numberOfLines={1} adjustsFontSizeToFit>
-              {page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}
-            </Text>
+        {page === 0 ? (
+          <>
+            <View style={styles.hSide} />
+            <PayHeader payday={shownPay} />
+          </>
+        ) : (
+          <View style={styles.monthWrap}>
+            <ScaleButton
+              style={styles.navHit}
+              onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, -1)) : goMonth(-1))}
+            >
+              <Glass style={styles.navGlass} intensity={40}>
+                <Text style={styles.navTxt}>‹</Text>
+              </Glass>
+            </ScaleButton>
+            <View style={styles.monthBlock}>
+              <Text style={styles.eyebrow} numberOfLines={1}>
+                {DOCK_LABELS[page]} · {page === 2 ? DOW_FULL[parse(calcDate).getDay()] : viewY}
+              </Text>
+              <Text style={styles.h1} numberOfLines={1} adjustsFontSizeToFit>
+                {page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}
+              </Text>
+            </View>
+            <ScaleButton
+              style={styles.navHit}
+              onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, 1)) : goMonth(1))}
+            >
+              <Glass style={styles.navGlass} intensity={40}>
+                <Text style={styles.navTxt}>›</Text>
+              </Glass>
+            </ScaleButton>
           </View>
-          <ScaleButton
-            style={styles.navHit}
-            onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, 1)) : goMonth(1))}
-          >
-            <Glass style={styles.navGlass} intensity={40}>
-              <Text style={styles.navTxt}>›</Text>
-            </Glass>
-          </ScaleButton>
-        </View>
+        )}
         <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={() => setSheet('add')}>
           <Text style={[styles.plus, { color: '#102012' }]}>+</Text>
         </ScaleButton>
@@ -3290,109 +3489,19 @@ export default function App() {
         }}
       >
         <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion}>
-        <ScrollView
-          style={styles.pages}
-          contentContainerStyle={styles.pagesContent}
-          showsVerticalScrollIndicator={false}
-        >
-          <LayoutAnimationConfig key={`e-${viewY}-${viewM}`} skipEntering skipExiting>
-            <View>
-              {pays.length > 0 && (
-                <Glass style={styles.monthBar} intensity={40}>
-                  <View style={styles.monthBarRow}>
-                    <Text style={styles.monthBarK}>За {MONTHS[viewM].toLowerCase()}</Text>
-                    <Text
-                      key={mv.rest}
-                      style={[styles.monthBarRest, mv.restTone === 'bad' ? styles.bad : styles.good]}
-                      numberOfLines={1}
-                    >
-                      {mv.rest}
-                    </Text>
-                  </View>
-                  <Text style={styles.monthBarLine} numberOfLines={1}>
-                    всего {mv.total} · оплачено {mv.paid}
-                  </Text>
-                </Glass>
-              )}
-              {focus && (
-                <Glass style={styles.balance} intensity={42}>
-                  <View style={styles.cardHead}>
-                    <Text style={styles.period}>К зарплате {fmtShort(focus)}</Text>
-                    <View style={[styles.tag, sv.tagTone === 'good' ? styles.tagGood : styles.tagBad]}>
-                      <Text style={[styles.tagTxt, sv.tagTone === 'good' ? styles.good : styles.bad]}>{sv.tag}</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.paySub}>
-                    {sv.mode === 'due' ? 'Не оплачено' : sv.mode === 'done' ? 'Все расходы этой зарплаты' : 'Расходов к этой зарплате нет'}
-                  </Text>
-                  {/* Без adjustsFontSizeToFit: на Fabric/iOS он кэширует замер текста, и после
-                      «Всё оплачено» красное «−X» не возвращалось. key — свежий узел на каждую смену. */}
-                  <Text
-                    key={sv.big}
-                    style={[
-                      styles.bigPay,
-                      sv.mode === 'done' && styles.bigPayWord,
-                      { color: sv.bigTone === 'bad' ? '#ff453a' : '#30d158' },
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {sv.big}
-                  </Text>
-                  <Meter value={sv.progress} color={accent} />
-                  <View style={styles.statRow}>
-                    <Stat k="Расходы за зарплату" v={sv.total} />
-                    <Stat k="Оплачено" v={sv.paid} tone="good" />
-                  </View>
-                  {sv.earned ? <Text style={styles.calcMeta}>заработано за смены · {sv.earned}</Text> : null}
-                </Glass>
-              )}
-              {pays.map((p, i) => {
-                const list = expensesForPayday(p);
-                const gt = paydayTotals(list);
-                return (
-                  <Animated.View key={p} style={styles.group} layout={ROW_LAYOUT}>
-                    <View style={styles.gHead}>
-                      <Text style={styles.gTitle}>
-                        {ORDINALS[i] || `${i + 1}-я`} зарплата · {fmtShort(p)}
-                      </Text>
-                      <Text style={styles.gSub}>
-                        {money(gt.paid)} из {money(gt.total)}
-                      </Text>
-                    </View>
-                    {list.length === 0 ? (
-                      <ItemCard>
-                        <Text style={styles.empty}>Пока пусто — «+» вверху</Text>
-                      </ItemCard>
-                    ) : (
-                      list.map((e) => (
-                        <ExpenseCard
-                          key={e.id}
-                          item={e}
-                          onEdit={openExpense}
-                          onDelete={confirmDeleteExpense}
-                          onToggle={toggleStatus}
-                          arc={arc}
-                        />
-                      ))
-                    )}
-                    <Animated.View style={styles.eFoot} layout={ROW_LAYOUT}>
-                      <Text style={styles.footL}>
-                        Итого
-                      </Text>
-                      <Text style={styles.footV}>{money(gt.total)}</Text>
-                    </Animated.View>
-                  </Animated.View>
-                );
-              })}
-              <Text style={[styles.hint, styles.pageHint]}>
-                Свайп вправо — изменить, влево — удалить. Тап по зелёной кнопке — ✓ оплачено. Удерживайте
-                её и, не отпуская, ведите к варианту: ✓ оплачено, → не плачу (перенос на следующую
-                зарплату), ○ без отметки.
-              </Text>
-            </View>
-          </LayoutAnimationConfig>
-        </ScrollView>
-
+          <PayPager
+            pi={pi}
+            pos={pagePos}
+            cur={pageCur}
+            lo={pageLo}
+            hi={pageHi}
+            pages={pages}
+            accent={accent}
+            onEdit={openExpense}
+            onToggle={toggleStatus}
+            arc={arc}
+            onPage={onPage}
+          />
         </TabPane>
 
         {mounted[1] && (
@@ -3535,7 +3644,7 @@ export default function App() {
       </View>
 
       <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
-      <ArcMenu arc={arc} />
+      <IslandMenu arc={arc} />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
@@ -3570,7 +3679,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  monthWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8 },
+  monthWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8, height: 58 },
+  hSide: { width: 48, height: 48 },
+  hCenter: { flex: 1, height: 58, marginHorizontal: 8 },
+  hCenterIn: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
+  h1C: { color: '#fff', fontSize: 27, lineHeight: 32, fontWeight: '700', letterSpacing: -0.5 },
+  hDots: { flexDirection: 'row', gap: 5, marginTop: 4, height: 6 },
+  hDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(235,235,245,0.25)' },
+  hDotOn: { width: 16, backgroundColor: 'rgba(235,235,245,0.9)' },
+  pager: { flex: 1 },
   navHit: { width: 48, height: 48 },
   navTxt: { color: '#fff', fontSize: 28, fontWeight: '300', marginTop: -2 },
   monthBlock: { paddingHorizontal: 4, flexShrink: 1, minWidth: 0 },
@@ -3613,11 +3730,8 @@ const styles = StyleSheet.create({
 
   balance: { padding: 20, marginBottom: 16, borderRadius: 26 },
   period: { color: '#fff', fontSize: 22, fontWeight: '700', letterSpacing: -0.4 },
-  monthBar: { paddingHorizontal: 18, paddingVertical: 12, marginBottom: 12, borderRadius: 22 },
-  monthBarRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 },
-  monthBarK: { color: 'rgba(235,235,245,0.75)', fontSize: 15, fontWeight: '600' },
-  monthBarRest: { fontSize: 20, fontWeight: '800', letterSpacing: -0.4 },
-  monthBarLine: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
+  paySubRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 6 },
+  paySubL: { color: 'rgba(235,235,245,0.5)', fontSize: 14, fontWeight: '500', flexShrink: 1 },
   paySub: { color: 'rgba(235,235,245,0.5)', fontSize: 14, marginTop: 4, fontWeight: '500' },
   nums: { flexDirection: 'row', marginTop: 14, gap: 12 },
   k: {
@@ -3665,6 +3779,7 @@ const styles = StyleSheet.create({
   hidden: { display: 'none' },
   cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   tag: {
+    flexShrink: 0,
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
@@ -3732,15 +3847,27 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
+    borderWidth: 1,
+    backgroundColor: 'rgba(48,209,88,0.16)',
+    borderColor: 'rgba(48,209,88,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  sBtnEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 6,
+    right: 6,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.35)',
   },
   sRing: {
     width: 26,
     height: 26,
     borderRadius: 13,
     borderWidth: 2,
-    borderColor: 'rgba(76,217,100,0.95)',
+    borderColor: 'rgba(48,209,88,0.85)',
   },
   sFill: {
     position: 'absolute',
@@ -3750,7 +3877,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sPaidFill: { backgroundColor: 'rgba(36,170,74,0.95)' },
+  sFillPaid: { backgroundColor: '#30d158' },
   tgShine: {
     position: 'absolute',
     top: 0,
@@ -3763,29 +3890,54 @@ const styles = StyleSheet.create({
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
   menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
-  arcOpt: { position: 'absolute', left: 0, top: 0, width: ARC_OPT, height: ARC_OPT, alignItems: 'center' },
-  arcDot: {
-    width: ARC_OPT,
-    height: ARC_OPT,
-    borderRadius: ARC_OPT / 2,
+  islBox: { position: 'absolute', left: 0, top: 0, width: ISL_W, height: ISL_H },
+  island: {
+    width: ISL_W,
+    height: ISL_H,
+    borderRadius: ISL_R,
+  },
+  islPill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: ISL_PILL,
+    height: ISL_PILL,
+    borderRadius: ISL_PILL / 2,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  islOpt: { position: 'absolute', top: ISL_H / 2 - ISL_OPT / 2, width: ISL_OPT, height: ISL_OPT },
+  islDot: {
+    width: ISL_OPT,
+    height: ISL_OPT,
+    borderRadius: ISL_OPT / 2,
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
   },
-  arcGlow: { backgroundColor: 'rgba(255,255,255,0.16)', borderRadius: ARC_OPT / 2 },
-  arcCur: { borderRadius: ARC_OPT / 2, borderWidth: 2, borderColor: '#fff' },
-  arcGlyph: { color: '#fff', fontSize: 22, fontWeight: '800' },
-  arcEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.9)' },
-  arcLblPos: { position: 'absolute', width: ARC_LBL_W, height: ARC_LBL_H, alignItems: 'center', justifyContent: 'center' },
-  arcLblWrap: {
-    minWidth: 64,
-    height: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    borderRadius: 12,
+  islDotShine: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: '46%',
+    backgroundColor: 'rgba(255,255,255,0.14)',
   },
-  arcLbl: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  arcSub: { color: 'rgba(235,235,245,0.75)', fontSize: 10, fontWeight: '600' },
+  islGlyph: { color: '#fff', fontSize: 23, fontWeight: '800' },
+  islEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.92)' },
+  islCur: {
+    position: 'absolute',
+    left: -4,
+    top: -4,
+    width: ISL_OPT + 8,
+    height: ISL_OPT + 8,
+    borderRadius: (ISL_OPT + 8) / 2,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
   toastWrap: { position: 'absolute', left: 16, right: 16, bottom: 104, alignItems: 'center' },
   toast: {
     flexDirection: 'row',

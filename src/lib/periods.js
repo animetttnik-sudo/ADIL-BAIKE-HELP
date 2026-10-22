@@ -177,3 +177,19 @@ export function normalizeApp(raw) {
     removed: arr(raw.removed),
   };
 }
+
+/** Досеять месяцы, которые задевают периоды этих зарплат ([p, p+13]). Тот же объект, если ничего не добавилось. */
+export function seedPaydays(state, paydays) {
+  const seen = new Set();
+  let s = state;
+  for (const p of paydays || []) {
+    if (!p) continue;
+    for (const d of [p, addDays(p, 13)]) {
+      const k = d.slice(0, 7);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      s = seedMonth(s, Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1);
+    }
+  }
+  return s;
+}

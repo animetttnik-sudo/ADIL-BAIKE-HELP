@@ -134,3 +134,46 @@ export function monthView(m) {
     progress: m.total > 0 ? Math.min(1, m.paid / m.total) : 0,
   };
 }
+
+// ── Пейджер зарплат ─────────────────────────────────────────────────────
+
+/** Режим карточки зарплаты p ('due' | 'done' | 'empty') — те же правила, что у summaryView. */
+export function paydayMode(expenses, p) {
+  return summaryView(paydayTotals(expensesInPeriod(expenses, p))).mode;
+}
+
+/**
+ * Какую зарплату показать при запуске. cur — зарплата, в периоде которой сегодня.
+ * Ищем ближайшую к cur зарплату с неотмеченными расходами: cur, +1, −1, +2, −2, +3, −3
+ * (при равном расстоянии — сначала будущая). Не нашли: если у cur всё оплачено — следующая,
+ * иначе сама cur.
+ */
+export function defaultPayday(expenses, today, span = 3) {
+  const cur = paydayOf(today) || PAYDAYS[0];
+  const i = PAYDAYS.indexOf(cur);
+  for (let d = 0; d <= span; d++) {
+    for (const k of d === 0 ? [i] : [i + d, i - d]) {
+      const p = PAYDAYS[k];
+      if (p && paydayTotals(expensesInPeriod(expenses, p)).open > 0) return p;
+    }
+  }
+  if (paydayMode(expenses, cur) === 'done' && PAYDAYS[i + 1]) return PAYDAYS[i + 1];
+  return cur;
+}
+
+/**
+ * Автопереход на следующую зарплату: только когда на ТОЙ ЖЕ показанной зарплате
+ * режим сменился 'due' → 'done' (отметили последний расход), а не при листании.
+ * prev/next: { payday, mode }.
+ */
+export function shouldAutoAdvance(prev, next) {
+  return !!(prev && next && prev.payday && prev.payday === next.payday && prev.mode === 'due' && next.mode === 'done');
+}
+
+/** Границы листания: от первой зарплаты (ANCHOR или раньше, если есть более ранние расходы) до конца списка. */
+export function pagerRange(expenses, anchor) {
+  let first = anchor;
+  for (const e of expenses || []) if (e.date && e.date < first) first = e.date;
+  const lo = Math.max(0, PAYDAYS.indexOf(paydayOf(first) || PAYDAYS[0]));
+  return { lo, hi: PAYDAYS.length - 1 };
+}

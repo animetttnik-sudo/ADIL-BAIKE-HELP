@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   carryExpense, carryInState, expensesInPeriod, monthTotals, monthView, origDate, paydayOf, paydayTotals, summaryView,
-  toggledStatus, undoCarry,
+  toggledStatus, undoCarry, defaultPayday, shouldAutoAdvance, pagerRange, paydayMode,
 } from '../src/lib/totals.js';
-import { defaultState, seedMonth, PAYDAYS } from '../src/lib/periods.js';
+import { defaultState, seedMonth, seedPaydays, PAYDAYS, ANCHOR } from '../src/lib/periods.js';
 import { applyImport, previewImport } from '../src/lib/planImport.js';
 import { PLAN_BLOCKS, PLAN_ID } from '../src/lib/plan2026.js';
 
@@ -159,4 +159,79 @@ test('месяц = сумма его зарплат по тем же прави�
   app = { expenses: app.expenses.map((e) => ({ ...e, status: 'paid' })) };
   mv = monthView(monthTotals(app.expenses, oct));
   assert.deepEqual([mv.rest, mv.restTone, mv.progress], ['всё оплачено', 'good', 1]);
+});
+
+test('какую зарплату показать по умолчанию', () => {
+  const today = '2026-10-22'; // период зарплаты 16 октября
+  // в текущей есть неотмеченные → она
+  let ex = [
+    { id: '1', date: '2026-10-17', amount: 100, status: null },
+    { id: '2', date: '2026-10-31', amount: 100, status: null },
+  ];
+  assert.equal(defaultPayday(ex, today), '2026-10-16');
+  // текущая вся оплачена → ближайшая с неотмеченными (будущая раньше прошлой)
+  ex = [
+    { id: '0', date: '2026-10-05', amount: 100, status: null },
+    { id: '1', date: '2026-10-17', amount: 100, status: 'paid' },
+    { id: '2', date: '2026-10-31', amount: 100, status: null },
+  ];
+  assert.equal(defaultPayday(ex, today), '2026-10-30');
+  // будущих нет — прошлая с долгом
+  assert.equal(defaultPayday(ex.slice(0, 2), today), '2026-10-02');
+  // ничего не отмечено нигде, текущая оплачена → следующая
+  assert.equal(defaultPayday([ex[1]], today), '2026-10-30');
+  // пусто → текущая
+  assert.equal(defaultPayday([], today), '2026-10-16');
+  // в день зарплаты — эта зарплата
+  assert.equal(defaultPayday([], '2026-10-30'), '2026-10-30');
+  // старый ✕ считается неоплаченным
+  assert.equal(defaultPayday([{ id: 'm', date: '2026-10-20', amount: 5, status: 'missed' }], today), '2026-10-16');
+});
+
+test('автопереход: только due → done на той же зарплате', () => {
+  const P = '2026-10-16';
+  let app = {
+    expenses: [
+      { id: 'a', date: '2026-10-17', amount: 100, status: 'paid' },
+      { id: 'b', date: '2026-10-20', amount: 200, status: null },
+    ],
+  };
+  const snap = () => ({ payday: P, mode: paydayMode(app.expenses, P) });
+  let prev = snap();
+  assert.equal(prev.mode, 'due');
+  // последний ✓ → переход
+  app = { expenses: app.expenses.map((e) => ({ ...e, status: 'paid' })) };
+  let next = snap();
+  assert.equal(shouldAutoAdvance(prev, next), true);
+  // сняли ✓ в паузе → done → due, перехода нет
+  prev = next;
+  app = { expenses: app.expenses.map((e) => (e.id === 'b' ? { ...e, status: null } : e)) };
+  next = snap();
+  assert.equal(shouldAutoAdvance(prev, next), false);
+  // просто листаем на уже оплаченную зарплату — нет
+  assert.equal(shouldAutoAdvance({ payday: '2026-10-02', mode: 'due' }, { payday: P, mode: 'done' }), false);
+  assert.equal(shouldAutoAdvance(null, { payday: P, mode: 'done' }), false);
+  // done → done (правка суммы) — нет; перенос последнего → пусто — нет
+  assert.equal(shouldAutoAdvance({ payday: P, mode: 'done' }, { payday: P, mode: 'done' }), false);
+  app = { expenses: [{ id: 'z', date: '2026-10-20', amount: 5, status: null }] };
+  prev = snap();
+  app = carryInState(app, 'z').state;
+  assert.equal(shouldAutoAdvance(prev, snap()), false);
+  // перенос последнего неотмеченного, когда остальные оплачены → всё оплачено → переход
+  app = { expenses: [{ id: 'p', date: '2026-10-17', amount: 5, status: 'paid' }, { id: 'z', date: '2026-10-20', amount: 5, status: null }] };
+  prev = snap();
+  app = carryInState(app, 'z').state;
+  assert.equal(shouldAutoAdvance(prev, snap()), true);
+});
+
+test('границы листания и досев месяцев страниц', () => {
+  const r = pagerRange([], ANCHOR);
+  assert.equal(PAYDAYS[r.lo], ANCHOR);
+  assert.equal(r.hi, PAYDAYS.length - 1);
+  assert.equal(PAYDAYS[pagerRange([{ date: '2026-08-25' }], ANCHOR).lo], '2026-08-21');
+  const base = defaultState();
+  const s = seedPaydays(base, ['2026-10-30']); // период 30 окт – 12 ноя: октябрь и ноябрь
+  assert.ok(s.expenses.some((e) => e.date === '2026-11-07'));
+  assert.ok(s.expenses.some((e) => e.date === '2026-10-26'));
+  assert.equal(seedPaydays(s, ['2026-10-30']), s); // повторно — тот же объект
 });
