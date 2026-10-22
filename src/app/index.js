@@ -145,6 +145,14 @@ const SHEET_IN = { duration: 320, easing: Easing.out(Easing.cubic) };
 const SHEET_OUT = { duration: 220, easing: Easing.in(Easing.cubic) };
 const BACK_IN = { duration: 240 };
 
+/** Ошибка внутри ворклета не должна ронять приложение: глотаем и пишем в лог JS. */
+const logWorkletErr = (m) => console.warn('[worklet] ' + m);
+function wErr(err) {
+  'worklet';
+  try {
+    scheduleOnRN(logWorkletErr, String((err && err.message) || err));
+  } catch (_) {}
+}
 const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 
@@ -165,17 +173,25 @@ function useRowSwipe(x, id, onEdit, onDelete) {
         .activeOffsetX([-14, 14])
         .failOffsetY([-12, 12])
         .onUpdate((e) => {
-          x.value = rubber(e.translationX);
+          try {
+            x.value = rubber(e.translationX);
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onEnd((e, success) => {
-          if (success && e.translationX > SWIPE_TRIGGER) {
-            x.value = withSpring(0, softSpring);
-            scheduleOnRN(onEdit, id);
-          } else if (success && e.translationX < -SWIPE_TRIGGER) {
-            x.value = withSpring(0, softSpring);
-            scheduleOnRN(onDelete, id);
-          } else {
-            x.value = withSpring(0, spring);
+          try {
+            if (success && e.translationX > SWIPE_TRIGGER) {
+              x.value = withSpring(0, softSpring);
+              scheduleOnRN(onEdit, id);
+            } else if (success && e.translationX < -SWIPE_TRIGGER) {
+              x.value = withSpring(0, softSpring);
+              scheduleOnRN(onDelete, id);
+            } else {
+              x.value = withSpring(0, spring);
+            }
+          } catch (err) {
+            wErr(err);
           }
         }),
     [x, id, onEdit, onDelete]
@@ -385,13 +401,21 @@ function SheetHost({ active, render, onClosed }) {
     () =>
       Gesture.Pan()
         .onUpdate((e) => {
-          ty.value = Math.max(0, e.translationY);
+          try {
+            ty.value = Math.max(0, e.translationY);
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onEnd((e) => {
-          if (e.translationY > 110 || e.velocityY > 900) {
-            scheduleOnRN(requestClose);
-          } else {
-            ty.value = withSpring(0, spring);
+          try {
+            if (e.translationY > 110 || e.velocityY > 900) {
+              scheduleOnRN(requestClose);
+            } else {
+              ty.value = withSpring(0, spring);
+            }
+          } catch (err) {
+            wErr(err);
           }
         }),
     [ty, requestClose]
@@ -672,51 +696,80 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
     const tap = Gesture.Tap()
       .maxDistance(10)
       .onBegin(() => {
-        press.value = withTiming(1, { duration: 90 });
+        try {
+          press.value = withTiming(1, { duration: 90 });
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onEnd((_e, ok) => {
-        if (ok) scheduleOnRN(toggle);
+        try {
+          if (ok) scheduleOnRN(toggle);
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onFinalize(() => {
-        press.value = withTiming(0, { duration: 160 });
+        try {
+          press.value = withTiming(0, { duration: 160 });
+        } catch (err) {
+          wErr(err);
+        }
       });
-    const hold = Gesture.Pan()
+    // имя не «hold»: иначе оно затеняет shared value hold из arc (крах на UI-потоке)
+    const holdG = Gesture.Pan()
       .activateAfterLongPress(400)
       .onStart((e) => {
-        // центр кнопки в координатах окна (детектор = зона 52×52)
-        const x0 = e.absoluteX - e.x + 26;
-        const y0 = e.absoluteY - e.y + 26;
-        const d = y0 < ISL_FLIP_Y ? -1 : 1;
-        hold.value = 1;
-        cx.value = x0;
-        cy.value = y0;
-        dir.value = d;
-        left.value = Math.min(Math.max(12, x0 - ISL_W / 2), SCREEN_W - 12 - ISL_W);
-        midY.value = y0 - d * (26 + ISL_GAP + ISL_H / 2);
-        cur.value = curIdx.value;
-        hover.value = -1;
-        press.value = withTiming(0, { duration: 160 });
-        open.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
-        scheduleOnRN(hapticMedium);
+        try {
+          // центр кнопки в координатах окна (детектор = зона 52×52)
+          const x0 = e.absoluteX - e.x + 26;
+          const y0 = e.absoluteY - e.y + 26;
+          const d = y0 < ISL_FLIP_Y ? -1 : 1;
+          hold.value = 1;
+          cx.value = x0;
+          cy.value = y0;
+          dir.value = d;
+          left.value = Math.min(Math.max(12, x0 - ISL_W / 2), SCREEN_W - 12 - ISL_W);
+          midY.value = y0 - d * (26 + ISL_GAP + ISL_H / 2);
+          cur.value = curIdx.value;
+          hover.value = -1;
+          press.value = withTiming(0, { duration: 160 });
+          open.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
+          scheduleOnRN(hapticMedium);
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onUpdate((e) => {
-        const h = islandHit(e.absoluteX, e.absoluteY, left.value, midY.value, dir.value, cx.value, cy.value);
-        if (h !== hover.value) {
-          hover.value = h;
-          if (h >= 0) scheduleOnRN(hapticSelect);
+        try {
+          const h = islandHit(e.absoluteX, e.absoluteY, left.value, midY.value, dir.value, cx.value, cy.value);
+          if (h !== hover.value) {
+            hover.value = h;
+            if (h >= 0) scheduleOnRN(hapticSelect);
+          }
+        } catch (err) {
+          wErr(err);
         }
       })
       .onEnd(() => {
-        const h = hover.value;
-        if (h >= 0) scheduleOnRN(choose, h);
+        try {
+          const h = hover.value;
+          if (h >= 0) scheduleOnRN(choose, h);
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onFinalize(() => {
-        // отпустили (или жест отменён) — остров исчезает в любом случае
-        if (hold.value) open.value = withTiming(0, { duration: 150, easing: Easing.in(Easing.quad) });
-        hold.value = 0;
-        hover.value = -1;
+        try {
+          // отпустили (или жест отменён) — остров исчезает в любом случае
+          if (hold.value) open.value = withTiming(0, { duration: 150, easing: Easing.in(Easing.quad) });
+          hold.value = 0;
+          hover.value = -1;
+        } catch (err) {
+          wErr(err);
+        }
       });
-    return Gesture.Exclusive(hold, tap);
+    return Gesture.Exclusive(holdG, tap);
   }, [press, toggle, choose, open, cx, cy, left, midY, dir, hover, cur, hold, curIdx]);
 
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: 1 - 0.1 * press.value }] }));
@@ -748,7 +801,11 @@ function IslandOption({ i, arc }) {
   useAnimatedReaction(
     () => hover.value === i,
     (on, was) => {
-      if (on !== was) h.value = withSpring(on ? 1 : 0, ISL_SPRING);
+      try {
+        if (on !== was) h.value = withSpring(on ? 1 : 0, ISL_SPRING);
+      } catch (err) {
+        wErr(err);
+      }
     }
   );
   const st = useAnimatedStyle(() => ({
@@ -774,14 +831,18 @@ const IslandMenu = memo(function IslandMenu({ arc }) {
   useAnimatedReaction(
     () => hover.value,
     (h, was) => {
-      if (h === was) return;
-      if (h >= 0) {
-        // первая цель — плашка появляется на месте, дальше едет как плашка дока
-        if (selOn.value < 0.05) sel.value = h;
-        else sel.value = withSpring(h, ISL_SPRING);
-        selOn.value = withTiming(1, { duration: 120 });
-      } else {
-        selOn.value = withTiming(0, { duration: 120 });
+      try {
+        if (h === was) return;
+        if (h >= 0) {
+          // первая цель — плашка появляется на месте, дальше едет как плашка дока
+          if (selOn.value < 0.05) sel.value = h;
+          else sel.value = withSpring(h, ISL_SPRING);
+          selOn.value = withTiming(1, { duration: 120 });
+        } else {
+          selOn.value = withTiming(0, { duration: 120 });
+        }
+      } catch (err) {
+        wErr(err);
       }
     }
   );
@@ -1098,35 +1159,67 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     const tap = Gesture.Tap()
       .maxDuration(5000)
       .onBegin(() => {
-        press.value = withTiming(1, { duration: 90 });
+        try {
+          press.value = withTiming(1, { duration: 90 });
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onEnd((e, ok) => {
-        const w = segW.value;
-        if (!ok || w <= 0) return;
-        pick(Math.max(0, Math.min(n - 1, Math.floor((e.x - 5) / w))));
+        try {
+          const w = segW.value;
+          if (!ok || w <= 0) return;
+          pick(Math.max(0, Math.min(n - 1, Math.floor((e.x - 5) / w))));
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onFinalize(() => {
-        press.value = withTiming(0, { duration: 160 });
+        try {
+          press.value = withTiming(0, { duration: 160 });
+        } catch (err) {
+          wErr(err);
+        }
       });
     const pan = Gesture.Pan()
       .activeOffsetX([-8, 8])
       .failOffsetY([-14, 14])
       .onBegin(() => {
-        drag0.value = pos.value;
+        try {
+          drag0.value = pos.value;
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onStart(() => {
-        press.value = withTiming(1, { duration: 90 });
+        try {
+          press.value = withTiming(1, { duration: 90 });
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onUpdate((e) => {
-        const w = Math.max(segW.value, 1);
-        pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
+        try {
+          const w = Math.max(segW.value, 1);
+          pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onEnd((e) => {
-        const projected = pos.value + e.velocityX / 5000;
-        pick(Math.max(0, Math.min(n - 1, Math.round(projected))));
+        try {
+          const projected = pos.value + e.velocityX / 5000;
+          pick(Math.max(0, Math.min(n - 1, Math.round(projected))));
+        } catch (err) {
+          wErr(err);
+        }
       })
       .onFinalize(() => {
-        press.value = withTiming(0, { duration: 160 });
+        try {
+          press.value = withTiming(0, { duration: 160 });
+        } catch (err) {
+          wErr(err);
+        }
       });
     return Gesture.Race(pan, tap);
   }, [n, pos, target, drag0, press, segW, commit, onPickUI]);
@@ -1894,41 +1987,64 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
       Gesture.Pan()
         .manualActivation(true)
         .onTouchesDown((e) => {
-          const t = e.allTouches[0];
-          sx.value = t.absoluteX;
-          sy.value = t.absoluteY;
+          try {
+            const t = e.allTouches && e.allTouches[0];
+            if (!t) return;
+            sx.value = t.absoluteX;
+            sy.value = t.absoluteY;
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onTouchesMove((e, mgr) => {
-          if (islHold.value || islOpen.value > 0) return mgr.fail(); // остров статуса открыт — не листаем
-          const t = e.allTouches[0];
-          const dx = t.absoluteX - sx.value;
-          const dy = t.absoluteY - sy.value;
-          if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) mgr.fail();
-          else if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.3) mgr.activate();
+          try {
+            if (islHold.value || islOpen.value > 0) return mgr.fail(); // остров статуса открыт — не листаем
+            const t = e.allTouches && e.allTouches[0];
+            if (!t) return;
+            const dx = t.absoluteX - sx.value;
+            const dy = t.absoluteY - sy.value;
+            if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) mgr.fail();
+            else if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.3) mgr.activate();
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onStart(() => {
-          drag0.value = pos.value; // перехват на лету — с текущего места, без рывка
+          try {
+            drag0.value = pos.value; // перехват на лету — с текущего места, без рывка
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onUpdate((e) => {
-          const c = cur.value;
-          const a = Math.max(lo.value, c - 1);
-          const b = Math.min(hi.value, c + 1);
-          let p = drag0.value - e.translationX / PAGE_W;
-          // за краями — резинка
-          if (p < a) p = a - (1 - Math.exp(-(a - p) * 2.2)) * 0.18;
-          if (p > b) p = b + (1 - Math.exp(-(p - b) * 2.2)) * 0.18;
-          pos.value = p;
+          try {
+            const c = cur.value;
+            const a = Math.max(lo.value, c - 1);
+            const b = Math.min(hi.value, c + 1);
+            let p = drag0.value - e.translationX / PAGE_W;
+            // за краями — резинка
+            if (p < a) p = a - (1 - Math.exp(-(a - p) * 2.2)) * 0.18;
+            if (p > b) p = b + (1 - Math.exp(-(p - b) * 2.2)) * 0.18;
+            pos.value = p;
+          } catch (err) {
+            wErr(err);
+          }
         })
         .onEnd((e) => {
-          const c = cur.value;
-          const a = Math.max(lo.value, c - 1);
-          const b = Math.min(hi.value, c + 1);
-          const proj = pos.value - (e.velocityX / PAGE_W) * 0.22;
-          const target = Math.max(a, Math.min(b, Math.round(proj)));
-          pos.value = withSpring(target, { ...PAGE_SPRING, velocity: -e.velocityX / PAGE_W });
-          if (target !== c) {
-            cur.value = target;
-            scheduleOnRN(onPage, target);
+          try {
+            const c = cur.value;
+            const a = Math.max(lo.value, c - 1);
+            const b = Math.min(hi.value, c + 1);
+            const proj = pos.value - (e.velocityX / PAGE_W) * 0.22;
+            const target = Math.max(a, Math.min(b, Math.round(proj)));
+            const v = -e.velocityX / PAGE_W;
+            pos.value = withSpring(target, { ...PAGE_SPRING, velocity: Number.isFinite(v) ? v : 0 });
+            if (target !== c) {
+              cur.value = target;
+              scheduleOnRN(onPage, target);
+            }
+          } catch (err) {
+            wErr(err);
           }
         }),
     [sx, sy, drag0, pos, cur, lo, hi, islHold, islOpen, onPage]
