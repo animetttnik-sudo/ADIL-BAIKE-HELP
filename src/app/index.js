@@ -70,6 +70,33 @@ import {
     ownPay,
     shiftTitle,
 } from '../lib/calc';
+import {
+  KEY,
+  ANCHOR,
+  MONTHS,
+  MONTHS_R,
+  DOW,
+  pad,
+  iso,
+  parse,
+  addDays,
+  fmtDay,
+  fmtShort,
+  money,
+  uid,
+  todayIso,
+  allPaydays,
+  PAYDAYS,
+  paydayOnOrBefore,
+  workPeriod,
+  paydaysInMonth,
+  periodsTouchingMonth,
+  defaultState,
+  seedMonth,
+  paydayForDate,
+  normalizeApp,
+} from '../lib/periods';
+import { CALC_TITLES, isLinkedShift, syncCalcShifts } from '../lib/link';
 
 // expo-glass-effect — опционально
 let GlassView = null;
@@ -81,154 +108,11 @@ try {
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const KEY = 'zp_app_v1';
-const ANCHOR = '2026-09-04';
 const SWIPE = 72;
 const SWIPE_TRIGGER = SWIPE * 0.8;
-const MONTHS = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
-const MONTHS_R = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
-const DOW = ['вс','пн','вт','ср','чт','пт','сб'];
 const ACCENT_PRESETS = [{ h: 145 }, { h: 210 }, { h: 280 }, { h: 30 }, { h: 350 }, { h: 190 }];
 const INIT_Y = 2026;
 const INIT_M = 8;
-
-const pad = (n) => String(n).padStart(2, '0');
-const iso = (d) => {
-  const x = d instanceof Date ? d : new Date(d);
-  return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
-};
-const parse = (s) => {
-  const [y, m, d] = s.split('-').map(Number);
-  return new Date(y, m - 1, d);
-};
-const addDays = (s, n) => {
-  const d = parse(s);
-  d.setDate(d.getDate() + n);
-  return iso(d);
-};
-const fmtDay = (s) => parse(s).getDate();
-const fmtShort = (s) => {
-  const d = parse(s);
-  return `${d.getDate()} ${MONTHS_R[d.getMonth()]}`;
-};
-const money = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
-const uid = () => Math.random().toString(36).slice(2, 9);
-const todayIso = () => iso(new Date());
-
-function allPaydays(fromY, toY) {
-  const list = [];
-  let d = parse(ANCHOR);
-  while (d.getFullYear() > fromY - 1) d.setDate(d.getDate() - 14);
-  while (d.getFullYear() <= toY) {
-    list.push(iso(d));
-    d.setDate(d.getDate() + 14);
-  }
-  return list;
-}
-const PAYDAYS = allPaydays(2025, 2028);
-
-function paydayOnOrBefore(dateStr) {
-  let last = PAYDAYS[0];
-  for (const p of PAYDAYS) {
-    if (p <= dateStr) last = p;
-    else break;
-  }
-  return last;
-}
-function workPeriod(payday) {
-  return { start: addDays(payday, -20), end: addDays(payday, -7), payday };
-}
-function paydaysInMonth(y, m) {
-  const pfx = `${y}-${pad(m + 1)}`;
-  return PAYDAYS.filter((p) => p.startsWith(pfx));
-}
-function periodsTouchingMonth(y, m) {
-  const start = `${y}-${pad(m + 1)}-01`;
-  const end = iso(new Date(y, m + 1, 0));
-  return PAYDAYS.map(workPeriod).filter((p) => p.start <= end && p.end >= start);
-}
-
-function defaultState() {
-  return {
-    settings: { mode: 'study', hue: 145, light: 54 },
-    custom: { bg: null },
-    recurring: [
-      { id: uid(), title: 'О!Банк', amount: 1387, day: 7 },
-      { id: uid(), title: 'Вайфай', amount: 1350, day: 13 },
-      { id: uid(), title: 'Мбанк', amount: 5075, day: 15 },
-      { id: uid(), title: 'О!Банк', amount: 1385, day: 21 },
-      { id: uid(), title: 'М+', amount: 5667, day: 26 },
-    ],
-    expenses: [
-      { id: uid(), date: '2026-09-04', amount: 1000, title: 'Адилет Аке', type: 'unexpected', status: 'paid' },
-      { id: uid(), date: '2026-09-04', amount: 7000, title: 'апама карыз', type: 'unexpected', status: 'paid' },
-      { id: uid(), date: '2026-09-07', amount: 1387, title: 'О!Банк', type: 'recurring', status: 'paid' },
-      { id: uid(), date: '2026-09-12', amount: 540, title: 'Единица', type: 'unexpected', status: 'paid' },
-      { id: uid(), date: '2026-09-13', amount: 1350, title: 'Вайфай', type: 'recurring', status: 'paid' },
-      { id: uid(), date: '2026-09-15', amount: 5075, title: 'Мбанк', type: 'recurring', status: 'paid' },
-      { id: uid(), date: '2026-09-18', amount: 6000, title: '', type: 'unexpected', status: null },
-      { id: uid(), date: '2026-09-21', amount: 1000, title: 'Вб', type: 'unexpected', status: null },
-      { id: uid(), date: '2026-09-21', amount: 1385, title: 'О!Банк', type: 'recurring', status: null },
-      { id: uid(), date: '2026-09-26', amount: 5667, title: 'М+', type: 'recurring', status: null },
-    ],
-    shifts: ['2026-09-12', '2026-09-13', '2026-09-18', '2026-09-19', '2026-09-20', '2026-09-25'].map((d) => ({
-      id: uid(), date: d, title: 'ночь касса', amount: null, payday: '2026-10-02',
-    })),
-    removed: [],
-  };
-}
-
-/**
- * Досеивает постоянные платежи и смены для месяца (y, m).
- * Вызывается синхронно ДО рендера нового месяца/режима, чтобы список
- * не появлялся пустым и не «допрыгивал» кадром позже.
- * Возвращает тот же объект, если ничего не добавилось.
- */
-function seedMonth(state, viewY, viewM) {
-  if (!state) return state;
-  let changed = false;
-  const next = {
-    ...state,
-    expenses: [...state.expenses],
-    shifts: [...state.shifts],
-    settings: { ...state.settings },
-    custom: { ...(state.custom || { bg: null }) },
-    removed: [...(state.removed || [])],
-    recurring: [...(state.recurring || [])],
-  };
-  const last = new Date(viewY, viewM + 1, 0).getDate();
-  (state.recurring || []).forEach((r) => {
-    if (r.day > last) return;
-    const date = `${viewY}-${pad(viewM + 1)}-${pad(r.day)}`;
-    if (!next.expenses.some((e) => e.date === date && e.title === r.title && e.type === 'recurring')) {
-      next.expenses.push({
-        id: uid(),
-        date,
-        amount: r.amount,
-        title: r.title,
-        type: 'recurring',
-        status: null,
-      });
-      changed = true;
-    }
-  });
-  periodsTouchingMonth(viewY, viewM).forEach((period) => {
-    for (let d = period.start; d <= period.end; d = addDays(d, 1)) {
-      if (next.removed.includes(d) || next.shifts.some((s) => s.date === d)) continue;
-      const dow = parse(d).getDay();
-      if (state.settings.mode === 'study' && !(dow === 5 || dow === 6 || dow === 0)) continue;
-      next.shifts.push({
-        id: uid(),
-        date: d,
-        title: 'ночь касса',
-        amount: null,
-        payday: period.payday,
-      });
-      changed = true;
-    }
-  });
-  return changed ? next : state;
-}
 
 function displayStatus(e) {
   if (e.status === 'paid') return 'paid';
@@ -676,7 +560,7 @@ const ExpenseRow = memo(function ExpenseRow({ item, pulse, onEdit, onDelete, onS
   );
 });
 
-const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete }) {
+const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent }) {
   const x = useSharedValue(0);
   const id = item.id;
   const pan = useRowSwipe(x, id, onEdit, onDelete);
@@ -704,9 +588,19 @@ const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete }) {
                 <Text style={styles.when}>{fmtDay(item.date)}</Text>
                 <View style={styles.mid}>
                   <Text style={styles.itemTitle}>{item.title}</Text>
-                  <Text style={styles.meta}>
-                    {DOW[parse(item.date).getDay()]} · свайп или тап
-                  </Text>
+                  {item.source === 'calc' ? (
+                    <Pressable
+                      hitSlop={8}
+                      style={styles.calcBadge}
+                      onPress={() => onCalc(item.calcDate || item.date)}
+                    >
+                      <Text style={[styles.calcBadgeTxt, { color: accent }]}>из расчёта ›</Text>
+                    </Pressable>
+                  ) : (
+                    <Text style={styles.meta}>
+                      {DOW[parse(item.date).getDay()]} · свайп или тап
+                    </Text>
+                  )}
                 </View>
                 <Text style={styles.amt}>
                   {item.amount == null || item.amount === '' ? '—' : money(item.amount)}
@@ -1092,8 +986,8 @@ function CheckRow({ checked, label, amount, accent, onToggle }) {
 }
 
 function CalcView({
-  calc, date, day, accent, shiftOnDate, scrollRef, scrollY, scrollTop,
-  onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onAddShift,
+  calc, date, day, accent, linkedShift, manualOnDate, scrollRef, scrollY, scrollTop,
+  onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onShowShift,
 }) {
   const [collapsed, setCollapsed] = useState({});
   const [showUsage, setShowUsage] = useState(false);
@@ -1168,7 +1062,6 @@ function CalcView({
   const own = ownPay(res, calc.rates, day);
   const ownR = Math.round(own);
   const filled = hasCounts(day.counts);
-  const inShifts = !!shiftOnDate && Number(shiftOnDate.amount) === ownR;
 
   const saved = useMemo(
     () =>
@@ -1245,14 +1138,21 @@ function CalcView({
 
       {filled && (
         <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-          <ScaleButton
-            style={[styles.actBtn, inShifts ? styles.statusPaidBtn : { backgroundColor: accent }]}
-            onPress={() => onAddShift(ownR, shiftTitle(day.role, day.time))}
-          >
-            <Text style={[styles.actBtnTxt, !inShifts && { color: '#102012' }]}>
-              {inShifts ? '✓  В сменах' : `Добавить в смены · ${money(ownR)}`}
-            </Text>
-          </ScaleButton>
+          <Pressable style={styles.linkLine} onPress={onShowShift} hitSlop={4}>
+            <View style={[styles.linkDot, { backgroundColor: accent }]}>
+              <Text style={styles.linkDotTxt}>✓</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.linkLineTxt}>
+                Учтено в сменах · {money(linkedShift ? linkedShift.amount : ownR)}
+              </Text>
+              <Text style={styles.linkLineSub} numberOfLines={2}>
+                к зарплате {fmtShort(paydayForDate(date))}
+                {manualOnDate ? ' · на эту дату есть и ручная смена — считаются обе' : ''}
+              </Text>
+            </View>
+            <Text style={styles.chevMini}>›</Text>
+          </Pressable>
         </Animated.View>
       )}
       <Animated.View style={styles.calcBtns} layout={ROW_LAYOUT}>
@@ -1533,13 +1433,12 @@ export default function App() {
       let loaded;
       try {
         const raw = await AsyncStorage.getItem(KEY);
-        loaded = raw ? JSON.parse(raw) : defaultState();
+        loaded = raw ? normalizeApp(JSON.parse(raw)) : defaultState();
       } catch {
         loaded = defaultState();
       }
       // досеиваем стартовый месяц до первого рендера списка
       const seeded = seedMonth(loaded, INIT_Y, INIT_M);
-      if (seeded !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(seeded)).catch(() => {});
       let calcLoaded;
       try {
         const rawC = await AsyncStorage.getItem(CALC_KEY);
@@ -1547,8 +1446,11 @@ export default function App() {
       } catch {
         calcLoaded = normalizeCalc(null);
       }
+      // сразу связываем расчёт со сменами (и узнаём смены от старой кнопки)
+      const linked = syncCalcShifts(seeded, calcLoaded, paydayForDate, uid);
+      if (linked !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
       setCalc(calcLoaded);
-      setState(seeded);
+      setState(linked);
     })();
   }, []);
 
@@ -1562,6 +1464,15 @@ export default function App() {
 
   const stateRef = useRef(null);
   stateRef.current = state;
+  const formRefs = useRef({});
+
+  // ── Расчёт → Смены: связанная смена обновляется сама (с задержкой, пока вводят)
+  const loadedOnce = !!state;
+  useEffect(() => {
+    if (!calc || !loadedOnce) return;
+    const t = setTimeout(() => patch((p) => syncCalcShifts(p, calc, paydayForDate, uid)), 400);
+    return () => clearTimeout(t);
+  }, [calc, loadedOnce, patch]);
 
   // действие, которое надо выполнить после полного закрытия шторки
   // (Alert поверх закрывающегося Modal на iOS закрылся бы вместе с ним)
@@ -1644,6 +1555,7 @@ export default function App() {
       date: s ? s.date : todayIso(),
       amount: s && s.amount != null ? String(s.amount) : '',
       title: s ? s.title : 'ночь касса',
+      linked: isLinkedShift(s),
     });
     setSheet('shift');
   }, []);
@@ -1689,6 +1601,29 @@ export default function App() {
     (id) => {
       const s = stateRef.current.shifts.find((x) => x.id === id);
       if (!s) return;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      if (isLinkedShift(s)) {
+        const date = s.calcDate || s.date;
+        Alert.alert(
+          'Смена из расчёта',
+          `Она считается по «Расчёту» за ${fmtShort(date)}. Чтобы убрать смену, сбросьте этот расчёт.`,
+          [
+            { text: 'Отмена', style: 'cancel' },
+            {
+              text: 'Сбросить расчёт',
+              style: 'destructive',
+              onPress: () =>
+                patchCalc((p) => {
+                  if (!p.days[date]) return p;
+                  const days = { ...p.days };
+                  delete days[date];
+                  return { ...p, days };
+                }),
+            },
+          ]
+        );
+        return;
+      }
       Alert.alert('Убрать день?', '', [
         { text: 'Отмена', style: 'cancel' },
         {
@@ -1703,8 +1638,15 @@ export default function App() {
         },
       ]);
     },
-    [patch]
+    [patch, patchCalc]
   );
+
+  /** Открыть «Расчёт» на дате связанной смены. */
+  const openCalcOn = useCallback((date) => {
+    Haptics.selectionAsync();
+    setCalcDate(date);
+    setPage(2);
+  }, []);
 
   if (!state) {
     return (
@@ -1730,7 +1672,7 @@ export default function App() {
   const resetCalc = () => {
     const date = calcDate;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    Alert.alert('Сбросить расчёт?', `Все подсчёты за ${fmtShort(date)} будут удалены.`, [
+    Alert.alert('Сбросить расчёт?', `Все подсчёты за ${fmtShort(date)} будут удалены, смена «из расчёта» уберётся из «Смен».`, [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Сбросить',
@@ -1745,34 +1687,21 @@ export default function App() {
       },
     ]);
   };
-  const shiftOnCalcDate = state.shifts.find((s) => s.date === calcDate) || null;
-  /** Своя зарплата из расчёта → смена на ту же дату (новая или обновить сумму). */
-  const addCalcShift = (amount, title) => {
-    const date = calcDate;
-    const apply = () => {
-      const per = workPeriod(paydayOnOrBefore(addDays(date, 20)));
-      patch((prev) => {
-        const shifts = [...prev.shifts];
-        const i = shifts.findIndex((s) => s.date === date);
-        if (i >= 0) shifts[i] = { ...shifts[i], amount, title };
-        else shifts.push({ id: uid(), date, amount, title, payday: per.payday });
-        return { ...prev, shifts, removed: prev.removed.filter((x) => x !== date) };
-      });
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    };
-    const ex = shiftOnCalcDate;
-    if (ex && ex.amount != null && ex.amount !== '' && Number(ex.amount) !== amount) {
-      Alert.alert(
-        'Заменить сумму смены?',
-        `${fmtShort(date)}: ${money(ex.amount)} → ${money(amount)}`,
-        [
-          { text: 'Отмена', style: 'cancel' },
-          { text: 'Заменить', onPress: apply },
-        ]
-      );
-    } else if (!(ex && Number(ex.amount) === amount && ex.title === title)) {
-      apply();
-    }
+  const linkedOnCalcDate =
+    state.shifts.find((s) => isLinkedShift(s) && (s.calcDate || s.date) === calcDate) || null;
+  const manualOnCalcDate = state.shifts.some(
+    (s) => !isLinkedShift(s) && s.date === calcDate && s.amount != null && s.amount !== ''
+  );
+  /** Перейти в «Смены» на месяц связанной смены. */
+  const showCalcShift = () => {
+    const d = parse(calcDate);
+    const y = d.getFullYear();
+    const m = d.getMonth();
+    Haptics.selectionAsync();
+    patch((p) => seedMonth(p, y, m));
+    setViewY(y);
+    setViewM(m);
+    setPage(1);
   };
 
   const saveExpense = () => {
@@ -1865,6 +1794,46 @@ export default function App() {
   const spent = paid.reduce((a, e) => a + Number(e.amount || 0), 0);
   const earnedAll = state.shifts.reduce((a, s) => a + (Number(s.amount) || 0), 0);
 
+  /**
+   * Поле шторки в цепочке «Далее ›»: ref, return-клавиша и своя панель над
+   * клавиатурой (рендерится в теле шторки — в том же окне Modal, что и поле).
+   */
+  const fieldKb = (key, keys, label) => {
+    const i = keys.indexOf(key);
+    const next = keys[i + 1];
+    const prev = keys[i - 1];
+    const nid = `kb-f-${sheet}-${key}`;
+    const focus = (k) => {
+      if (!k || !formRefs.current[k]) return;
+      Haptics.selectionAsync();
+      formRefs.current[k].focus();
+    };
+    return {
+      props: {
+        ref: (r) => {
+          if (r) formRefs.current[key] = r;
+          else delete formRefs.current[key];
+        },
+        keyboardAppearance: 'dark',
+        inputAccessoryViewID: Platform.OS === 'ios' ? nid : undefined,
+        returnKeyType: next ? 'next' : 'done',
+        submitBehavior: next ? 'submit' : 'blurAndSubmit',
+        onSubmitEditing: () => focus(next),
+      },
+      bar: (
+        <KeyBar
+          nativeID={nid}
+          label={`${label}  ·  ${i + 1}/${keys.length}`}
+          hasPrev={!!prev}
+          isLast={!next}
+          accent={accent}
+          onPrev={() => focus(prev)}
+          onNext={() => focus(next)}
+        />
+      ),
+    };
+  };
+
   const toSettings = () => setSheet('settings');
   const closeSheet = () => setSheet(null);
 
@@ -1887,58 +1856,60 @@ export default function App() {
           ),
         };
 
-      case 'exp':
+      case 'exp': {
+        const kAmt = fieldKb('amount', ['amount', 'title'], 'Сумма');
+        const kTitle = fieldKb('title', ['amount', 'title'], 'За что');
         return {
           title: editId ? 'Расход' : 'Новый расход',
           onClose: closeSheet,
           right: (
-            <Pressable onPress={saveExpense}>
+            <Pressable onPress={saveExpense} hitSlop={10}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
           body: (
             <>
-              <DateWheel value={form.date} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
                 <Text style={styles.label}>Сумма</Text>
-                <TextInput
-                  style={styles.input}
-                  keyboardType="number-pad"
-                  value={form.amount}
-                  onChangeText={(t) => setForm((f) => ({ ...f, amount: t }))}
-                  placeholder="0"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
+                <View style={styles.bigField}>
+                  <TextInput
+                    {...kAmt.props}
+                    style={styles.bigInput}
+                    keyboardType="number-pad"
+                    value={form.amount}
+                    onChangeText={(t) => setForm((f) => ({ ...f, amount: t.replace(/[^0-9]/g, '') }))}
+                    placeholder="0"
+                    placeholderTextColor="rgba(235,235,245,0.25)"
+                  />
+                  <Text style={styles.bigUnit}>сом</Text>
+                </View>
+                {kAmt.bar}
               </View>
               <View style={styles.field}>
                 <Text style={styles.label}>За что</Text>
                 <TextInput
+                  {...kTitle.props}
                   style={styles.input}
                   value={form.title}
                   onChangeText={(t) => setForm((f) => ({ ...f, title: t }))}
                   placeholder="Вайфай, ремонт…"
                   placeholderTextColor="rgba(235,235,245,0.3)"
                 />
+                {kTitle.bar}
               </View>
+              <DateWheel value={form.date} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
                 <Text style={styles.label}>Тип</Text>
-                <View style={styles.segRow}>
-                  {['unexpected', 'recurring'].map((t) => (
-                    <ScaleButton
-                      key={t}
-                      style={[styles.chip, form.type === t && styles.chipOn]}
-                      onPress={() => setForm((f) => ({ ...f, type: t }))}
-                    >
-                      <Text style={[styles.chipTxt, form.type === t && styles.chipTxtOn]}>
-                        {t === 'unexpected' ? 'Непредвиденный' : 'Постоянный'}
-                      </Text>
-                    </ScaleButton>
-                  ))}
-                </View>
+                <SegmentCapsule
+                  height={46}
+                  labels={['Непредвиденный', 'Постоянный']}
+                  value={form.type === 'recurring' ? 1 : 0}
+                  onChange={(i) => setForm((f) => ({ ...f, type: i === 1 ? 'recurring' : 'unexpected' }))}
+                />
               </View>
               {editId && (
                 <ScaleButton
-                  style={styles.actBtn}
+                  style={[styles.actBtn, styles.dangerBtn]}
                   onPress={() => {
                     const id = editId;
                     closeThen(() => confirmDeleteExpense(id));
@@ -1950,41 +1921,108 @@ export default function App() {
             </>
           ),
         };
+      }
 
-      case 'shift':
+      case 'shift': {
+        if (form.linked) {
+          const sh = state.shifts.find((x) => x.id === editId);
+          const d = sh ? sh.calcDate || sh.date : form.date;
+          return {
+            title: 'Смена из расчёта',
+            onClose: closeSheet,
+            body: (
+              <>
+                <ItemCard style={styles.listCard}>
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>Дата</Text>
+                    <Text style={styles.lVal}>
+                      {fmtShort(d)}, {DOW[parse(d).getDay()]}
+                    </Text>
+                  </View>
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>Смена</Text>
+                    <Text style={styles.lVal}>{sh ? sh.title : form.title}</Text>
+                  </View>
+                  <View style={styles.lRow}>
+                    <Text style={styles.lKey}>Сумма</Text>
+                    <Text style={[styles.lVal, styles.lValBig, { color: accent }]}>
+                      {money(sh ? sh.amount : form.amount)}
+                    </Text>
+                  </View>
+                </ItemCard>
+                <Text style={styles.hint}>
+                  Сумма считается в «Расчёте» и обновляется сама. Чтобы изменить — поправьте количества,
+                  роль или ставки там.
+                </Text>
+                <ScaleButton
+                  style={[styles.actBtn, { backgroundColor: accent }]}
+                  onPress={() => closeThen(() => openCalcOn(d))}
+                >
+                  <Text style={[styles.actBtnTxt, styles.onAccent]}>Открыть в «Расчёте»</Text>
+                </ScaleButton>
+              </>
+            ),
+          };
+        }
+        const kAmt = fieldKb('amount', ['amount', 'title'], 'Сумма');
+        const kTitle = fieldKb('title', ['amount', 'title'], 'Тип смены');
         return {
           title: editId ? 'Смена' : 'Новая смена',
           onClose: closeSheet,
           right: (
-            <Pressable onPress={saveShift}>
+            <Pressable onPress={saveShift} hitSlop={10}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
           body: (
             <>
+              <View style={styles.field}>
+                <Text style={styles.label}>Сумма за смену</Text>
+                <View style={styles.bigField}>
+                  <TextInput
+                    {...kAmt.props}
+                    style={styles.bigInput}
+                    keyboardType="number-pad"
+                    value={form.amount}
+                    onChangeText={(t) => setForm((f) => ({ ...f, amount: t.replace(/[^0-9]/g, '') }))}
+                    placeholder="—"
+                    placeholderTextColor="rgba(235,235,245,0.25)"
+                  />
+                  <Text style={styles.bigUnit}>сом</Text>
+                </View>
+                {kAmt.bar}
+                <Text style={styles.fieldNote}>Пусто — смена без суммы (в итог не идёт).</Text>
+              </View>
               <DateWheel value={form.date} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
-                <Text style={styles.label}>Сумма за ночь</Text>
+                <Text style={styles.label}>Тип смены</Text>
                 <TextInput
-                  style={styles.input}
-                  keyboardType="number-pad"
-                  value={form.amount}
-                  onChangeText={(t) => setForm((f) => ({ ...f, amount: t }))}
-                  placeholder="Сколько заработал"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
-              </View>
-              <View style={styles.field}>
-                <Text style={styles.label}>Тип</Text>
-                <TextInput
+                  {...kTitle.props}
                   style={styles.input}
                   value={form.title}
                   onChangeText={(t) => setForm((f) => ({ ...f, title: t }))}
+                  placeholder="ночь касса"
+                  placeholderTextColor="rgba(235,235,245,0.3)"
                 />
+                {kTitle.bar}
+                <View style={styles.chipWrap}>
+                  {CALC_TITLES.map((t) => (
+                    <ScaleButton
+                      key={t}
+                      style={[styles.chip, form.title === t && styles.chipOn]}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        setForm((f) => ({ ...f, title: t }));
+                      }}
+                    >
+                      <Text style={[styles.chipTxt, form.title === t && styles.chipTxtOn]}>{t}</Text>
+                    </ScaleButton>
+                  ))}
+                </View>
               </View>
               {editId && (
                 <ScaleButton
-                  style={styles.actBtn}
+                  style={[styles.actBtn, styles.dangerBtn]}
                   onPress={() => {
                     const id = editId;
                     closeThen(() => confirmDeleteShift(id));
@@ -1996,6 +2034,7 @@ export default function App() {
             </>
           ),
         };
+      }
 
       case 'status': {
         const e = state.expenses.find((x) => x.id === editId);
@@ -2555,6 +2594,8 @@ export default function App() {
                               item={s}
                               onEdit={openShift}
                               onDelete={confirmDeleteShift}
+                              onCalc={openCalcOn}
+                              accent={accent}
                             />
                           ))
                         )}
@@ -2571,7 +2612,8 @@ export default function App() {
                   date={calcDate}
                   day={calcDay}
                   accent={accent}
-                  shiftOnDate={shiftOnCalcDate}
+                  linkedShift={linkedOnCalcDate}
+                  manualOnDate={manualOnCalcDate}
                   scrollRef={mainScroll}
                   scrollY={mainScrollY}
                   scrollTop={mainScrollTop}
@@ -2584,7 +2626,7 @@ export default function App() {
                   onOpenItem={openCalcItem}
                   onOpenRates={openCalcRates}
                   onReset={resetCalc}
-                  onAddShift={addCalcShift}
+                  onShowShift={showCalcShift}
                 />
               )
             )}
@@ -2769,6 +2811,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   statusTxt: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  calcBadge: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  calcBadgeTxt: { fontSize: 12, fontWeight: '700' },
   chevMini: { color: 'rgba(235,235,245,0.35)', fontSize: 18 },
   totalLine: {
     flexDirection: 'row',
@@ -2852,9 +2903,73 @@ const styles = StyleSheet.create({
   },
   sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   link: { fontWeight: '650', fontSize: 17 },
+  linkLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    minHeight: 56,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginBottom: 10,
+    borderRadius: 20,
+    backgroundColor: 'rgba(48,209,88,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(48,209,88,0.35)',
+  },
+  linkDot: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
+  linkDotTxt: { color: '#102012', fontSize: 15, fontWeight: '800' },
+  linkLineTxt: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  linkLineSub: { color: 'rgba(235,235,245,0.55)', fontSize: 13, marginTop: 2 },
   linkMuted: { color: 'rgba(235,235,245,0.5)', fontSize: 17 },
 
-  field: { marginBottom: 12 },
+  field: { marginBottom: 14 },
+  fieldNote: { color: 'rgba(235,235,245,0.38)', fontSize: 12, marginTop: 6, marginLeft: 4 },
+  bigField: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    minHeight: 72,
+  },
+  bigInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 34,
+    fontWeight: '700',
+    letterSpacing: -0.8,
+    paddingVertical: 10,
+    fontVariant: ['tabular-nums'],
+  },
+  bigUnit: { color: 'rgba(235,235,245,0.4)', fontSize: 17, fontWeight: '600' },
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  onAccent: { color: '#102012' },
+  dangerBtn: { backgroundColor: 'rgba(255,69,58,0.1)', borderColor: 'rgba(255,69,58,0.25)', marginTop: 4 },
+  listCard: { marginBottom: 14 },
+  lRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 12,
+  },
+  lRowSep: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
+  lKey: { color: 'rgba(235,235,245,0.6)', fontSize: 15, flexShrink: 1 },
+  lVal: { color: '#fff', fontSize: 16, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  lValBig: { fontSize: 20, fontWeight: '700' },
+  lTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  lSub: { color: 'rgba(235,235,245,0.42)', fontSize: 12, marginTop: 2 },
+  sectionLabel: {
+    color: 'rgba(235,235,245,0.5)',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 8,
+    marginLeft: 6,
+  },
   label: {
     color: 'rgba(235,235,245,0.5)',
     fontSize: 12,
