@@ -60,7 +60,16 @@ import Animated, {
 } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
-import { carryInState, expensesInPeriod, paydayTotals, summaryView, toggledStatus, undoCarry } from '../lib/totals';
+import {
+  carryInState,
+  expensesInPeriod,
+  monthTotals,
+  monthView,
+  paydayTotals,
+  summaryView,
+  toggledStatus,
+  undoCarry,
+} from '../lib/totals';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
     CALC_ITEMS,
@@ -203,11 +212,29 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
   );
 }
 
-// подкраска стекла (как у дока: настоящий GlassView + tintColor, иначе blur + слой цвета)
-const GLASS_GREEN = 'rgba(48,209,88,0.55)';
-const GLASS_GREEN_FB = 'rgba(48,209,88,0.32)';
-const GLASS_BLUE = 'rgba(10,132,255,0.55)';
-const GLASS_BLUE_FB = 'rgba(10,132,255,0.32)';
+// Цветное стекло: GlassView/BlurView как у дока + плотная цветная заливка сестринским слоем
+// (не opacity родителя — она ломает стекло) + блик сверху и светлая кромка.
+// Один tintColor у GlassView в Expo Go почти не виден — поэтому заливка.
+const TINT_GREEN = 'rgba(36,150,66,0.9)'; // ✓ Оплачено
+const TINT_BLUE = 'rgba(30,110,190,0.9)'; // → Не плачу — тот самый синий из b5072bf
+const TINT_NEUTRAL = 'rgba(78,78,92,0.88)'; // ○ Без отметки
+const TINT_LABEL = 'rgba(24,24,30,0.82)';
+const TINT_GREEN_SOFT = 'rgba(48,209,88,0.24)'; // кнопка статуса без отметки
+const ARC_FILL = [TINT_GREEN, TINT_BLUE, TINT_NEUTRAL];
+
+function TintGlass({ style, fill, radius, interactive = false, children }) {
+  return (
+    <Glass style={[style, { borderRadius: radius }]} intensity={50} interactive={interactive}>
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: fill }]} />
+      <View
+        pointerEvents="none"
+        style={[styles.tgShine, { borderTopLeftRadius: radius, borderTopRightRadius: radius }]}
+      />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.tgEdge, { borderRadius: radius }]} />
+      {children}
+    </Glass>
+  );
+}
 
 /** Лёгкая карточка записи — без тяжёлого blur на каждой строке */
 function ItemCard({ children, style }) {
@@ -554,10 +581,16 @@ const STATUS_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
 // Варианты: 0 ✓ Оплачено, 1 → Не плачу (перенести), 2 ○ Без отметки.
 const ARC_R = 110; // радиус веера от центра кнопки
 const ARC_OPT = 56; // диаметр кружка варианта
-const ARC_ANG = [90, 135, 180]; // градусы: вверх, по диагонали, влево (зеркалится по месту)
+// Симметричный веер: центр — направление 150° (вверх-влево от кнопки у правого края),
+// шаг 48° поровну: 102° / 150° / 198°. Для левого края/верха экрана зеркалится.
+const ARC_MID = 150;
+const ARC_STEP = 48;
+const ARC_ANG = [ARC_MID - ARC_STEP, ARC_MID, ARC_MID + ARC_STEP];
+const ARC_LBL_W = 104;
+const ARC_LBL_H = 32;
 const ARC_HIT = 52; // радиус захвата варианта пальцем
 const ARC_CANCEL = 30; // палец на самой кнопке — отмена
-const ARC_TOP_MIN = 150; // выше этого y веер раскрывается вниз
+const ARC_FLIP_Y = 290; // кнопка выше этого y — веер раскрывается вниз (иначе верх уходит за экран)
 const ARC_SPRING = { damping: 24, stiffness: 320, mass: 0.7, overshootClamping: true };
 const ARC_OPTS = [
   { glyph: '✓', label: 'Оплачено', sub: null },
@@ -568,6 +601,18 @@ const ARC_OPTS = [
 function arcX(i, side) {
   'worklet';
   return -side * Math.cos((ARC_ANG[i] * Math.PI) / 180) * ARC_R;
+}
+/**
+ * Центр подписи относительно центра кружка: с внешней стороны веера —
+ * над/под кружком, если луч в основном вертикальный, иначе сбоку (без наездов на кружки).
+ */
+function arcLbl(i, dir, side) {
+  'worklet';
+  const a = (ARC_ANG[i] * Math.PI) / 180;
+  const ux = -side * Math.cos(a);
+  const uy = -dir * Math.sin(a);
+  if (Math.abs(uy) >= 0.6) return { x: 0, y: Math.sign(uy) * (ARC_OPT / 2 + 6 + ARC_LBL_H / 2) };
+  return { x: Math.sign(ux) * (ARC_OPT / 2 + 6 + ARC_LBL_W / 2), y: 0 };
 }
 function arcY(i, dir) {
   'worklet';
@@ -663,7 +708,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
         const y0 = e.absoluteY - e.y + 26;
         cx.value = x0;
         cy.value = y0;
-        dir.value = y0 - ARC_R - ARC_OPT < ARC_TOP_MIN ? -1 : 1;
+        dir.value = y0 < ARC_FLIP_Y ? -1 : 1;
         side.value = x0 > SCREEN_W / 2 ? -1 : 1;
         cur.value = curIdx;
         hover.value = -1;
@@ -702,6 +747,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
 
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: 1 - 0.1 * press.value }] }));
   const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - paid.value }));
+  const paidFillStyle = useAnimatedStyle(() => ({ opacity: paid.value }));
   const paidStyle = useAnimatedStyle(() => ({
     opacity: paid.value,
     transform: [{ scale: 0.55 + 0.45 * paid.value }],
@@ -712,12 +758,13 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
       <View collapsable={false} style={styles.sBtnHit}>
         {/* scale — на обёртке, само стекло не трансформируем и не делаем полупрозрачным */}
         <Animated.View style={btnStyle}>
-          <Glass style={styles.sBtn} intensity={40} tint="rgba(48,209,88,0.32)" tintFallback="rgba(48,209,88,0.16)">
+          <TintGlass style={styles.sBtn} fill={TINT_GREEN_SOFT} radius={22}>
+            <Animated.View style={[StyleSheet.absoluteFill, styles.sPaidFill, paidFillStyle]} />
             <Animated.View style={[styles.sRing, ringStyle]} />
-            <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
+            <Animated.View style={[styles.sFill, paidStyle]}>
               <Text style={styles.sGlyph}>✓</Text>
             </Animated.View>
-          </Glass>
+          </TintGlass>
         </Animated.View>
       </View>
     </GestureDetector>
@@ -753,30 +800,24 @@ function ArcOption({ i, arc }) {
   const glow = useAnimatedStyle(() => ({ opacity: h.value }));
   // подпись — с внешней стороны веера, чтобы не наезжать на соседние кружки
   const lbl = useAnimatedStyle(() => {
-    const above = (i < 2) === (dir.value === 1);
-    return { top: above ? -36 : ARC_OPT + 4 };
+    const l = arcLbl(i, dir.value, side.value);
+    return { left: ARC_OPT / 2 + l.x - ARC_LBL_W / 2, top: ARC_OPT / 2 + l.y - ARC_LBL_H / 2 };
   });
   const o = ARC_OPTS[i];
   return (
     <Animated.View style={[styles.arcOpt, st]} pointerEvents="none">
       <Animated.View style={grow}>
-        <Glass
-          style={styles.arcDot}
-          intensity={55}
-          interactive
-          tint={i === 0 ? GLASS_GREEN : i === 1 ? GLASS_BLUE : undefined}
-          tintFallback={i === 0 ? GLASS_GREEN_FB : i === 1 ? GLASS_BLUE_FB : undefined}
-        >
+        <TintGlass style={styles.arcDot} fill={ARC_FILL[i]} radius={ARC_OPT / 2} interactive>
           <Animated.View style={[StyleSheet.absoluteFill, styles.arcGlow, glow]} />
           {i === 2 ? <View style={styles.arcEmpty} /> : <Text style={styles.arcGlyph}>{o.glyph}</Text>}
           <Animated.View style={[StyleSheet.absoluteFill, styles.arcCur, ring]} />
-        </Glass>
+        </TintGlass>
       </Animated.View>
       <Animated.View style={[styles.arcLblPos, lbl]}>
-        <Glass style={styles.arcLblWrap} intensity={50}>
+        <TintGlass style={styles.arcLblWrap} fill={TINT_LABEL} radius={12}>
           <Text style={styles.arcLbl} numberOfLines={1}>{o.label}</Text>
           {o.sub ? <Text style={styles.arcSub} numberOfLines={1}>{o.sub}</Text> : null}
-        </Glass>
+        </TintGlass>
       </Animated.View>
     </Animated.View>
   );
@@ -2392,7 +2433,8 @@ export default function App() {
   // Большая цифра: «Не оплачено −X», X — сумма неотмеченных расходов этой зарплаты.
   const ft = paydayTotals(focus ? expensesForPayday(focus) : [], focus ? earnedForPayday(focus) : 0);
   const sv = summaryView(ft);
-  const balanceOk = ft.free >= 0;
+  // итоги месяца — те же правила, сумма по зарплатам месяца (как группы ниже)
+  const mv = monthView(monthTotals(state.expenses, pays));
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
   const rec = paid.filter((e) => e.type === 'recurring');
@@ -3255,6 +3297,23 @@ export default function App() {
         >
           <LayoutAnimationConfig key={`e-${viewY}-${viewM}`} skipEntering skipExiting>
             <View>
+              {pays.length > 0 && (
+                <Glass style={styles.monthBar} intensity={40}>
+                  <View style={styles.monthBarRow}>
+                    <Text style={styles.monthBarK}>За {MONTHS[viewM].toLowerCase()}</Text>
+                    <Text
+                      key={mv.rest}
+                      style={[styles.monthBarRest, mv.restTone === 'bad' ? styles.bad : styles.good]}
+                      numberOfLines={1}
+                    >
+                      {mv.rest}
+                    </Text>
+                  </View>
+                  <Text style={styles.monthBarLine} numberOfLines={1}>
+                    всего {mv.total} · оплачено {mv.paid}
+                  </Text>
+                </Glass>
+              )}
               {focus && (
                 <Glass style={styles.balance} intensity={42}>
                   <View style={styles.cardHead}>
@@ -3263,7 +3322,9 @@ export default function App() {
                       <Text style={[styles.tagTxt, sv.tagTone === 'good' ? styles.good : styles.bad]}>{sv.tag}</Text>
                     </View>
                   </View>
-                  <Text style={styles.paySub}>{sv.sub}</Text>
+                  <Text style={styles.paySub}>
+                    {sv.mode === 'due' ? 'Не оплачено' : sv.mode === 'done' ? 'Все расходы этой зарплаты' : 'Расходов к этой зарплате нет'}
+                  </Text>
                   {/* Без adjustsFontSizeToFit: на Fabric/iOS он кэширует замер текста, и после
                       «Всё оплачено» красное «−X» не возвращалось. key — свежий узел на каждую смену. */}
                   <Text
@@ -3278,16 +3339,11 @@ export default function App() {
                     {sv.big}
                   </Text>
                   <Meter value={sv.progress} color={accent} />
-                  <Text style={styles.calcMeta}>{sv.paidLine}</Text>
                   <View style={styles.statRow}>
-                    <Stat k="Заработано" v={money(ft.earned)} tone={balanceOk ? 'good' : 'bad'} />
-                    <Stat k="К оплате" v={money(ft.planned)} />
-                    <Stat
-                      k="После оплат"
-                      v={`${ft.free < 0 ? '−' : ''}${money(Math.abs(ft.free))}`}
-                      tone={balanceOk ? 'good' : 'bad'}
-                    />
+                    <Stat k="Расходы за зарплату" v={sv.total} />
+                    <Stat k="Оплачено" v={sv.paid} tone="good" />
                   </View>
+                  {sv.earned ? <Text style={styles.calcMeta}>заработано за смены · {sv.earned}</Text> : null}
                 </Glass>
               )}
               {pays.map((p, i) => {
@@ -3300,7 +3356,7 @@ export default function App() {
                         {ORDINALS[i] || `${i + 1}-я`} зарплата · {fmtShort(p)}
                       </Text>
                       <Text style={styles.gSub}>
-                        {money(gt.paid)} из {money(gt.planned)}
+                        {money(gt.paid)} из {money(gt.total)}
                       </Text>
                     </View>
                     {list.length === 0 ? (
@@ -3323,7 +3379,7 @@ export default function App() {
                       <Text style={styles.footL}>
                         Итого
                       </Text>
-                      <Text style={styles.footV}>{money(gt.planned)}</Text>
+                      <Text style={styles.footV}>{money(gt.total)}</Text>
                     </Animated.View>
                   </Animated.View>
                 );
@@ -3557,6 +3613,11 @@ const styles = StyleSheet.create({
 
   balance: { padding: 20, marginBottom: 16, borderRadius: 26 },
   period: { color: '#fff', fontSize: 22, fontWeight: '700', letterSpacing: -0.4 },
+  monthBar: { paddingHorizontal: 18, paddingVertical: 12, marginBottom: 12, borderRadius: 22 },
+  monthBarRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 },
+  monthBarK: { color: 'rgba(235,235,245,0.75)', fontSize: 15, fontWeight: '600' },
+  monthBarRest: { fontSize: 20, fontWeight: '800', letterSpacing: -0.4 },
+  monthBarLine: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
   paySub: { color: 'rgba(235,235,245,0.5)', fontSize: 14, marginTop: 4, fontWeight: '500' },
   nums: { flexDirection: 'row', marginTop: 14, gap: 12 },
   k: {
@@ -3679,7 +3740,7 @@ const styles = StyleSheet.create({
     height: 26,
     borderRadius: 13,
     borderWidth: 2,
-    borderColor: 'rgba(48,209,88,0.85)',
+    borderColor: 'rgba(76,217,100,0.95)',
   },
   sFill: {
     position: 'absolute',
@@ -3689,7 +3750,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sFillPaid: { backgroundColor: '#30d158' },
+  sPaidFill: { backgroundColor: 'rgba(36,170,74,0.95)' },
+  tgShine: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: '48%',
+    backgroundColor: 'rgba(255,255,255,0.13)',
+  },
+  tgEdge: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.32)' },
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
   menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
@@ -3704,8 +3774,8 @@ const styles = StyleSheet.create({
   arcGlow: { backgroundColor: 'rgba(255,255,255,0.16)', borderRadius: ARC_OPT / 2 },
   arcCur: { borderRadius: ARC_OPT / 2, borderWidth: 2, borderColor: '#fff' },
   arcGlyph: { color: '#fff', fontSize: 22, fontWeight: '800' },
-  arcEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: 'rgba(48,209,88,0.9)' },
-  arcLblPos: { position: 'absolute', top: ARC_OPT + 4, width: 104, alignItems: 'center' },
+  arcEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.9)' },
+  arcLblPos: { position: 'absolute', width: ARC_LBL_W, height: ARC_LBL_H, alignItems: 'center', justifyContent: 'center' },
   arcLblWrap: {
     minWidth: 64,
     height: 32,
@@ -3715,7 +3785,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   arcLbl: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  arcSub: { color: 'rgba(235,235,245,0.6)', fontSize: 10 },
+  arcSub: { color: 'rgba(235,235,245,0.75)', fontSize: 10, fontWeight: '600' },
   toastWrap: { position: 'absolute', left: 16, right: 16, bottom: 104, alignItems: 'center' },
   toast: {
     flexDirection: 'row',

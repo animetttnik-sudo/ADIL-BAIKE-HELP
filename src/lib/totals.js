@@ -30,19 +30,32 @@ export function expensesInPeriod(expenses, p) {
 }
 
 /**
- * planned — к оплате всего; paid — оплачено (✓); unpaid — не оплачено = planned − paid
- * (большая цифра карточки, показывается как «−unpaid»); free — заработано − planned.
+ * Итоги одной зарплаты (единственный источник правды для карточки, шапок групп и «Итого»):
+ *  total     — «Расходы за зарплату»: все расходы, что сейчас лежат в этой зарплате
+ *              (перенесённые отсюда уже имеют новую дату и сюда не входят, перенесённые сюда — входят);
+ *  paid      — «Оплачено»: сумма отмеченных ✓;
+ *  remaining — остаток = total − paid (на карточке красным «−remaining»);
+ *  count / open — число расходов / неотмеченных; earned — заработано за смены (вторичная строка).
  */
 export function paydayTotals(list, earned = 0) {
-  let planned = 0;
+  let total = 0;
   let paid = 0;
   let open = 0;
+  let count = 0;
   for (const e of list || []) {
-    planned += amt(e);
+    count += 1;
+    total += amt(e);
     if (isPaid(e)) paid += amt(e);
     else open += 1;
   }
-  return { planned, paid, unpaid: planned - paid, open, free: earned - planned, earned };
+  return { total, paid, remaining: total - paid, count, open, earned };
+}
+
+/** Итоги месяца = сумма итогов его зарплат (те же правила, что у каждой карточки). */
+export function monthTotals(expenses, paydays) {
+  const per = (paydays || []).map((p) => ({ payday: p, ...paydayTotals(expensesInPeriod(expenses, p)) }));
+  const sum = (k) => per.reduce((a, t) => a + t[k], 0);
+  return { total: sum('total'), paid: sum('paid'), remaining: sum('remaining'), count: sum('count'), open: sum('open'), per };
 }
 
 /** Тап по кнопке: не ✓ → ✓, ✓ → пусто. */
@@ -88,26 +101,36 @@ export function plural(n, one, few, many) {
 const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
 
 /**
- * Всё, что показывает карточка «К зарплате», из итогов paydayTotals — одной чистой функцией,
- * без кэшей: каждый рендер пересчитывается с нуля (✓ ↔ пусто работают в обе стороны).
- * mode: 'due' (есть неоплаченные — красный «−X»), 'done' (всё оплачено), 'empty' (платежей нет).
+ * Всё, что показывает карточка «К зарплате», из paydayTotals — одной чистой функцией, без кэшей.
+ * mode: 'due' — есть неотмеченные (красный «−remaining»), 'done' — всё оплачено, 'empty' — расходов нет.
  */
 export function summaryView(t) {
-  const mode = t.planned <= 0 ? 'empty' : t.unpaid > 0 ? 'due' : 'done';
-  const enough = t.free >= 0;
+  const mode = t.total <= 0 && t.count === 0 ? 'empty' : t.remaining > 0 || t.open > 0 ? 'due' : 'done';
   return {
     mode,
-    big: mode === 'due' ? `−${fmt(t.unpaid)}` : mode === 'done' ? 'Всё оплачено' : fmt(0),
+    big: mode === 'due' ? `−${fmt(t.remaining)}` : mode === 'done' ? 'Всё оплачено' : fmt(0),
     bigTone: mode === 'due' ? 'bad' : 'good',
-    sub:
+    tag:
       mode === 'due'
-        ? `не оплачено · ${t.open} ${plural(t.open, 'платёж', 'платежа', 'платежей')}`
+        ? `${t.open} ${plural(t.open, 'не оплачен', 'не оплачены', 'не оплачены')}`
         : mode === 'done'
-          ? 'все платежи этой зарплаты оплачены'
-          : 'платежей к этой зарплате нет',
-    tag: mode === 'done' ? 'всё оплачено' : enough ? 'хватает' : 'не хватает',
-    tagTone: mode === 'done' || enough ? 'good' : 'bad',
-    progress: t.planned > 0 ? Math.min(1, t.paid / t.planned) : 0,
-    paidLine: `оплачено ${fmt(t.paid)} из ${fmt(t.planned)}`,
+          ? 'всё оплачено'
+          : 'нет расходов',
+    tagTone: mode === 'due' ? 'bad' : 'good',
+    progress: t.total > 0 ? Math.min(1, t.paid / t.total) : mode === 'done' ? 1 : 0,
+    total: fmt(t.total),
+    paid: fmt(t.paid),
+    earned: t.earned > 0 ? fmt(t.earned) : null,
+  };
+}
+
+/** Строка месяца: «всего X · оплачено Z · −остаток» (или «всё оплачено»). */
+export function monthView(m) {
+  return {
+    total: fmt(m.total),
+    paid: fmt(m.paid),
+    rest: m.remaining > 0 ? `−${fmt(m.remaining)}` : m.count > 0 ? 'всё оплачено' : '—',
+    restTone: m.remaining > 0 ? 'bad' : 'good',
+    progress: m.total > 0 ? Math.min(1, m.paid / m.total) : 0,
   };
 }
