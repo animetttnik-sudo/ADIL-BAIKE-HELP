@@ -979,14 +979,12 @@ function NumInput({ value, onChange, style, inputRef, onFocused, onSubmit, acces
   );
 }
 
-const CALC_ACC_ID = 'calcCountsBar';
-
 /**
  * Строка позиции: поле всегда видно и редактирует 1-й подсчёт
  * (остальные подсчёты — в шторке по тапу на название). − / + тоже по 1-му.
  */
 const CountRow = memo(function CountRow({
-  item, tallies, last, isLastField, onStep, onSet, onOpen, register, onFocusItem, onNext,
+  item, tallies, last, isLastField, pos, count, accent, onStep, onSet, onOpen, register, onFocusItem, onNext,
 }) {
   const t = Array.isArray(tallies) ? tallies : [itemTotal(tallies)];
   const total = itemTotal(t);
@@ -1016,8 +1014,17 @@ const CountRow = memo(function CountRow({
         onFocused={() => onFocusItem(id)}
         onSubmit={() => onNext(id, 1)}
         last={isLastField}
-        accessoryId={Platform.OS === 'ios' ? CALC_ACC_ID : undefined}
+        accessoryId={Platform.OS === 'ios' ? `kb-calc-${id}` : undefined}
         style={[styles.cCount, styles.cCountTxt]}
+      />
+      <KeyBar
+        nativeID={`kb-calc-${id}`}
+        label={`${item.name}  ·  ${pos + 1}/${count}`}
+        hasPrev={pos > 0}
+        isLast={isLastField}
+        accent={accent}
+        onPrev={() => onNext(id, -1)}
+        onNext={() => onNext(id, 1)}
       />
       <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, 1)}>
         <Text style={styles.stepTxt}>+</Text>
@@ -1026,35 +1033,42 @@ const CountRow = memo(function CountRow({
   );
 });
 
-/** Панель над цифровой клавиатурой iOS: ‹ · позиция · Готово · Далее ›. */
-function CalcKeyBar({ label, hasPrev, isLast, accent, onPrev, onNext, onDone }) {
+/**
+ * Панель над клавиатурой iOS: [Скрыть] · подпись · [↑] [Далее ›].
+ * Своя панель на КАЖДОЕ поле (свой nativeID): в Fabric <InputAccessoryView nativeID>
+ * цепляется только к первому полю с этим id, поэтому общий id не годится.
+ * Рендерить рядом с полем (в том же окне — внутри шторки для полей шторки).
+ */
+const KeyBar = memo(function KeyBar({ nativeID, label, hasPrev, isLast, accent, onPrev, onNext }) {
   if (Platform.OS !== 'ios') return null;
   return (
-    <InputAccessoryView nativeID={CALC_ACC_ID}>
+    <InputAccessoryView nativeID={nativeID}>
       <Glass style={styles.keyBar} intensity={60}>
-        <Pressable
-          style={[styles.keyBarRound, !hasPrev && { opacity: 0.35 }]}
-          disabled={!hasPrev}
-          hitSlop={8}
-          onPress={onPrev}
-        >
-          <Text style={styles.keyBarArrow}>‹</Text>
+        <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
+          <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
         <Text style={styles.keyBarLabel} numberOfLines={1}>
           {label}
         </Text>
-        {!isLast && (
-          <Pressable hitSlop={8} onPress={onDone} style={styles.keyBarDone}>
-            <Text style={styles.linkMuted}>Готово</Text>
-          </Pressable>
-        )}
-        <Pressable style={[styles.keyBarNext, { backgroundColor: accent }]} onPress={isLast ? onDone : onNext}>
+        <Pressable
+          style={[styles.keyBarRound, !hasPrev && { opacity: 0.35 }]}
+          disabled={!hasPrev}
+          hitSlop={6}
+          onPress={onPrev}
+        >
+          <Text style={styles.keyBarArrow}>↑</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.keyBarNext, { backgroundColor: accent }]}
+          hitSlop={6}
+          onPress={isLast ? () => Keyboard.dismiss() : onNext}
+        >
           <Text style={styles.keyBarNextTxt}>{isLast ? 'Готово' : 'Далее ›'}</Text>
         </Pressable>
       </Glass>
     </InputAccessoryView>
   );
-}
+});
 
 function CheckRow({ checked, label, amount, accent, onToggle }) {
   const s = useSharedValue(1);
@@ -1084,7 +1098,6 @@ function CalcView({
   const [collapsed, setCollapsed] = useState({});
   const [showUsage, setShowUsage] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const [focusId, setFocusId] = useState(null);
 
   // ── ввод с клавиатуры: Далее → следующая позиция (свёрнутые группы пропускаем)
   const inputs = useRef(new Map());
@@ -1125,7 +1138,6 @@ function CalcView({
     });
     const subH = Keyboard.addListener('keyboardDidHide', () => {
       focusRef.current = null;
-      setFocusId(null);
     });
     return () => {
       sub.remove();
@@ -1136,7 +1148,6 @@ function CalcView({
   const onFocusItem = useCallback(
     (id) => {
       focusRef.current = id;
-      setFocusId(id);
       if (Keyboard.isVisible()) requestAnimationFrame(() => ensureVisible(id));
     },
     [ensureVisible]
@@ -1152,8 +1163,6 @@ function CalcView({
       Keyboard.dismiss();
     }
   }, []);
-  const focusIdx = focusId ? order.indexOf(focusId) : -1;
-  const focusItem = focusId ? CALC_ITEMS.find((x) => x.id === focusId) : null;
 
   const res = useMemo(() => computeCalc(day.counts, calc.rates, day.staff), [day.counts, calc.rates, day.staff]);
   const own = ownPay(res, calc.rates, day);
@@ -1286,6 +1295,9 @@ function CalcView({
                       tallies={day.counts[it.id]}
                       last={i === items.length - 1}
                       isLastField={order[order.length - 1] === it.id}
+                      pos={order.indexOf(it.id)}
+                      count={order.length}
+                      accent={accent}
                       onStep={onStep}
                       onSet={onSet}
                       onOpen={onOpenItem}
@@ -1386,15 +1398,6 @@ function CalcView({
       <Animated.View layout={ROW_LAYOUT}>
         <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
       </Animated.View>
-      <CalcKeyBar
-        label={focusItem ? `${focusItem.name}  ·  ${focusIdx + 1}/${order.length}` : ''}
-        hasPrev={focusIdx > 0}
-        isLast={focusIdx === order.length - 1}
-        accent={accent}
-        onPrev={() => focusId && onNext(focusId, -1)}
-        onNext={() => focusId && onNext(focusId, 1)}
-        onDone={() => Keyboard.dismiss()}
-      />
     </>
   );
 }
@@ -3086,20 +3089,29 @@ const styles = StyleSheet.create({
     borderRadius: 26,
   },
   keyBarRound: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 48,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  keyBarArrow: { color: '#fff', fontSize: 26, fontWeight: '400', marginTop: -3 },
-  keyBarLabel: { flex: 1, color: 'rgba(235,235,245,0.75)', fontSize: 14, fontWeight: '600' },
-  keyBarDone: { paddingHorizontal: 4 },
+  keyBarArrow: { color: '#fff', fontSize: 22, fontWeight: '600' },
+  keyBarLabel: { flex: 1, color: 'rgba(235,235,245,0.75)', fontSize: 14, fontWeight: '600', textAlign: 'center' },
+  keyBarHide: {
+    height: 44,
+    minWidth: 84,
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  keyBarHideTxt: { color: '#fff', fontSize: 16, fontWeight: '600' },
   keyBarNext: {
-    minWidth: 104,
-    height: 42,
-    borderRadius: 21,
+    minWidth: 108,
+    height: 44,
+    borderRadius: 22,
     paddingHorizontal: 18,
     alignItems: 'center',
     justifyContent: 'center',
