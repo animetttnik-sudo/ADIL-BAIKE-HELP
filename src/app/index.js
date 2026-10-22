@@ -52,6 +52,7 @@ import Animated, {
     LayoutAnimationConfig,
     LinearTransition,
     useAnimatedKeyboard,
+    useAnimatedReaction,
     useAnimatedStyle, useReducedMotion, useSharedValue,
     withSequence,
     withSpring,
@@ -59,7 +60,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
-import { expensesInPeriod, paydayTotals, toggledStatus } from '../lib/totals';
+import { carryInState, expensesInPeriod, paydayTotals, toggledStatus, undoCarry } from '../lib/totals';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
     CALC_ITEMS,
@@ -124,15 +125,9 @@ function plural(n, one, few, many) {
   if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
   return many;
 }
+// старый ✕ ('missed', «не оплатил вовремя») показывается как неотмеченный
 function displayStatus(e) {
-  if (e.status === 'paid') return 'paid';
-  if (e.status === 'missed') return 'missed';
-  return 'none';
-}
-function markGlyph(st) {
-  if (st === 'paid') return '✓';
-  if (st === 'missed') return '✕';
-  return '';
+  return e.status === 'paid' ? 'paid' : 'none';
 }
 
 // Пружины с критическим демпфированием + overshootClamping — без перелёта
@@ -545,33 +540,98 @@ const ROW_LAYOUT = LinearTransition.duration(220);
 
 const STATUS_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
 
+// ── Веерное меню статуса ────────────────────────────────────────────────
+// Варианты: 0 ✓ Оплачено, 1 → Не плачу (перенести), 2 ○ Без отметки.
+const ARC_R = 110; // радиус веера от центра кнопки
+const ARC_OPT = 56; // диаметр кружка варианта
+const ARC_ANG = [90, 135, 180]; // градусы: вверх, по диагонали, влево (зеркалится по месту)
+const ARC_HIT = 52; // радиус захвата варианта пальцем
+const ARC_CANCEL = 30; // палец на самой кнопке — отмена
+const ARC_TOP_MIN = 150; // выше этого y веер раскрывается вниз
+const ARC_SPRING = { damping: 24, stiffness: 320, mass: 0.7, overshootClamping: true };
+const ARC_OPTS = [
+  { glyph: '✓', label: 'Оплачено', sub: null },
+  { glyph: '→', label: 'Не плачу', sub: 'перенести' },
+  { glyph: '', label: 'Без отметки', sub: null },
+];
+
+function arcX(i, side) {
+  'worklet';
+  return -side * Math.cos((ARC_ANG[i] * Math.PI) / 180) * ARC_R;
+}
+function arcY(i, dir) {
+  'worklet';
+  return -dir * Math.sin((ARC_ANG[i] * Math.PI) / 180) * ARC_R;
+}
+/** Какой вариант под пальцем: −1 — ни один (или палец на кнопке). */
+function arcHit(px, py, cx, cy, dir, side) {
+  'worklet';
+  const dx = px - cx;
+  const dy = py - cy;
+  if (dx * dx + dy * dy < ARC_CANCEL * ARC_CANCEL) return -1;
+  let best = -1;
+  let bd = ARC_HIT * ARC_HIT;
+  for (let i = 0; i < 3; i++) {
+    const ox = dx - arcX(i, side);
+    const oy = dy - arcY(i, dir);
+    const d = ox * ox + oy * oy;
+    if (d < bd) {
+      bd = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 /**
- * Зелёная стеклянная кнопка статуса.
- * Тап — ✓/пусто, долгое нажатие — меню ✓ / ✕ / пусто (StatusMenu у корня App).
- * RNGH Exclusive(LongPress, Tap) + maxDistance: при скролле/свайпе оба жеста
- * отваливаются по сдвигу пальца, поэтому случайных переключений нет.
+ * Общие shared values меню (создаются один раз в App). Кнопки пишут в них прямо из
+ * жестов на UI-потоке, оверлей <ArcMenu> читает — список при этом не перерисовывается.
  */
-const StatusButton = memo(function StatusButton({ id, status, onToggle, onMenu }) {
-  const ref = useRef(null);
+function useArcCtl(onPick) {
+  const open = useSharedValue(0);
+  const cx = useSharedValue(0);
+  const cy = useSharedValue(0);
+  const dir = useSharedValue(1); // 1 — вверх, −1 — вниз
+  const side = useSharedValue(-1); // −1 — влево, 1 — вправо
+  const hover = useSharedValue(-1);
+  const cur = useSharedValue(-1); // текущий статус расхода (0 или 2)
+  const pickRef = useRef(onPick);
+  pickRef.current = onPick;
+  const stickyRef = useRef(null);
+  return useMemo(
+    () => ({
+      open, cx, cy, dir, side, hover, cur,
+      pick: (id, i) => pickRef.current(id, i),
+      sticky: (id) => stickyRef.current?.(id),
+      stickyRef,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+}
+
+/**
+ * Зелёная стеклянная кнопка статуса. Один жест-оркестр на UI-потоке:
+ *  • тап — ✓/пусто;
+ *  • удержание 400 мс — веер (Pan.activateAfterLongPress); не отпуская палец, ведите к варианту,
+ *    отпустите — выбран; отпустили на кнопке не сдвигая палец — веер остаётся, можно тапнуть;
+ *  • любой сдвиг пальца до 400 мс (скролл, свайп карточки) — жесты кнопки отваливаются.
+ */
+const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
   const paid = useSharedValue(status === 'paid' ? 1 : 0);
-  const miss = useSharedValue(status === 'missed' ? 1 : 0);
   const press = useSharedValue(0);
+  const moved = useSharedValue(0);
+  const { open, cx, cy, dir, side, hover, cur, pick, sticky } = arc;
+  const curIdx = status === 'paid' ? 0 : 2;
 
   useEffect(() => {
     paid.value = withTiming(status === 'paid' ? 1 : 0, STATUS_IN);
-    miss.value = withTiming(status === 'missed' ? 1 : 0, STATUS_IN);
-  }, [status, paid, miss]);
+  }, [status, paid]);
 
   const toggle = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onToggle(id);
   }, [id, onToggle]);
-  const openMenu = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const n = ref.current;
-    if (!n) return;
-    n.measureInWindow((x, y, w, h) => onMenu(id, { x, y, w, h }));
-  }, [id, onMenu]);
 
   const gesture = useMemo(() => {
     const tap = Gesture.Tap()
@@ -585,50 +645,66 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, onMenu }
       .onFinalize(() => {
         press.value = withTiming(0, { duration: 160 });
       });
-    const long = Gesture.LongPress()
-      .minDuration(380)
-      .maxDistance(10)
-      .onStart(() => {
+    const hold = Gesture.Pan()
+      .activateAfterLongPress(400)
+      .onStart((e) => {
+        // центр кнопки в координатах окна (детектор = зона 52×52)
+        const x0 = e.absoluteX - e.x + 26;
+        const y0 = e.absoluteY - e.y + 26;
+        cx.value = x0;
+        cy.value = y0;
+        dir.value = y0 - ARC_R - ARC_OPT < ARC_TOP_MIN ? -1 : 1;
+        side.value = x0 > SCREEN_W / 2 ? -1 : 1;
+        cur.value = curIdx;
+        hover.value = -1;
+        moved.value = 0;
         press.value = withTiming(0, { duration: 160 });
-        scheduleOnRN(openMenu);
+        open.value = withTiming(1, { duration: 170, easing: Easing.out(Easing.cubic) });
+        scheduleOnRN(hapticMedium);
+      })
+      .onUpdate((e) => {
+        const dx = e.absoluteX - cx.value;
+        const dy = e.absoluteY - cy.value;
+        if (dx * dx + dy * dy > 144) moved.value = 1;
+        const h = arcHit(e.absoluteX, e.absoluteY, cx.value, cy.value, dir.value, side.value);
+        if (h !== hover.value) {
+          hover.value = h;
+          if (h >= 0) scheduleOnRN(hapticSelect);
+        }
+      })
+      .onEnd(() => {
+        const h = hover.value;
+        if (h >= 0) {
+          scheduleOnRN(pick, id, h);
+          open.value = withTiming(0, { duration: 150 });
+        } else if (!moved.value) {
+          scheduleOnRN(sticky, id); // подняли палец на кнопке — веер ждёт тапа
+        } else {
+          open.value = withTiming(0, { duration: 150 });
+        }
+        hover.value = -1;
+      })
+      .onFinalize((_e, ok) => {
+        if (!ok) press.value = withTiming(0, { duration: 160 });
       });
-    return Gesture.Exclusive(long, tap);
-  }, [press, toggle, openMenu]);
+    return Gesture.Exclusive(hold, tap);
+  }, [press, toggle, open, cx, cy, dir, side, hover, cur, moved, pick, sticky, id, curIdx]);
 
-  const btnStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 - 0.1 * press.value }],
-    backgroundColor: interpolateColor(
-      miss.value,
-      [0, 1],
-      ['rgba(48,209,88,0.16)', 'rgba(255,255,255,0.08)']
-    ),
-    borderColor: interpolateColor(
-      miss.value,
-      [0, 1],
-      ['rgba(48,209,88,0.45)', 'rgba(255,255,255,0.2)']
-    ),
-  }));
-  const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - Math.max(paid.value, miss.value) }));
+  const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: 1 - 0.1 * press.value }] }));
+  const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - paid.value }));
   const paidStyle = useAnimatedStyle(() => ({
     opacity: paid.value,
     transform: [{ scale: 0.55 + 0.45 * paid.value }],
   }));
-  const missStyle = useAnimatedStyle(() => ({
-    opacity: miss.value,
-    transform: [{ scale: 0.55 + 0.45 * miss.value }],
-  }));
 
   return (
     <GestureDetector gesture={gesture}>
-      <View ref={ref} collapsable={false} style={styles.sBtnHit}>
+      <View collapsable={false} style={styles.sBtnHit}>
         <Animated.View style={[styles.sBtn, btnStyle]}>
           <View style={styles.sBtnEdge} pointerEvents="none" />
           <Animated.View style={[styles.sRing, ringStyle]} />
           <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
             <Text style={styles.sGlyph}>✓</Text>
-          </Animated.View>
-          <Animated.View style={[styles.sFill, styles.sFillMiss, missStyle]}>
-            <Text style={[styles.sGlyph, styles.sGlyphMiss]}>✕</Text>
           </Animated.View>
         </Animated.View>
       </View>
@@ -636,90 +712,137 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, onMenu }
   );
 });
 
-const MENU_W = 236;
-const MENU_H = 78;
-const MENU_OPTS = [
-  { st: 'paid', glyph: '✓', label: 'Оплачено' },
-  { st: 'missed', glyph: '✕', label: 'Не плачу' },
-  { st: null, glyph: '', label: 'Без отметки' },
-];
-
-/** Стеклянное меню статуса у кнопки; закрытие — тап мимо. Анимация на UI-потоке, без перелёта. */
-function StatusMenu({ menu, status, onPick, onClose }) {
-  const a = useSharedValue(0);
-  const [shown, setShown] = useState(null);
-  useEffect(() => {
-    if (menu) {
-      setShown(menu);
-      a.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
-    } else {
-      a.value = withTiming(0, { duration: 140, easing: Easing.in(Easing.quad) }, (fin) => {
-        if (fin) scheduleOnRN(setShown, null);
-      });
+function ArcOption({ i, arc }) {
+  const { open, cx, cy, dir, side, hover, cur } = arc;
+  const h = useSharedValue(0);
+  useAnimatedReaction(
+    () => hover.value === i,
+    (on, was) => {
+      if (on !== was) h.value = withSpring(on ? 1 : 0, ARC_SPRING);
     }
-  }, [menu, a]);
-
-  const backStyle = useAnimatedStyle(() => ({ opacity: a.value }));
-  const r = shown?.rect;
-  const above = r ? r.y - MENU_H - 10 > 70 : true;
-  const boxStyle = useAnimatedStyle(() => ({
-    opacity: a.value,
-    transform: [
-      { translateY: (above ? 8 : -8) * (1 - a.value) },
-      { scale: 0.88 + 0.12 * a.value },
-    ],
-  }));
-  if (!shown || !r) return null;
-  const left = Math.min(Math.max(12, r.x + r.w - MENU_W + 4), SCREEN_W - MENU_W - 12);
-  const top = above ? r.y - MENU_H - 10 : r.y + r.h + 10;
-  const cur = status ?? null;
-
+  );
+  const st = useAnimatedStyle(() => {
+    // все три выезжают в одном кадре; сдвиг по фазе ≤ ~10 мс на вариант
+    const p = Math.min(1, Math.max(0, (open.value - i * 0.06) / 0.88));
+    return {
+      opacity: p,
+      transform: [
+        { translateX: cx.value - ARC_OPT / 2 + arcX(i, side.value) * p },
+        { translateY: cy.value - ARC_OPT / 2 + arcY(i, dir.value) * p },
+        { scale: (0.4 + 0.6 * p) * (1 + 0.15 * h.value) },
+      ],
+    };
+  });
+  const ring = useAnimatedStyle(() => ({ opacity: cur.value === i ? 1 : 0 }));
+  const glow = useAnimatedStyle(() => ({ opacity: h.value }));
+  // подпись — с внешней стороны веера, чтобы не наезжать на соседние кружки
+  const lbl = useAnimatedStyle(() => {
+    const above = (i < 2) === (dir.value === 1);
+    return { top: above ? -36 : ARC_OPT + 4 };
+  });
+  const o = ARC_OPTS[i];
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents={menu ? 'auto' : 'none'}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
-        <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, backStyle]} />
-      </Pressable>
-      <Animated.View
-        style={[
-          styles.menuBox,
-          { left, top, transformOrigin: above ? 'right bottom' : 'right top' },
-          boxStyle,
-        ]}
-      >
-        <Glass style={styles.menuGlass} intensity={60}>
-          {MENU_OPTS.map((o) => {
-            const on = cur === o.st;
-            return (
-              <Pressable
-                key={String(o.st)}
-                style={({ pressed }) => [styles.menuOpt, pressed && styles.menuOptPressed]}
-                onPress={() => onPick(shown.id, o.st)}
-              >
-                <View
-                  style={[
-                    styles.menuDot,
-                    o.st === 'paid' && styles.sFillPaid,
-                    o.st === 'missed' && styles.sFillMiss,
-                    o.st === null && styles.menuDotEmpty,
-                    on && styles.menuDotOn,
-                  ]}
-                >
-                  <Text style={[styles.sGlyph, o.st === 'missed' && styles.sGlyphMiss]}>{o.glyph}</Text>
-                </View>
-                <Text style={[styles.menuLbl, on && styles.menuLblOn]} numberOfLines={1}>
-                  {o.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </Glass>
+    <Animated.View style={[styles.arcOpt, st]} pointerEvents="none">
+      <View style={[styles.arcDot, i === 0 && styles.arcDotPaid, i === 1 && styles.arcDotMove]}>
+        <Animated.View style={[StyleSheet.absoluteFill, styles.arcGlow, glow]} />
+        {i === 2 ? <View style={styles.arcEmpty} /> : <Text style={styles.arcGlyph}>{o.glyph}</Text>}
+        <Animated.View style={[StyleSheet.absoluteFill, styles.arcCur, ring]} />
+      </View>
+      <Animated.View style={[styles.arcLblWrap, lbl]}>
+        <Text style={styles.arcLbl} numberOfLines={1}>{o.label}</Text>
+        {o.sub ? <Text style={styles.arcSub} numberOfLines={1}>{o.sub}</Text> : null}
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 }
 
+/** Оверлей веера поверх всего. Сам по себе не ловит касания, пока не «залип» (палец подняли на кнопке). */
+const ArcMenu = memo(function ArcMenu({ arc }) {
+  const [stickyId, setStickyId] = useState(null);
+  const { open, cx, cy, dir, side, pick } = arc;
+  useEffect(() => {
+    arc.stickyRef.current = setStickyId;
+    return () => {
+      arc.stickyRef.current = null;
+    };
+  }, [arc]);
+  const tapPick = useCallback(
+    (i) => {
+      const id = stickyId;
+      setStickyId(null);
+      if (i >= 0 && id) pick(id, i);
+    },
+    [stickyId, pick]
+  );
+  const tap = useMemo(
+    () =>
+      Gesture.Tap()
+        .maxDistance(16)
+        .onEnd((e) => {
+          const i = arcHit(e.absoluteX, e.absoluteY, cx.value, cy.value, dir.value, side.value);
+          open.value = withTiming(0, { duration: 150 });
+          scheduleOnRN(tapPick, i);
+        }),
+    [cx, cy, dir, side, open, tapPick]
+  );
+  const back = useAnimatedStyle(() => ({ opacity: open.value }));
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents={stickyId ? 'auto' : 'none'}>
+      <GestureDetector gesture={tap}>
+        <View style={StyleSheet.absoluteFill}>
+          <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, back]} />
+          <ArcOption i={0} arc={arc} />
+          <ArcOption i={1} arc={arc} />
+          <ArcOption i={2} arc={arc} />
+        </View>
+      </GestureDetector>
+    </View>
+  );
+});
+
+/** Короткая плашка «Перенесено на …» с «Отменить». */
+function Toast({ toast, onUndo, onHide }) {
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(onHide, 4000);
+    return () => clearTimeout(t);
+  }, [toast, onHide]);
+  if (!toast) return null;
+  return (
+    <Animated.View
+      key={toast.k}
+      entering={FadeIn.duration(180)}
+      exiting={FadeOut.duration(160)}
+      style={styles.toastWrap}
+      pointerEvents="box-none"
+    >
+      <Glass style={styles.toast} intensity={60}>
+        <Text style={styles.toastTxt} numberOfLines={1}>{toast.text}</Text>
+        {toast.undo ? (
+          <Pressable hitSlop={10} onPress={onUndo}>
+            <Text style={styles.toastBtn}>Отменить</Text>
+          </Pressable>
+        ) : null}
+      </Glass>
+    </Animated.View>
+  );
+}
+
+// уход карточки (перенос/удаление): лёгкое затухание + поджатие, соседи съезжают ROW_LAYOUT
+const CARD_EXIT = () => {
+  'worklet';
+  const t = { duration: 240, easing: Easing.out(Easing.cubic) };
+  return {
+    initialValues: { opacity: 1, transform: [{ translateX: 0 }, { scale: 1 }] },
+    animations: {
+      opacity: withTiming(0, t),
+      transform: [{ translateX: withTiming(-28, t) }, { scale: withTiming(0.96, t) }],
+    },
+  };
+};
+
 /** Отдельная стеклянная карточка расхода. Свайп вправо — изменить, влево — удалить, тап — изменить. */
-const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle, onMenu }) {
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle, arc }) {
   const x = useSharedValue(0);
   const st = displayStatus(item);
   const id = item.id;
@@ -734,7 +857,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
 
   return (
-    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
+    <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       <View style={styles.eCardWrap}>
         <Animated.View style={[styles.revealLeft, leftStyle]}>
           <Text style={styles.revealTxt}>Изменить</Text>
@@ -751,26 +874,23 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle
                   <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
                 </View>
                 <View style={styles.mid}>
-                  <Text
-                    style={[styles.itemTitle, !item.title && styles.itemTitleDim, st === 'missed' && styles.eDim]}
-                    numberOfLines={1}
-                  >
+                  <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
                     {item.title || 'Без названия'}
                   </Text>
-                  <Text style={styles.meta}>
+                  <Text style={styles.meta} numberOfLines={1}>
                     {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
-                    {st === 'paid' ? (
-                      <Text style={styles.good}> · оплачено</Text>
-                    ) : st === 'missed' ? (
-                      <Text style={styles.metaMiss}> · не плачу</Text>
-                    ) : null}
+                    {st === 'paid' ? <Text style={styles.good}> · оплачено</Text> : null}
                   </Text>
+                  {item.movedFrom ? (
+                    <Text style={styles.metaMoved} numberOfLines={1}>
+                      ↪ перенесено с {fmtShort(item.movedFrom)}
+                      {item.moves > 1 ? ` · ${item.moves}×` : ''}
+                    </Text>
+                  ) : null}
                 </View>
-                <Text style={[styles.amt, st === 'paid' && styles.amtPaid, st === 'missed' && styles.amtMiss]}>
-                  {money(item.amount)}
-                </Text>
+                <Text style={[styles.amt, st === 'paid' && styles.amtPaid]}>{money(item.amount)}</Text>
               </Pressable>
-              <StatusButton id={id} status={item.status ?? null} onToggle={onToggle} onMenu={onMenu} />
+              <StatusButton id={id} status={st === 'paid' ? 'paid' : null} onToggle={onToggle} arc={arc} />
             </Glass>
           </Animated.View>
         </GestureDetector>
@@ -1674,7 +1794,7 @@ export default function App() {
   const [sheet, setSheet] = useState(null);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
-  const [menu, setMenu] = useState(null); // { id, rect } — меню статуса у кнопки
+  const [toast, setToast] = useState(null); // { k, text, undo }
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
@@ -2003,11 +2123,6 @@ export default function App() {
     setSheet('shift');
   }, []);
 
-  const openStatus = useCallback((id) => {
-    setEditId(id);
-    setSheet('status');
-  }, []);
-
   const setStatusDirect = useCallback(
     (id, status) => {
       patch((p) => ({
@@ -2027,16 +2142,37 @@ export default function App() {
     },
     [patch]
   );
-  const openStatusMenu = useCallback((id, rect) => setMenu({ id, rect }), []);
-  const closeStatusMenu = useCallback(() => setMenu(null), []);
-  const pickStatus = useCallback(
-    (id, status) => {
-      Haptics.selectionAsync();
-      setMenu(null);
-      setStatusDirect(id, status);
+  // «Не плачу» = перенос на следующую зарплату (+14 дней), с «Отменить» в плашке
+  const carryExpenseNow = useCallback(
+    (id) => {
+      const st = stateRef.current;
+      if (!st) return;
+      const { prev, next } = carryInState(st, id);
+      if (!prev) return;
+      patch((p) => carryInState(p, id).state);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setToast({ k: Date.now(), text: `Перенесено на ${fmtShort(next.date)}`, undo: prev });
     },
-    [setStatusDirect]
+    [patch]
   );
+  const hideToast = useCallback(() => setToast(null), []);
+  const undoToast = useCallback(() => {
+    const prev = toast?.undo;
+    setToast(null);
+    if (!prev) return;
+    patch((p) => undoCarry(p, prev));
+    Haptics.selectionAsync();
+  }, [toast, patch]);
+  // выбор в веере: 0 ✓, 1 → перенести, 2 без отметки
+  const onArcPick = useCallback(
+    (id, i) => {
+      if (i === 1) return carryExpenseNow(id);
+      Haptics.selectionAsync();
+      setStatusDirect(id, i === 0 ? 'paid' : null);
+    },
+    [carryExpenseNow, setStatusDirect]
+  );
+  const arc = useArcCtl(onArcPick);
 
   const confirmDeleteExpense = useCallback(
     (id) => {
@@ -2214,20 +2350,6 @@ export default function App() {
     setSheet(null);
   };
 
-  const setStatus = (status) => {
-    const id = editId;
-    patch((prev) => ({
-      ...prev,
-      expenses: prev.expenses.map((e) => (e.id === id ? { ...e, status } : e)),
-    }));
-    Haptics.notificationAsync(
-      status === 'paid'
-        ? Haptics.NotificationFeedbackType.Success
-        : Haptics.NotificationFeedbackType.Warning
-    );
-    closeSheet();
-  };
-
   const pickBg = async () => {
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -2241,9 +2363,9 @@ export default function App() {
 
   const pays = paydaysInMonth(viewY, viewM);
   const focus = pays.find((p) => p >= todayIso()) || pays[pays.length - 1];
-  // Большая цифра = «осталось оплатить» к этой зарплате (план без ✕ минус ✓).
+  // Большая цифра: «Не оплачено −X», X — сумма неотмеченных расходов этой зарплаты.
   const ft = paydayTotals(focus ? expensesForPayday(focus) : [], focus ? earnedForPayday(focus) : 0);
-  const allPaid = ft.planned > 0 && ft.remaining <= 0;
+  const allPaid = ft.planned > 0 && ft.unpaid <= 0;
   const balanceOk = ft.free >= 0;
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
@@ -2514,46 +2636,6 @@ export default function App() {
                   <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать этот день</Text>
                 </ScaleButton>
               )}
-            </>
-          ),
-        };
-      }
-
-      case 'status': {
-        const e = state.expenses.find((x) => x.id === editId);
-        const st = e ? displayStatus(e) : 'none';
-        return {
-          title: 'Статус',
-          onClose: closeSheet,
-          body: !e ? null : (
-            <>
-              <ItemCard style={styles.listCard}>
-                <View style={styles.lRow}>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.lTitle} numberOfLines={1}>
-                      {e.title || 'Без названия'}
-                    </Text>
-                    <Text style={styles.lSub}>
-                      {fmtShort(e.date)} · {e.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
-                    </Text>
-                  </View>
-                  <Text style={[styles.lVal, styles.lValBig]}>{money(e.amount)}</Text>
-                </View>
-              </ItemCard>
-              <ScaleButton style={[styles.actBtn, styles.statusPaidBtn, st === 'paid' && styles.btnOn]} onPress={() => setStatus('paid')}>
-                <Text style={styles.actBtnTxt}>✓  Оплатил</Text>
-              </ScaleButton>
-              <ScaleButton style={[styles.actBtn, styles.statusMissBtn, st === 'missed' && styles.btnOn]} onPress={() => setStatus('missed')}>
-                <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>✕  Не плачу</Text>
-              </ScaleButton>
-              {st !== 'none' && (
-                <ScaleButton style={styles.actBtn} onPress={() => setStatus(null)}>
-                  <Text style={styles.actBtnTxt}>Убрать метку</Text>
-                </ScaleButton>
-              )}
-              <Text style={[styles.hint, { textAlign: 'center' }]}>
-                Быстрее: зажмите кружок в списке и потяните вверх ✓ или вниз ✕.
-              </Text>
             </>
           ),
         };
@@ -3159,20 +3241,21 @@ export default function App() {
                   </View>
                   <Text style={styles.paySub}>
                     {allPaid
-                      ? 'все платежи этой зарплаты закрыты'
-                      : `осталось оплатить · ${ft.open} ${plural(ft.open, 'платёж', 'платежа', 'платежей')}`}
+                      ? 'все платежи этой зарплаты оплачены'
+                      : ft.planned > 0
+                        ? `не оплачено · ${ft.open} ${plural(ft.open, 'платёж', 'платежа', 'платежей')}`
+                        : 'платежей к этой зарплате нет'}
                   </Text>
                   <Text
-                    style={[styles.bigPay, { color: allPaid ? '#30d158' : accent }]}
+                    style={[styles.bigPay, { color: ft.unpaid > 0 ? '#ff453a' : '#30d158' }]}
                     numberOfLines={1}
                     adjustsFontSizeToFit
                   >
-                    {money(Math.max(0, ft.remaining))}
+                    {ft.unpaid > 0 ? `−${money(ft.unpaid)}` : allPaid ? 'Всё оплачено' : money(0)}
                   </Text>
                   <Meter value={ft.planned > 0 ? ft.paid / ft.planned : 0} color={accent} />
                   <Text style={styles.calcMeta}>
                     оплачено {money(ft.paid)} из {money(ft.planned)}
-                    {ft.cancelled > 0 ? ` · не плачу ${money(ft.cancelled)}` : ''}
                   </Text>
                   <View style={styles.statRow}>
                     <Stat k="Заработано" v={money(ft.earned)} tone={balanceOk ? 'good' : 'bad'} />
@@ -3210,13 +3293,13 @@ export default function App() {
                           onEdit={openExpense}
                           onDelete={confirmDeleteExpense}
                           onToggle={toggleStatus}
-                          onMenu={openStatusMenu}
+                          arc={arc}
                         />
                       ))
                     )}
                     <Animated.View style={styles.eFoot} layout={ROW_LAYOUT}>
                       <Text style={styles.footL}>
-                        Итого к оплате{gt.cancelled > 0 ? ` · не плачу ${money(gt.cancelled)}` : ''}
+                        Итого
                       </Text>
                       <Text style={styles.footV}>{money(gt.planned)}</Text>
                     </Animated.View>
@@ -3224,8 +3307,9 @@ export default function App() {
                 );
               })}
               <Text style={[styles.hint, styles.pageHint]}>
-                Свайп вправо — изменить, влево — удалить. Тап по зелёной кнопке — ✓ оплачено; удерживайте
-                её — выбор: ✓ оплачено, ✕ не плачу, без отметки.
+                Свайп вправо — изменить, влево — удалить. Тап по зелёной кнопке — ✓ оплачено. Удерживайте
+                её и, не отпуская, ведите к варианту: ✓ оплачено, → не плачу (перенос на следующую
+                зарплату), ○ без отметки.
               </Text>
             </View>
           </LayoutAnimationConfig>
@@ -3372,12 +3456,8 @@ export default function App() {
         </ScaleButton>
       </View>
 
-      <StatusMenu
-        menu={menu}
-        status={menu ? state.expenses.find((x) => x.id === menu.id)?.status : null}
-        onPick={pickStatus}
-        onClose={closeStatusMenu}
-      />
+      <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
+      <ArcMenu arc={arc} />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
@@ -3555,10 +3635,7 @@ const styles = StyleSheet.create({
     paddingRight: 10,
     borderRadius: 22,
   },
-  eDim: { color: 'rgba(235,235,245,0.45)', textDecorationLine: 'line-through' },
-  metaMiss: { color: 'rgba(255,105,97,0.9)' },
   amtPaid: { color: 'rgba(235,235,245,0.6)' },
-  amtMiss: { color: 'rgba(235,235,245,0.35)', textDecorationLine: 'line-through' },
   eFoot: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3601,32 +3678,56 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   sFillPaid: { backgroundColor: '#30d158' },
-  sFillMiss: { backgroundColor: 'rgba(255,69,58,0.28)' },
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  sGlyphMiss: { color: '#ff6961' },
-  menuBack: { backgroundColor: 'rgba(0,0,0,0.22)' },
-  menuBox: { position: 'absolute', width: MENU_W, height: MENU_H },
-  menuGlass: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    borderRadius: 26,
-    paddingHorizontal: 6,
-  },
-  menuOpt: { alignItems: 'center', justifyContent: 'center', width: 72, height: 66, borderRadius: 18, gap: 4 },
-  menuOptPressed: { backgroundColor: 'rgba(255,255,255,0.1)' },
-  menuDot: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+  menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
+  metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
+  arcOpt: { position: 'absolute', left: 0, top: 0, width: ARC_OPT, height: ARC_OPT, alignItems: 'center' },
+  arcDot: {
+    width: ARC_OPT,
+    height: ARC_OPT,
+    borderRadius: ARC_OPT / 2,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(44,44,52,0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
   },
-  menuDotEmpty: { borderWidth: 2, borderColor: 'rgba(48,209,88,0.85)' },
-  menuDotOn: { borderWidth: 2, borderColor: '#fff' },
-  menuLbl: { color: 'rgba(235,235,245,0.7)', fontSize: 11, fontWeight: '600' },
-  menuLblOn: { color: '#fff' },
+  arcDotPaid: { backgroundColor: 'rgba(36,150,66,0.97)' },
+  arcDotMove: { backgroundColor: 'rgba(30,110,190,0.97)' },
+  arcGlow: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  arcCur: { borderRadius: ARC_OPT / 2, borderWidth: 2, borderColor: '#fff' },
+  arcGlyph: { color: '#fff', fontSize: 22, fontWeight: '800' },
+  arcEmpty: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: 'rgba(48,209,88,0.9)' },
+  arcLblWrap: {
+    position: 'absolute',
+    top: ARC_OPT + 4,
+    width: 84,
+    height: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(20,20,26,0.85)',
+  },
+  arcLbl: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  arcSub: { color: 'rgba(235,235,245,0.6)', fontSize: 10 },
+  toastWrap: { position: 'absolute', left: 16, right: 16, bottom: 104, alignItems: 'center' },
+  toast: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 20,
+  },
+  toastTxt: { color: '#fff', fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  toastBtn: { color: '#64d2ff', fontSize: 14, fontWeight: '700' },
   revealLeft: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#0a84ff',
@@ -3861,8 +3962,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.12)',
   },
-  statusPaidBtn: { backgroundColor: 'rgba(48,209,88,0.2)' },
-  statusMissBtn: { backgroundColor: 'rgba(255,69,58,0.12)' },
   actBtnTxt: { color: '#fff', fontSize: 17, fontWeight: '600' },
   hint: {
     color: 'rgba(235,235,245,0.42)',
@@ -3931,7 +4030,6 @@ const styles = StyleSheet.create({
   hueSegOn: { borderWidth: 2, borderColor: '#fff' },
   padCard: { padding: 16 },
   rowPressed: { backgroundColor: 'rgba(255,255,255,0.06)' },
-  btnOn: { borderColor: 'rgba(255,255,255,0.5)', borderWidth: 1 },
   previewRow: { marginTop: 16, marginBottom: 6 },
   previewBtn: { height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center' },
   rateInput: {

@@ -117,7 +117,8 @@ export function seedMonth(state, viewY, viewM) {
   (planned ? [] : state.recurring || []).forEach((r) => {
     if (r.day > last) return;
     const date = `${viewY}-${pad(viewM + 1)}-${pad(r.day)}`;
-    if (!next.expenses.some((e) => e.date === date && e.title === r.title && e.type === 'recurring')) {
+    // сравнение по исходной дате: перенесённый («Не плачу») платёж не досеивается заново
+    if (!next.expenses.some((e) => (e.movedFrom || e.date) === date && e.title === r.title && e.type === 'recurring')) {
       next.expenses.push({
         id: uid(),
         date,

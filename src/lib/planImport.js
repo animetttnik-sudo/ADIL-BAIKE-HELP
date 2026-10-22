@@ -37,6 +37,8 @@ export function checkPlan(blocks) {
   return { paydayMismatch, groupMismatch };
 }
 
+// перенесённый расход сравнивается по исходной дате — повторный импорт не вернёт оригинал
+const od = (e) => e.movedFrom || e.date;
 const dayDiff = (a, b) => Math.abs((parse(a) - parse(b)) / 864e5);
 
 /**
@@ -54,7 +56,7 @@ export function previewImport(app, blocks) {
   for (const x of planItems(blocks)) {
     const n = normTitle(x.title);
     const exact = existing.find(
-      (e) => !used.has(e.id) && e.date === x.date && Number(e.amount) === x.amount && normTitle(e.title) === n
+      (e) => !used.has(e.id) && od(e) === x.date && Number(e.amount) === x.amount && normTitle(e.title) === n
     );
     if (exact) {
       used.add(exact.id);
@@ -65,7 +67,7 @@ export function previewImport(app, blocks) {
       (e) =>
         !used.has(e.id) &&
         normTitle(e.title) === n &&
-        (e.date === x.date || (Number(e.amount) === x.amount && dayDiff(e.date, x.date) <= 7))
+        (od(e) === x.date || (Number(e.amount) === x.amount && dayDiff(od(e), x.date) <= 7))
     );
     if (near) {
       used.add(near.id);
