@@ -598,34 +598,41 @@ const ROW_LAYOUT = LinearTransition.duration(220);
 const STATUS_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
 
 // ── Остров статуса ──────────────────────────────────────────────────────
-// Удержание кнопки статуса → над ней (или под ней у верха экрана) стеклянный остров,
-// как док: внутри по дуге ✓ / → / ○ и стеклянная плашка выбора, которая едет за пальцем.
-// Отпустили на варианте — выбран; отпустили, не доведя до варианта, — остров просто исчезает.
-const ISL_W = 236;
-const ISL_H = 84;
-const ISL_R = ISL_H / 2;
+// Удержание кнопки статуса → вертикальная стеклянная капсула по оси кнопки: растёт вверх
+// (у верха экрана — вниз). От пальца наружу: ✓ (ближе всех), → перенести, ○.
+// Ведёте большим пальцем вверх-вниз — плашка едет за ним; отпустили на варианте — выбран,
+// отпустили на кнопке/в стороне — капсула просто исчезает.
+const ISL_T = 84; // толщина капсулы (ширина)
+const ISL_L = 236; // длина капсулы (высота)
+const ISL_R = ISL_T / 2;
 const ISL_OPT = 54; // диаметр варианта
 const ISL_PILL = 66; // плашка выбора
-const ISL_X = [46, 118, 190]; // центры вариантов от левого края острова
-const ISL_BEND = [7, -7, 7]; // дуга: середина дальше от кнопки, края ближе
-const ISL_GAP = 16; // зазор между кнопкой и островом
-const ISL_FLIP_Y = 240; // кнопка выше — остров открывается вниз
-const ISL_BAND = 14; // насколько ниже/выше острова палец ещё «на острове»
+const ISL_D = [46, 118, 190]; // центры вариантов: расстояние от ближнего к кнопке края
+const ISL_GAP = 16; // зазор между кнопкой и капсулой
+const ISL_REACH = 26 + ISL_GAP; // от центра кнопки до ближнего края капсулы
+const ISL_TOP_MIN = 64; // выше — статус-бар: не хватает места → открываем вниз
+const ISL_SIDE = 56; // насколько вбок от капсулы палец ещё «на капсуле»
 const ISL_SPRING = { damping: 26, stiffness: 340, mass: 0.7, overshootClamping: true };
-const ISL_FILL = ['#30d158', 'rgba(30,110,190,0.9)', 'rgba(58,58,66,0.95)']; // ✓ зелёный · → синий из b5072bf · ○ пусто
+const ISL_FILL = ['#30d158', 'rgba(30,110,190,0.9)', 'rgba(58,58,66,0.95)']; // ✓ зелёный · → синий · ○ пусто
 
-/** Вариант под пальцем: −1 — ни один. lx/ly — от левого края / центра острова. */
-function islandHit(px, py, left, midY, dir, cx, cy) {
+/** Центр варианта по вертикали внутри капсулы (dir 1 — капсула над кнопкой: ✓ внизу). */
+function islOptY(i, dir) {
+  'worklet';
+  return dir > 0 ? ISL_L - ISL_D[i] : ISL_D[i];
+}
+
+/** Вариант под пальцем: −1 — ни один. Выбор по вертикали, вбок допуск щедрый. */
+function islandHit(px, py, left, dir, cx, cy) {
   'worklet';
   const bx = px - cx;
   const by = py - cy;
   if (bx * bx + by * by < 30 * 30) return -1; // палец на самой кнопке
-  const lx = px - left;
-  const ly = (py - midY) * dir; // >0 — в сторону кнопки
-  if (ly > ISL_H / 2 + ISL_BAND || ly < -(ISL_H / 2 + 40)) return -1;
-  if (lx < -24 || lx > ISL_W + 24) return -1;
+  const colX = left + ISL_T / 2;
+  if (Math.abs(px - colX) > ISL_T / 2 + ISL_SIDE) return -1;
+  const a = (cy - py) * dir - ISL_REACH; // вдоль капсулы от ближнего края
+  if (a < -6 || a > ISL_L + 40) return -1;
   let best = 0;
-  for (let i = 1; i < 3; i++) if (Math.abs(lx - ISL_X[i]) < Math.abs(lx - ISL_X[best])) best = i;
+  for (let i = 1; i < 3; i++) if (Math.abs(a - ISL_D[i]) < Math.abs(a - ISL_D[best])) best = i;
   return best;
 }
 
@@ -637,9 +644,9 @@ function useArcCtl(onPick) {
   const open = useSharedValue(0);
   const cx = useSharedValue(0);
   const cy = useSharedValue(0);
-  const left = useSharedValue(0); // левый край острова (окно)
-  const midY = useSharedValue(0); // центр острова по вертикали (окно)
-  const dir = useSharedValue(1); // 1 — остров над кнопкой, −1 — под ней
+  const left = useSharedValue(0); // левый край капсулы (окно)
+  const midY = useSharedValue(0); // центр капсулы по вертикали (окно)
+  const dir = useSharedValue(1); // 1 — капсула над кнопкой, −1 — под ней
   const hover = useSharedValue(-1);
   const cur = useSharedValue(-1); // текущий статус расхода (0 или 2)
   const hold = useSharedValue(0); // палец держит кнопку с островом (сразу, без анимации) — пейджер не листает
@@ -724,13 +731,17 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
           // центр кнопки в координатах окна (детектор = зона 52×52)
           const x0 = e.absoluteX - e.x + 26;
           const y0 = e.absoluteY - e.y + 26;
-          const d = y0 < ISL_FLIP_Y ? -1 : 1;
+          // вверх, если капсула влезает под статус-бар; иначе вниз (если там хватает места)
+          const roomUp = y0 - ISL_REACH - ISL_L >= ISL_TOP_MIN;
+          const roomDown = y0 + ISL_REACH + ISL_L <= SCREEN_H - 24;
+          const d = roomUp || !roomDown ? 1 : -1;
           hold.value = 1;
           cx.value = x0;
           cy.value = y0;
           dir.value = d;
-          left.value = Math.min(Math.max(12, x0 - ISL_W / 2), SCREEN_W - 12 - ISL_W);
-          midY.value = y0 - d * (26 + ISL_GAP + ISL_H / 2);
+          // по оси кнопки; у правого края — ровно настолько левее, чтобы не вылезти за экран
+          left.value = Math.min(Math.max(12, x0 - ISL_T / 2), SCREEN_W - 8 - ISL_T);
+          midY.value = y0 - d * (ISL_REACH + ISL_L / 2);
           cur.value = curIdx.value;
           hover.value = -1;
           press.value = withTiming(0, { duration: 160 });
@@ -742,7 +753,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
       })
       .onUpdate((e) => {
         try {
-          const h = islandHit(e.absoluteX, e.absoluteY, left.value, midY.value, dir.value, cx.value, cy.value);
+          const h = islandHit(e.absoluteX, e.absoluteY, left.value, dir.value, cx.value, cy.value);
           if (h !== hover.value) {
             hover.value = h;
             if (h >= 0) scheduleOnRN(hapticSelect);
@@ -809,11 +820,11 @@ function IslandOption({ i, arc }) {
     }
   );
   const st = useAnimatedStyle(() => ({
-    transform: [{ translateY: ISL_BEND[i] * dir.value }, { scale: 1 + 0.14 * h.value }],
+    transform: [{ translateY: islOptY(i, dir.value) - ISL_OPT / 2 }, { scale: 1 + 0.14 * h.value }],
   }));
   const ring = useAnimatedStyle(() => ({ opacity: cur.value === i ? 1 : 0 }));
   return (
-    <Animated.View style={[styles.islOpt, { left: ISL_X[i] - ISL_OPT / 2 }, st]}>
+    <Animated.View style={[styles.islOpt, st]}>
       <View style={[styles.islDot, { backgroundColor: ISL_FILL[i] }]}>
         <View style={styles.islDotShine} />
         {i === 2 ? <View style={styles.islEmpty} /> : <Text style={styles.islGlyph}>{i === 0 ? '✓' : '→'}</Text>}
@@ -854,24 +865,24 @@ const IslandMenu = memo(function IslandMenu({ arc }) {
       opacity: o > 0.02 ? 1 : 0,
       transform: [
         { translateX: left.value },
-        { translateY: midY.value - ISL_H / 2 + dir.value * 26 * (1 - o) },
+        // растёт из кнопки: в начале прижата к ней
+        { translateY: midY.value - ISL_L / 2 + dir.value * 60 * (1 - o) },
         { scale: 0.55 + 0.45 * o },
       ],
     };
   });
   const pill = useAnimatedStyle(() => {
-    // позиция плашки — интерполяция по центрам вариантов (с дугой)
-    const s = sel.value;
-    const k = Math.min(1, Math.max(0, s - Math.floor(s)));
+    // плашка едет по столбцу: интерполяция между центрами вариантов
+    const s = Math.min(2, Math.max(0, sel.value));
+    const k = s - Math.floor(s);
     const a = Math.min(2, Math.floor(s));
     const b = Math.min(2, a + 1);
-    const x = ISL_X[a] + (ISL_X[b] - ISL_X[a]) * k;
-    const y = (ISL_BEND[a] + (ISL_BEND[b] - ISL_BEND[a]) * k) * dir.value;
+    const y = islOptY(a, dir.value) + (islOptY(b, dir.value) - islOptY(a, dir.value)) * k;
     return {
       opacity: selOn.value,
       transform: [
-        { translateX: x - ISL_PILL / 2 },
-        { translateY: ISL_H / 2 - ISL_PILL / 2 + y },
+        { translateX: ISL_T / 2 - ISL_PILL / 2 },
+        { translateY: y - ISL_PILL / 2 },
         { scale: 0.85 + 0.15 * selOn.value },
       ],
     };
@@ -3850,7 +3861,8 @@ const styles = StyleSheet.create({
   plus: { fontSize: 28, fontWeight: '500', marginTop: -2 },
 
   pages: { flex: 1 },
-  pagesContent: { paddingHorizontal: 16, paddingBottom: 130 },
+  // док: 64 + отступ 28 снизу → подсказка в конце списка всегда выше него с запасом
+  pagesContent: { paddingHorizontal: 16, paddingBottom: 160 },
 
   glassBase: {
     borderRadius: 26,
@@ -4037,10 +4049,10 @@ const styles = StyleSheet.create({
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
   menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
-  islBox: { position: 'absolute', left: 0, top: 0, width: ISL_W, height: ISL_H },
+  islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {
-    width: ISL_W,
-    height: ISL_H,
+    width: ISL_T,
+    height: ISL_L,
     borderRadius: ISL_R,
   },
   islPill: {
@@ -4054,7 +4066,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.4)',
   },
-  islOpt: { position: 'absolute', top: ISL_H / 2 - ISL_OPT / 2, width: ISL_OPT, height: ISL_OPT },
+  islOpt: { position: 'absolute', top: 0, left: ISL_T / 2 - ISL_OPT / 2, width: ISL_OPT, height: ISL_OPT },
   islDot: {
     width: ISL_OPT,
     height: ISL_OPT,
