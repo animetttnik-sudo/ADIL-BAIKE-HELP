@@ -25,6 +25,8 @@ import {
     Alert,
     AppState,
     Dimensions, ImageBackground,
+    InputAccessoryView,
+    Keyboard,
     KeyboardAvoidingView,
     Modal,
     Platform,
@@ -944,20 +946,29 @@ function blankDay(prefs) {
 const talliesOf = (v) => (Array.isArray(v) && v.length ? v.map((x) => Number(x) || 0) : [itemTotal(v)]);
 
 /** Числовое поле: тап — ввод с клавиатуры, пустое = 0; внешние ± сразу видны. */
-function NumInput({ value, onChange, style }) {
+function NumInput({ value, onChange, style, inputRef, onFocused, onSubmit, accessoryId, last }) {
   const [draft, setDraft] = useState(null);
   const v = Number(value) || 0;
   const shown = draft !== null && (Number(draft) || 0) === v ? draft : v ? String(v) : '';
   return (
     <TextInput
+      ref={inputRef}
       style={style}
       keyboardType="number-pad"
+      keyboardAppearance="dark"
       selectTextOnFocus
       maxLength={5}
       value={shown}
       placeholder="0"
       placeholderTextColor="rgba(235,235,245,0.3)"
-      onFocus={() => setDraft(v ? String(v) : '')}
+      inputAccessoryViewID={accessoryId}
+      returnKeyType={onSubmit ? (last ? 'done' : 'next') : undefined}
+      submitBehavior={onSubmit ? (last ? 'blurAndSubmit' : 'submit') : undefined}
+      onSubmitEditing={onSubmit}
+      onFocus={() => {
+        setDraft(v ? String(v) : '');
+        onFocused?.();
+      }}
       onBlur={() => setDraft(null)}
       onChangeText={(t) => {
         const d = t.replace(/[^0-9]/g, '');
@@ -968,37 +979,82 @@ function NumInput({ value, onChange, style }) {
   );
 }
 
-const CountRow = memo(function CountRow({ item, tallies, last, onStep, onSet, onOpen }) {
-  const total = itemTotal(tallies);
-  const multi = Array.isArray(tallies) && tallies.length > 1;
+const CALC_ACC_ID = 'calcCountsBar';
+
+/**
+ * Строка позиции: поле всегда видно и редактирует 1-й подсчёт
+ * (остальные подсчёты — в шторке по тапу на название). − / + тоже по 1-му.
+ */
+const CountRow = memo(function CountRow({
+  item, tallies, last, isLastField, onStep, onSet, onOpen, register, onFocusItem, onNext,
+}) {
+  const t = Array.isArray(tallies) ? tallies : [itemTotal(tallies)];
+  const total = itemTotal(t);
+  const first = Number(t[0]) || 0;
+  const multi = t.length > 1;
+  const id = item.id;
+  const setRef = useCallback((r) => register(id, r), [register, id]);
   return (
     <View style={[styles.cRow, !last && styles.cRowSep]}>
-      <Pressable style={styles.cName} onPress={() => onOpen(item.id)}>
+      <Pressable style={styles.cName} onPress={() => onOpen(id)}>
         <Text style={[styles.cNameTxt, total > 0 && styles.cNameOn]} numberOfLines={1}>
           {item.name}
         </Text>
         {multi && (
           <Text style={styles.cTallies} numberOfLines={1}>
-            {tallies.map((n) => Number(n) || 0).join(' + ')}
+            {t.map((n) => Number(n) || 0).join(' + ')} = {total}
           </Text>
         )}
       </Pressable>
-      <ScaleButton style={styles.stepBtn} onPress={() => onStep(item.id, -1)}>
+      <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, -1)}>
         <Text style={styles.stepTxt}>−</Text>
       </ScaleButton>
-      {multi ? (
-        <Pressable style={styles.cCount} onPress={() => onOpen(item.id)}>
-          <Text style={styles.cCountTxt}>{total}</Text>
-        </Pressable>
-      ) : (
-        <NumInput value={total} onChange={(n) => onSet(item.id, n)} style={[styles.cCount, styles.cCountTxt]} />
-      )}
-      <ScaleButton style={styles.stepBtn} onPress={() => onStep(item.id, 1)}>
+      <NumInput
+        inputRef={setRef}
+        value={first}
+        onChange={(n) => onSet(id, n)}
+        onFocused={() => onFocusItem(id)}
+        onSubmit={() => onNext(id, 1)}
+        last={isLastField}
+        accessoryId={Platform.OS === 'ios' ? CALC_ACC_ID : undefined}
+        style={[styles.cCount, styles.cCountTxt]}
+      />
+      <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, 1)}>
         <Text style={styles.stepTxt}>+</Text>
       </ScaleButton>
     </View>
   );
 });
+
+/** Панель над цифровой клавиатурой iOS: ‹ · позиция · Готово · Далее ›. */
+function CalcKeyBar({ label, hasPrev, isLast, accent, onPrev, onNext, onDone }) {
+  if (Platform.OS !== 'ios') return null;
+  return (
+    <InputAccessoryView nativeID={CALC_ACC_ID}>
+      <Glass style={styles.keyBar} intensity={60}>
+        <Pressable
+          style={[styles.keyBarRound, !hasPrev && { opacity: 0.35 }]}
+          disabled={!hasPrev}
+          hitSlop={8}
+          onPress={onPrev}
+        >
+          <Text style={styles.keyBarArrow}>‹</Text>
+        </Pressable>
+        <Text style={styles.keyBarLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        {!isLast && (
+          <Pressable hitSlop={8} onPress={onDone} style={styles.keyBarDone}>
+            <Text style={styles.linkMuted}>Готово</Text>
+          </Pressable>
+        )}
+        <Pressable style={[styles.keyBarNext, { backgroundColor: accent }]} onPress={isLast ? onDone : onNext}>
+          <Text style={styles.keyBarNextTxt}>{isLast ? 'Готово' : 'Далее ›'}</Text>
+        </Pressable>
+      </Glass>
+    </InputAccessoryView>
+  );
+}
 
 function CheckRow({ checked, label, amount, accent, onToggle }) {
   const s = useSharedValue(1);
@@ -1022,12 +1078,82 @@ function CheckRow({ checked, label, amount, accent, onToggle }) {
 }
 
 function CalcView({
-  calc, date, day, accent, shiftOnDate,
+  calc, date, day, accent, shiftOnDate, scrollRef, scrollY, scrollTop,
   onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onAddShift,
 }) {
   const [collapsed, setCollapsed] = useState({});
   const [showUsage, setShowUsage] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [focusId, setFocusId] = useState(null);
+
+  // ── ввод с клавиатуры: Далее → следующая позиция (свёрнутые группы пропускаем)
+  const inputs = useRef(new Map());
+  const focusRef = useRef(null);
+  const order = useMemo(
+    () => CALC_GROUPS.filter((g) => !collapsed[g.id]).flatMap((g) => ITEMS_BY_GROUP[g.id].map((it) => it.id)),
+    [collapsed]
+  );
+  const orderRef = useRef(order);
+  orderRef.current = order;
+  const register = useCallback((id, r) => {
+    if (r) inputs.current.set(id, r);
+    else inputs.current.delete(id);
+  }, []);
+
+  /** Прокрутить так, чтобы поле было видно над клавиатурой (с панелью) и под шапкой. */
+  const ensureVisible = useCallback(
+    (id) => {
+      const input = inputs.current.get(id);
+      const sv = scrollRef.current;
+      if (!input || !sv || !input.measureInWindow) return;
+      input.measureInWindow((x, y, w, h) => {
+        const kb = Keyboard.isVisible() ? Keyboard.metrics() : null;
+        const bottom = (kb ? kb.screenY : SCREEN_H) - 20;
+        const top = scrollTop.current + 12;
+        let delta = 0;
+        if (y + h + 8 > bottom) delta = y + h + 8 - bottom;
+        else if (y - 8 < top) delta = y - 8 - top;
+        if (Math.abs(delta) > 1) sv.scrollTo({ y: Math.max(0, scrollY.current + delta), animated: true });
+      });
+    },
+    [scrollRef, scrollY, scrollTop]
+  );
+  useEffect(() => {
+    // первый фокус: клавиатура ещё выезжает — докручиваем, когда она встала
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (focusRef.current) ensureVisible(focusRef.current);
+    });
+    const subH = Keyboard.addListener('keyboardDidHide', () => {
+      focusRef.current = null;
+      setFocusId(null);
+    });
+    return () => {
+      sub.remove();
+      subH.remove();
+    };
+  }, [ensureVisible]);
+
+  const onFocusItem = useCallback(
+    (id) => {
+      focusRef.current = id;
+      setFocusId(id);
+      if (Keyboard.isVisible()) requestAnimationFrame(() => ensureVisible(id));
+    },
+    [ensureVisible]
+  );
+  const onNext = useCallback((id, dir) => {
+    const list = orderRef.current;
+    const i = list.indexOf(id);
+    const nextId = i < 0 ? null : list[i + dir];
+    if (nextId && inputs.current.get(nextId)) {
+      Haptics.selectionAsync();
+      inputs.current.get(nextId).focus();
+    } else if (dir > 0) {
+      Keyboard.dismiss();
+    }
+  }, []);
+  const focusIdx = focusId ? order.indexOf(focusId) : -1;
+  const focusItem = focusId ? CALC_ITEMS.find((x) => x.id === focusId) : null;
 
   const res = useMemo(() => computeCalc(day.counts, calc.rates, day.staff), [day.counts, calc.rates, day.staff]);
   const own = ownPay(res, calc.rates, day);
@@ -1131,7 +1257,8 @@ function CalcView({
 
       <Animated.View layout={ROW_LAYOUT}>
         <Text style={[styles.hint, { paddingHorizontal: 6 }]}>
-          − / + или тап по числу. Тап по названию — несколько подсчётов (например, 59 + 98).
+          Тап по числу и вводите подряд — «Далее» над клавиатурой переходит к следующей позиции.
+          Тап по названию — несколько подсчётов (например, 59 + 98).
         </Text>
       </Animated.View>
 
@@ -1158,9 +1285,13 @@ function CalcView({
                       item={it}
                       tallies={day.counts[it.id]}
                       last={i === items.length - 1}
+                      isLastField={order[order.length - 1] === it.id}
                       onStep={onStep}
                       onSet={onSet}
                       onOpen={onOpenItem}
+                      register={register}
+                      onFocusItem={onFocusItem}
+                      onNext={onNext}
                     />
                   ))}
                 </ItemCard>
@@ -1255,6 +1386,15 @@ function CalcView({
       <Animated.View layout={ROW_LAYOUT}>
         <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
       </Animated.View>
+      <CalcKeyBar
+        label={focusItem ? `${focusItem.name}  ·  ${focusIdx + 1}/${order.length}` : ''}
+        hasPrev={focusIdx > 0}
+        isLast={focusIdx === order.length - 1}
+        accent={accent}
+        onPrev={() => focusId && onNext(focusId, -1)}
+        onNext={() => focusId && onNext(focusId, 1)}
+        onDone={() => Keyboard.dismiss()}
+      />
     </>
   );
 }
@@ -1355,7 +1495,7 @@ export default function App() {
       }),
     [editTallies]
   );
-  const onCalcStep = useCallback((id, d) => stepTally(id, d), [stepTally]);
+  const onCalcStep = useCallback((id, d) => stepTally(id, d, 0), [stepTally]);
   const onCalcSet = useCallback((id, n) => setTally(id, n, 0), [setTally]);
   const openCalcItem = useCallback((id) => {
     Haptics.selectionAsync();
@@ -1376,6 +1516,9 @@ export default function App() {
     },
     [patchDay]
   );
+  const mainScroll = useRef(null);
+  const mainScrollY = useRef(0);
+  const mainScrollTop = useRef(0);
   const calcDay = useMemo(
     () => (calc ? calc.days[calcDate] || blankDay(calc.prefs) : null),
     [calc, calcDate]
@@ -2290,8 +2433,16 @@ export default function App() {
         contentContainerStyle={styles.pagesContent}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        keyboardDismissMode="interactive"
         automaticallyAdjustKeyboardInsets
+        ref={mainScroll}
+        scrollEventThrottle={16}
+        onScroll={(e) => {
+          mainScrollY.current = e.nativeEvent.contentOffset.y;
+        }}
+        onLayout={(e) => {
+          mainScrollTop.current = e.nativeEvent.layout.y;
+        }}
       >
         {/* при смене страницы/месяца — без анимаций входа/выхода всего списка;
             анимируются только добавление/удаление строк внутри */}
@@ -2418,6 +2569,9 @@ export default function App() {
                   day={calcDay}
                   accent={accent}
                   shiftOnDate={shiftOnCalcDate}
+                  scrollRef={mainScroll}
+                  scrollY={mainScrollY}
+                  scrollTop={mainScrollTop}
                   onDate={setCalcDate}
                   onPatchDay={patchDay}
                   onRole={onCalcRole}
@@ -2921,4 +3075,34 @@ const styles = StyleSheet.create({
   tallyRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
+  keyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginHorizontal: 8,
+    marginBottom: 6,
+    borderRadius: 26,
+  },
+  keyBarRound: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  keyBarArrow: { color: '#fff', fontSize: 26, fontWeight: '400', marginTop: -3 },
+  keyBarLabel: { flex: 1, color: 'rgba(235,235,245,0.75)', fontSize: 14, fontWeight: '600' },
+  keyBarDone: { paddingHorizontal: 4 },
+  keyBarNext: {
+    minWidth: 104,
+    height: 42,
+    borderRadius: 21,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  keyBarNextTxt: { color: '#102012', fontSize: 17, fontWeight: '700' },
 });
