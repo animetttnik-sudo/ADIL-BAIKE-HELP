@@ -48,6 +48,7 @@ import Animated, {
     FadeIn,
     FadeOut,
     interpolate,
+    interpolateColor,
     LayoutAnimationConfig,
     LinearTransition,
     useAnimatedKeyboard,
@@ -58,6 +59,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
+import { expensesInPeriod, paydayTotals, toggledStatus } from '../lib/totals';
 import { applyImport, monthTitle, previewImport } from '../lib/planImport';
 import {
     CALC_ITEMS,
@@ -115,6 +117,13 @@ const ACCENT_PRESETS = [{ h: 145 }, { h: 210 }, { h: 280 }, { h: 30 }, { h: 350 
 const INIT_Y = 2026;
 const INIT_M = 8;
 
+function plural(n, one, few, many) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
 function displayStatus(e) {
   if (e.status === 'paid') return 'paid';
   if (e.status === 'missed') return 'missed';
@@ -534,54 +543,187 @@ const ROW_ENTER = FadeIn.duration(220);
 const ROW_EXIT = FadeOut.duration(180);
 const ROW_LAYOUT = LinearTransition.duration(220);
 
-const ExpenseRow = memo(function ExpenseRow({ item, last, pulse, onEdit, onDelete, onStatus, onSet }) {
-  const x = useSharedValue(0);
-  const statusScale = useSharedValue(1);
-  const st = displayStatus(item);
-  const show = useSharedValue(0);
-  const pick = useSharedValue(0);
-  const id = item.id;
+const STATUS_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
 
-  const pan = useRowSwipe(x, id, onEdit, onDelete);
+/**
+ * Зелёная стеклянная кнопка статуса.
+ * Тап — ✓/пусто, долгое нажатие — меню ✓ / ✕ / пусто (StatusMenu у корня App).
+ * RNGH Exclusive(LongPress, Tap) + maxDistance: при скролле/свайпе оба жеста
+ * отваливаются по сдвигу пальца, поэтому случайных переключений нет.
+ */
+const StatusButton = memo(function StatusButton({ id, status, onToggle, onMenu }) {
+  const ref = useRef(null);
+  const paid = useSharedValue(status === 'paid' ? 1 : 0);
+  const miss = useSharedValue(status === 'missed' ? 1 : 0);
+  const press = useSharedValue(0);
 
-  // зажим: вверх ✓, вниз ✕
-  const hold = useMemo(
-    () =>
-      Gesture.Pan()
-        .activateAfterLongPress(280)
-        .onStart(() => {
-          show.value = withTiming(1, { duration: 140 });
-          scheduleOnRN(hapticMedium);
-        })
-        .onUpdate((e) => {
-          const p = e.translationY < -20 ? 1 : e.translationY > 20 ? -1 : 0;
-          if (p !== pick.value) {
-            pick.value = p;
-            scheduleOnRN(hapticSelect);
-          }
-        })
-        .onEnd((_e, success) => {
-          if (success && pick.value !== 0) scheduleOnRN(onSet, id, pick.value === 1 ? 'paid' : 'missed');
-        })
-        .onFinalize(() => {
-          show.value = withTiming(0, { duration: 140 });
-          pick.value = 0;
-        }),
-    [show, pick, id, onSet]
-  );
-
-  // пульс кружка статуса — когда статус реально поменялся
-  // (после закрытия шторки «Статус» или сразу после зажима)
-  const lastPulse = useRef(pulse); // не пульсировать при повторном монтировании
   useEffect(() => {
-    if (!pulse || pulse === lastPulse.current) return;
-    lastPulse.current = pulse;
-    statusScale.value = withSequence(
-      withTiming(1.12, { duration: 90 }),
-      withTiming(1, { duration: 120 })
-    );
-  }, [pulse, statusScale]);
+    paid.value = withTiming(status === 'paid' ? 1 : 0, STATUS_IN);
+    miss.value = withTiming(status === 'missed' ? 1 : 0, STATUS_IN);
+  }, [status, paid, miss]);
 
+  const toggle = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onToggle(id);
+  }, [id, onToggle]);
+  const openMenu = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const n = ref.current;
+    if (!n) return;
+    n.measureInWindow((x, y, w, h) => onMenu(id, { x, y, w, h }));
+  }, [id, onMenu]);
+
+  const gesture = useMemo(() => {
+    const tap = Gesture.Tap()
+      .maxDistance(10)
+      .onBegin(() => {
+        press.value = withTiming(1, { duration: 90 });
+      })
+      .onEnd((_e, ok) => {
+        if (ok) scheduleOnRN(toggle);
+      })
+      .onFinalize(() => {
+        press.value = withTiming(0, { duration: 160 });
+      });
+    const long = Gesture.LongPress()
+      .minDuration(380)
+      .maxDistance(10)
+      .onStart(() => {
+        press.value = withTiming(0, { duration: 160 });
+        scheduleOnRN(openMenu);
+      });
+    return Gesture.Exclusive(long, tap);
+  }, [press, toggle, openMenu]);
+
+  const btnStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 - 0.1 * press.value }],
+    backgroundColor: interpolateColor(
+      miss.value,
+      [0, 1],
+      ['rgba(48,209,88,0.16)', 'rgba(255,255,255,0.08)']
+    ),
+    borderColor: interpolateColor(
+      miss.value,
+      [0, 1],
+      ['rgba(48,209,88,0.45)', 'rgba(255,255,255,0.2)']
+    ),
+  }));
+  const ringStyle = useAnimatedStyle(() => ({ opacity: 1 - Math.max(paid.value, miss.value) }));
+  const paidStyle = useAnimatedStyle(() => ({
+    opacity: paid.value,
+    transform: [{ scale: 0.55 + 0.45 * paid.value }],
+  }));
+  const missStyle = useAnimatedStyle(() => ({
+    opacity: miss.value,
+    transform: [{ scale: 0.55 + 0.45 * miss.value }],
+  }));
+
+  return (
+    <GestureDetector gesture={gesture}>
+      <View ref={ref} collapsable={false} style={styles.sBtnHit}>
+        <Animated.View style={[styles.sBtn, btnStyle]}>
+          <View style={styles.sBtnEdge} pointerEvents="none" />
+          <Animated.View style={[styles.sRing, ringStyle]} />
+          <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
+            <Text style={styles.sGlyph}>✓</Text>
+          </Animated.View>
+          <Animated.View style={[styles.sFill, styles.sFillMiss, missStyle]}>
+            <Text style={[styles.sGlyph, styles.sGlyphMiss]}>✕</Text>
+          </Animated.View>
+        </Animated.View>
+      </View>
+    </GestureDetector>
+  );
+});
+
+const MENU_W = 236;
+const MENU_H = 78;
+const MENU_OPTS = [
+  { st: 'paid', glyph: '✓', label: 'Оплачено' },
+  { st: 'missed', glyph: '✕', label: 'Не плачу' },
+  { st: null, glyph: '', label: 'Без отметки' },
+];
+
+/** Стеклянное меню статуса у кнопки; закрытие — тап мимо. Анимация на UI-потоке, без перелёта. */
+function StatusMenu({ menu, status, onPick, onClose }) {
+  const a = useSharedValue(0);
+  const [shown, setShown] = useState(null);
+  useEffect(() => {
+    if (menu) {
+      setShown(menu);
+      a.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.cubic) });
+    } else {
+      a.value = withTiming(0, { duration: 140, easing: Easing.in(Easing.quad) }, (fin) => {
+        if (fin) scheduleOnRN(setShown, null);
+      });
+    }
+  }, [menu, a]);
+
+  const backStyle = useAnimatedStyle(() => ({ opacity: a.value }));
+  const r = shown?.rect;
+  const above = r ? r.y - MENU_H - 10 > 70 : true;
+  const boxStyle = useAnimatedStyle(() => ({
+    opacity: a.value,
+    transform: [
+      { translateY: (above ? 8 : -8) * (1 - a.value) },
+      { scale: 0.88 + 0.12 * a.value },
+    ],
+  }));
+  if (!shown || !r) return null;
+  const left = Math.min(Math.max(12, r.x + r.w - MENU_W + 4), SCREEN_W - MENU_W - 12);
+  const top = above ? r.y - MENU_H - 10 : r.y + r.h + 10;
+  const cur = status ?? null;
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents={menu ? 'auto' : 'none'}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+        <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, backStyle]} />
+      </Pressable>
+      <Animated.View
+        style={[
+          styles.menuBox,
+          { left, top, transformOrigin: above ? 'right bottom' : 'right top' },
+          boxStyle,
+        ]}
+      >
+        <Glass style={styles.menuGlass} intensity={60}>
+          {MENU_OPTS.map((o) => {
+            const on = cur === o.st;
+            return (
+              <Pressable
+                key={String(o.st)}
+                style={({ pressed }) => [styles.menuOpt, pressed && styles.menuOptPressed]}
+                onPress={() => onPick(shown.id, o.st)}
+              >
+                <View
+                  style={[
+                    styles.menuDot,
+                    o.st === 'paid' && styles.sFillPaid,
+                    o.st === 'missed' && styles.sFillMiss,
+                    o.st === null && styles.menuDotEmpty,
+                    on && styles.menuDotOn,
+                  ]}
+                >
+                  <Text style={[styles.sGlyph, o.st === 'missed' && styles.sGlyphMiss]}>{o.glyph}</Text>
+                </View>
+                <Text style={[styles.menuLbl, on && styles.menuLblOn]} numberOfLines={1}>
+                  {o.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </Glass>
+      </Animated.View>
+    </View>
+  );
+}
+
+/** Отдельная стеклянная карточка расхода. Свайп вправо — изменить, влево — удалить, тап — изменить. */
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onDelete, onToggle, onMenu }) {
+  const x = useSharedValue(0);
+  const st = displayStatus(item);
+  const id = item.id;
+  const pan = useRowSwipe(x, id, onEdit, onDelete);
   const rowStyle = useAnimatedStyle(() => ({ transform: [{ translateX: x.value }] }));
   const leftStyle = useAnimatedStyle(() => ({
     opacity: interpolate(x.value, [0, SWIPE * 0.4], [0, 1], Extrapolation.CLAMP),
@@ -589,77 +731,50 @@ const ExpenseRow = memo(function ExpenseRow({ item, last, pulse, onEdit, onDelet
   const rightStyle = useAnimatedStyle(() => ({
     opacity: interpolate(x.value, [-SWIPE * 0.4, 0], [1, 0], Extrapolation.CLAMP),
   }));
-  const statusAnim = useAnimatedStyle(() => ({ transform: [{ scale: statusScale.value }] }));
-  const holdStyle = useAnimatedStyle(() => ({
-    opacity: show.value,
-    transform: [{ scale: 0.9 + 0.1 * show.value }],
-  }));
-  const paidStyle = useAnimatedStyle(() => ({
-    backgroundColor: pick.value === 1 ? 'rgba(48,209,88,0.85)' : 'rgba(255,255,255,0.12)',
-  }));
-  const missStyle = useAnimatedStyle(() => ({
-    backgroundColor: pick.value === -1 ? 'rgba(255,69,58,0.85)' : 'rgba(255,255,255,0.12)',
-  }));
-
-  const openStatus = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    onStatus(id);
-  };
+  const edit = useCallback(() => onEdit(id), [id, onEdit]);
 
   return (
-    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-        <View style={[styles.rowWrap, !last && styles.rowSep]}>
-          <Animated.View style={[styles.revealLeft, leftStyle]}>
-            <Text style={styles.revealTxt}>Изменить</Text>
-          </Animated.View>
-          <Animated.View style={[styles.revealRight, rightStyle]}>
-            <Text style={styles.revealTxt}>Удалить</Text>
-          </Animated.View>
-          <GestureDetector gesture={pan}>
-            <Animated.View style={[styles.item, rowStyle]}>
-              <Pressable style={styles.itemPress} onPress={() => onEdit(id)}>
+    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
+      <View style={styles.eCardWrap}>
+        <Animated.View style={[styles.revealLeft, leftStyle]}>
+          <Text style={styles.revealTxt}>Изменить</Text>
+        </Animated.View>
+        <Animated.View style={[styles.revealRight, rightStyle]}>
+          <Text style={styles.revealTxt}>Удалить</Text>
+        </Animated.View>
+        <GestureDetector gesture={pan}>
+          <Animated.View style={rowStyle}>
+            <Glass style={styles.eCard} intensity={34}>
+              <Pressable style={styles.itemPress} onPress={edit}>
                 <View style={styles.whenCol}>
                   <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
                   <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
                 </View>
                 <View style={styles.mid}>
-                  <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
+                  <Text
+                    style={[styles.itemTitle, !item.title && styles.itemTitleDim, st === 'missed' && styles.eDim]}
+                    numberOfLines={1}
+                  >
                     {item.title || 'Без названия'}
                   </Text>
                   <Text style={styles.meta}>
                     {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
-                    {st === 'paid' ? ' · оплачено' : st === 'missed' ? ' · просрочен' : ''}
+                    {st === 'paid' ? (
+                      <Text style={styles.good}> · оплачено</Text>
+                    ) : st === 'missed' ? (
+                      <Text style={styles.metaMiss}> · не плачу</Text>
+                    ) : null}
                   </Text>
                 </View>
-                <Text style={styles.amt}>{money(item.amount)}</Text>
+                <Text style={[styles.amt, st === 'paid' && styles.amtPaid, st === 'missed' && styles.amtMiss]}>
+                  {money(item.amount)}
+                </Text>
               </Pressable>
-              <GestureDetector gesture={hold}>
-                <View collapsable={false}>
-                  <Pressable onPress={openStatus} hitSlop={12}>
-                    <Animated.View
-                      style={[
-                        styles.status,
-                        st === 'paid' && { backgroundColor: 'rgba(48,209,88,0.4)' },
-                        st === 'missed' && { backgroundColor: 'rgba(255,69,58,0.4)' },
-                        statusAnim,
-                      ]}
-                    >
-                      <Text style={styles.statusTxt}>{markGlyph(st)}</Text>
-                    </Animated.View>
-                  </Pressable>
-                </View>
-              </GestureDetector>
-              <Animated.View pointerEvents="none" style={[styles.holdPill, holdStyle]}>
-                <Animated.View style={[styles.holdOpt, paidStyle]}>
-                  <Text style={styles.holdTxt}>✓</Text>
-                </Animated.View>
-                <Animated.View style={[styles.holdOpt, missStyle]}>
-                  <Text style={styles.holdTxt}>✕</Text>
-                </Animated.View>
-              </Animated.View>
-            </Animated.View>
-          </GestureDetector>
-        </View>
+              <StatusButton id={id} status={item.status ?? null} onToggle={onToggle} onMenu={onMenu} />
+            </Glass>
+          </Animated.View>
+        </GestureDetector>
+      </View>
     </Animated.View>
   );
 });
@@ -1559,7 +1674,7 @@ export default function App() {
   const [sheet, setSheet] = useState(null);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
-  const [pulse, setPulse] = useState({ id: null, t: 0 });
+  const [menu, setMenu] = useState(null); // { id, rect } — меню статуса у кнопки
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
@@ -1838,10 +1953,7 @@ export default function App() {
   const expensesForPayday = useCallback(
     (p) => {
       if (!state) return [];
-      const nextP = PAYDAYS.find((x) => x > p) || addDays(p, 14);
-      return state.expenses
-        .filter((e) => e.date >= p && e.date < nextP)
-        .sort((a, b) => a.date.localeCompare(b.date));
+      return expensesInPeriod(state.expenses, p);
     },
     [state]
   );
@@ -1902,14 +2014,28 @@ export default function App() {
         ...p,
         expenses: p.expenses.map((e) => (e.id === id ? { ...e, status } : e)),
       }));
-      setPulse({ id, t: Date.now() });
-      Haptics.notificationAsync(
-        status === 'paid'
-          ? Haptics.NotificationFeedbackType.Success
-          : Haptics.NotificationFeedbackType.Warning
-      );
     },
     [patch]
+  );
+  // тап по кнопке статуса: пусто/✕ → ✓, ✓ → пусто (лёгкая вибрация — в самой кнопке)
+  const toggleStatus = useCallback(
+    (id) => {
+      patch((p) => ({
+        ...p,
+        expenses: p.expenses.map((e) => (e.id === id ? { ...e, status: toggledStatus(e.status) } : e)),
+      }));
+    },
+    [patch]
+  );
+  const openStatusMenu = useCallback((id, rect) => setMenu({ id, rect }), []);
+  const closeStatusMenu = useCallback(() => setMenu(null), []);
+  const pickStatus = useCallback(
+    (id, status) => {
+      Haptics.selectionAsync();
+      setMenu(null);
+      setStatusDirect(id, status);
+    },
+    [setStatusDirect]
   );
 
   const confirmDeleteExpense = useCallback(
@@ -2099,8 +2225,7 @@ export default function App() {
         ? Haptics.NotificationFeedbackType.Success
         : Haptics.NotificationFeedbackType.Warning
     );
-    // пульс кружка — когда шторка уже уехала и строку видно
-    closeThen(() => setPulse({ id, t: Date.now() }));
+    closeSheet();
   };
 
   const pickBg = async () => {
@@ -2116,16 +2241,10 @@ export default function App() {
 
   const pays = paydaysInMonth(viewY, viewM);
   const focus = pays.find((p) => p >= todayIso()) || pays[pays.length - 1];
-  const need = focus
-    ? expensesForPayday(focus).reduce((a, e) => a + Number(e.amount || 0), 0)
-    : 0;
-  const got = focus ? earnedForPayday(focus) : 0;
-  const paidFocus = focus
-    ? expensesForPayday(focus)
-        .filter((e) => displayStatus(e) === 'paid')
-        .reduce((a, e) => a + Number(e.amount || 0), 0)
-    : 0;
-  const balanceOk = got >= need;
+  // Большая цифра = «осталось оплатить» к этой зарплате (план без ✕ минус ✓).
+  const ft = paydayTotals(focus ? expensesForPayday(focus) : [], focus ? earnedForPayday(focus) : 0);
+  const allPaid = ft.planned > 0 && ft.remaining <= 0;
+  const balanceOk = ft.free >= 0;
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
   const rec = paid.filter((e) => e.type === 'recurring');
@@ -2425,7 +2544,7 @@ export default function App() {
                 <Text style={styles.actBtnTxt}>✓  Оплатил</Text>
               </ScaleButton>
               <ScaleButton style={[styles.actBtn, styles.statusMissBtn, st === 'missed' && styles.btnOn]} onPress={() => setStatus('missed')}>
-                <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>✕  Не оплатил вовремя</Text>
+                <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>✕  Не плачу</Text>
               </ScaleButton>
               {st !== 'none' && (
                 <ScaleButton style={styles.actBtn} onPress={() => setStatus(null)}>
@@ -3032,40 +3151,43 @@ export default function App() {
                 <Glass style={styles.balance} intensity={42}>
                   <View style={styles.cardHead}>
                     <Text style={styles.period}>К зарплате {fmtShort(focus)}</Text>
-                    <View style={[styles.tag, balanceOk ? styles.tagGood : styles.tagBad]}>
-                      <Text style={[styles.tagTxt, balanceOk ? styles.good : styles.bad]}>
-                        {balanceOk ? 'хватает' : 'не хватает'}
+                    <View style={[styles.tag, allPaid || balanceOk ? styles.tagGood : styles.tagBad]}>
+                      <Text style={[styles.tagTxt, allPaid || balanceOk ? styles.good : styles.bad]}>
+                        {allPaid ? 'всё оплачено' : balanceOk ? 'хватает' : 'не хватает'}
                       </Text>
                     </View>
                   </View>
                   <Text style={styles.paySub}>
-                    {balanceOk ? 'останется после всех платежей' : 'не хватает на все платежи'}
+                    {allPaid
+                      ? 'все платежи этой зарплаты закрыты'
+                      : `осталось оплатить · ${ft.open} ${plural(ft.open, 'платёж', 'платежа', 'платежей')}`}
                   </Text>
                   <Text
-                    style={[styles.bigPay, { color: balanceOk ? accent : '#ff453a' }]}
+                    style={[styles.bigPay, { color: allPaid ? '#30d158' : accent }]}
                     numberOfLines={1}
                     adjustsFontSizeToFit
                   >
-                    {got - need < 0 ? '−' : ''}
-                    {money(Math.abs(got - need))}
+                    {money(Math.max(0, ft.remaining))}
                   </Text>
-                  <Meter value={need > 0 ? paidFocus / need : 0} color={accent} />
+                  <Meter value={ft.planned > 0 ? ft.paid / ft.planned : 0} color={accent} />
                   <Text style={styles.calcMeta}>
-                    оплачено {money(paidFocus)} из {money(need)}
+                    оплачено {money(ft.paid)} из {money(ft.planned)}
+                    {ft.cancelled > 0 ? ` · не плачу ${money(ft.cancelled)}` : ''}
                   </Text>
                   <View style={styles.statRow}>
-                    <Stat k="Заработано" v={money(got)} tone={balanceOk ? 'good' : 'bad'} />
-                    <Stat k="Нужно" v={money(need)} />
-                    <Stat k="Осталось" v={money(Math.max(0, need - paidFocus))} />
+                    <Stat k="Заработано" v={money(ft.earned)} tone={balanceOk ? 'good' : 'bad'} />
+                    <Stat k="К оплате" v={money(ft.planned)} />
+                    <Stat
+                      k="После оплат"
+                      v={`${ft.free < 0 ? '−' : ''}${money(Math.abs(ft.free))}`}
+                      tone={balanceOk ? 'good' : 'bad'}
+                    />
                   </View>
                 </Glass>
               )}
               {pays.map((p, i) => {
                 const list = expensesForPayday(p);
-                const sum = list.reduce((a, e) => a + Number(e.amount || 0), 0);
-                const paidSum = list
-                  .filter((e) => displayStatus(e) === 'paid')
-                  .reduce((a, e) => a + Number(e.amount || 0), 0);
+                const gt = paydayTotals(list);
                 return (
                   <Animated.View key={p} style={styles.group} layout={ROW_LAYOUT}>
                     <View style={styles.gHead}>
@@ -3073,37 +3195,37 @@ export default function App() {
                         {ORDINALS[i] || `${i + 1}-я`} зарплата · {fmtShort(p)}
                       </Text>
                       <Text style={styles.gSub}>
-                        {money(paidSum)} из {money(sum)}
+                        {money(gt.paid)} из {money(gt.planned)}
                       </Text>
                     </View>
-                    <ItemCard>
-                      {list.length === 0 ? (
+                    {list.length === 0 ? (
+                      <ItemCard>
                         <Text style={styles.empty}>Пока пусто — «+» вверху</Text>
-                      ) : (
-                        list.map((e, j) => (
-                          <ExpenseRow
-                            key={e.id}
-                            item={e}
-                            last={j === list.length - 1}
-                            pulse={pulse.id === e.id ? pulse.t : 0}
-                            onEdit={openExpense}
-                            onDelete={confirmDeleteExpense}
-                            onStatus={openStatus}
-                            onSet={setStatusDirect}
-                          />
-                        ))
-                      )}
-                      <Animated.View style={styles.cardFoot} layout={ROW_LAYOUT}>
-                        <Text style={styles.footL}>Итого</Text>
-                        <Text style={styles.footV}>{money(sum)}</Text>
-                      </Animated.View>
-                    </ItemCard>
+                      </ItemCard>
+                    ) : (
+                      list.map((e) => (
+                        <ExpenseCard
+                          key={e.id}
+                          item={e}
+                          onEdit={openExpense}
+                          onDelete={confirmDeleteExpense}
+                          onToggle={toggleStatus}
+                          onMenu={openStatusMenu}
+                        />
+                      ))
+                    )}
+                    <Animated.View style={styles.eFoot} layout={ROW_LAYOUT}>
+                      <Text style={styles.footL}>
+                        Итого к оплате{gt.cancelled > 0 ? ` · не плачу ${money(gt.cancelled)}` : ''}
+                      </Text>
+                      <Text style={styles.footV}>{money(gt.planned)}</Text>
+                    </Animated.View>
                   </Animated.View>
                 );
               })}
               <Text style={[styles.hint, styles.pageHint]}>
-                Свайп вправо — изменить, влево — удалить. Тап по кружку — статус; зажмите кружок и
-                потяните: вверх ✓, вниз ✕.
+                Свайп вправо — изменить, влево — удалить. Тап по зелёной кнопке — ✓ оплачено; удерживайте
+                её — выбор: ✓ оплачено, ✕ не плачу, без отметки.
               </Text>
             </View>
           </LayoutAnimationConfig>
@@ -3250,6 +3372,12 @@ export default function App() {
         </ScaleButton>
       </View>
 
+      <StatusMenu
+        menu={menu}
+        status={menu ? state.expenses.find((x) => x.id === menu.id)?.status : null}
+        onPick={pickStatus}
+        onClose={closeStatusMenu}
+      />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
@@ -3418,6 +3546,87 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.12)',
   },
   rowWrap: { position: 'relative', overflow: 'hidden' },
+  eCardOuter: { marginBottom: 8 },
+  eCardWrap: { borderRadius: 22, overflow: 'hidden' },
+  eCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 66,
+    paddingRight: 10,
+    borderRadius: 22,
+  },
+  eDim: { color: 'rgba(235,235,245,0.45)', textDecorationLine: 'line-through' },
+  metaMiss: { color: 'rgba(255,105,97,0.9)' },
+  amtPaid: { color: 'rgba(235,235,245,0.6)' },
+  amtMiss: { color: 'rgba(235,235,245,0.35)', textDecorationLine: 'line-through' },
+  eFoot: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingTop: 2,
+    paddingBottom: 4,
+  },
+  sBtnHit: { padding: 4 },
+  sBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  sBtnEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 6,
+    right: 6,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+  },
+  sRing: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 2,
+    borderColor: 'rgba(48,209,88,0.85)',
+  },
+  sFill: {
+    position: 'absolute',
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sFillPaid: { backgroundColor: '#30d158' },
+  sFillMiss: { backgroundColor: 'rgba(255,69,58,0.28)' },
+  sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  sGlyphMiss: { color: '#ff6961' },
+  menuBack: { backgroundColor: 'rgba(0,0,0,0.22)' },
+  menuBox: { position: 'absolute', width: MENU_W, height: MENU_H },
+  menuGlass: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    borderRadius: 26,
+    paddingHorizontal: 6,
+  },
+  menuOpt: { alignItems: 'center', justifyContent: 'center', width: 72, height: 66, borderRadius: 18, gap: 4 },
+  menuOptPressed: { backgroundColor: 'rgba(255,255,255,0.1)' },
+  menuDot: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuDotEmpty: { borderWidth: 2, borderColor: 'rgba(48,209,88,0.85)' },
+  menuDotOn: { borderWidth: 2, borderColor: '#fff' },
+  menuLbl: { color: 'rgba(235,235,245,0.7)', fontSize: 11, fontWeight: '600' },
+  menuLblOn: { color: '#fff' },
   revealLeft: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#0a84ff',
@@ -3451,17 +3660,6 @@ const styles = StyleSheet.create({
   itemTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
   meta: { color: 'rgba(235,235,245,0.4)', fontSize: 12, marginTop: 2 },
   amt: { color: '#fff', fontSize: 16, fontWeight: '600', marginRight: 6 },
-  status: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.14)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statusTxt: { color: '#fff', fontSize: 16, fontWeight: '700' },
   calcBadge: {
     alignSelf: 'flex-start',
     marginTop: 4,
@@ -3690,27 +3888,6 @@ const styles = StyleSheet.create({
   setL: { color: '#fff', fontSize: 16 },
   setS: { color: 'rgba(235,235,245,0.42)', fontSize: 12, marginTop: 2 },
 
-  holdPill: {
-    position: 'absolute',
-    right: 4,
-    top: 4,
-    bottom: 4,
-    width: 46,
-    flexDirection: 'column',
-    borderRadius: 22,
-    backgroundColor: 'rgba(22,22,28,0.96)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.2)',
-    zIndex: 5,
-  },
-  holdOpt: {
-    flex: 1,
-    margin: 3,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  holdTxt: { color: '#fff', fontSize: 18, fontWeight: '700' },
 
   anRow: {
     paddingVertical: 12,
