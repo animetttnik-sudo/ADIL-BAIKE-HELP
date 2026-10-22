@@ -20,12 +20,11 @@ import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
     AppState,
     Dimensions, ImageBackground,
-    InputAccessoryView,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -51,6 +50,7 @@ import Animated, {
     interpolate,
     LayoutAnimationConfig,
     LinearTransition,
+    useAnimatedKeyboard,
     useAnimatedStyle, useSharedValue,
     withSequence,
     withSpring,
@@ -252,7 +252,7 @@ function ensureSheetVisible(input) {
   if (!kb) return;
   input.measureInWindow((x, y, w, h) => {
     sv.measureInWindow((sx, sy) => {
-      const bottom = kb.screenY - 14;
+      const bottom = kb.screenY - KB_BAR_H - 14;
       const top = sy + 8;
       let delta = 0;
       if (y + h > bottom) delta = y + h - bottom;
@@ -402,7 +402,7 @@ function SheetHost({ active, render, onClosed }) {
                     }}
                     keyboardShouldPersistTaps="handled"
                     keyboardDismissMode="interactive"
-                    contentContainerStyle={{ paddingBottom: 40 }}
+                    contentContainerStyle={{ paddingBottom: 40 + KB_BAR_H }}
                     showsVerticalScrollIndicator={false}
                     style={{ flexShrink: 1 }}
                   >
@@ -412,6 +412,7 @@ function SheetHost({ active, render, onClosed }) {
               </Animated.View>
             </KeyboardAvoidingView>
           )}
+          <KeyBarHost scope="sheet" />
         </View>
       </GestureHandlerRootView>
     </Modal>
@@ -1013,7 +1014,7 @@ function blankDay(prefs) {
 const talliesOf = (v) => (Array.isArray(v) && v.length ? v.map((x) => Number(x) || 0) : [itemTotal(v)]);
 
 /** Числовое поле: тап — ввод с клавиатуры, пустое = 0; внешние ± сразу видны. */
-function NumInput({ value, onChange, style, inputRef, onFocused, onSubmit, accessoryId, last }) {
+function NumInput({ value, onChange, style, inputRef, onFocused, onBlurred, onSubmit, accessoryId }) {
   const [draft, setDraft] = useState(null);
   const v = Number(value) || 0;
   const shown = draft !== null && (Number(draft) || 0) === v ? draft : v ? String(v) : '';
@@ -1029,14 +1030,15 @@ function NumInput({ value, onChange, style, inputRef, onFocused, onSubmit, acces
       placeholder="0"
       placeholderTextColor="rgba(235,235,245,0.3)"
       inputAccessoryViewID={accessoryId}
-      returnKeyType={onSubmit ? (last ? 'done' : 'next') : undefined}
-      submitBehavior={onSubmit ? (last ? 'blurAndSubmit' : 'submit') : undefined}
       onSubmitEditing={onSubmit}
       onFocus={() => {
         setDraft(v ? String(v) : '');
         onFocused?.();
       }}
-      onBlur={() => setDraft(null)}
+      onBlur={() => {
+        setDraft(null);
+        onBlurred?.();
+      }}
       onChangeText={(t) => {
         const d = t.replace(/[^0-9]/g, '');
         setDraft(d);
@@ -1078,20 +1080,23 @@ const CountRow = memo(function CountRow({
         inputRef={setRef}
         value={first}
         onChange={(n) => onSet(id, n)}
-        onFocused={() => onFocusItem(id)}
+        onFocused={() => {
+          onFocusItem(id);
+          kbShow({
+            key: `calc-${id}`,
+            scope: 'main',
+            label: `${item.name}  ·  ${pos + 1}/${count}`,
+            hasPrev: pos > 0,
+            isLast: isLastField,
+            accent,
+            onPrev: () => onNext(id, -1),
+            onNext: () => onNext(id, 1),
+          });
+        }}
+        onBlurred={() => kbHide(`calc-${id}`)}
         onSubmit={() => onNext(id, 1)}
-        last={isLastField}
-        accessoryId={Platform.OS === 'ios' ? `kb-calc-${id}` : undefined}
+        accessoryId={KB_NONE}
         style={[styles.cCount, styles.cCountTxt]}
-      />
-      <KeyBar
-        nativeID={`kb-calc-${id}`}
-        label={`${item.name}  ·  ${pos + 1}/${count}`}
-        hasPrev={pos > 0}
-        isLast={isLastField}
-        accent={accent}
-        onPrev={() => onNext(id, -1)}
-        onNext={() => onNext(id, 1)}
       />
       <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, 1)}>
         <Text style={styles.stepTxt}>+</Text>
@@ -1101,41 +1106,97 @@ const CountRow = memo(function CountRow({
 });
 
 /**
- * Панель над клавиатурой iOS: [Скрыть] · подпись · [↑] [Далее ›].
- * Своя панель на КАЖДОЕ поле (свой nativeID): в Fabric <InputAccessoryView nativeID>
- * цепляется только к первому полю с этим id, поэтому общий id не годится.
- * Рендерить рядом с полем (в том же окне — внутри шторки для полей шторки).
+ * Панель над клавиатурой: [Скрыть] · подпись · [↑] [Далее ›] (на последнем — «Готово»).
+ *
+ * Раньше это был <InputAccessoryView nativeID> на каждое поле. В Fabric (RN 0.86)
+ * он ищет своё поле ОДИН раз в didMoveToWindow и держит его по weak-ссылке: если
+ * поле смонтировалось позже/переиспользовалось из пула — панель не цепляется,
+ * а поле с inputAccessoryViewID не получает и системную панель — пусто.
+ * Поэтому теперь панель своя: одна на окно (главное и окно шторки), видна, пока
+ * в фокусе поле, которое её «заказало» (kbShow на onFocus), и едет вместе с
+ * клавиатурой кадр в кадр (useAnimatedKeyboard на UI-потоке).
  */
-const KeyBar = memo(function KeyBar({ nativeID, label, hasPrev, isLast, accent, onPrev, onNext }) {
-  if (Platform.OS !== 'ios') return null;
+const KB_NONE = Platform.OS === 'ios' ? 'kb-none' : undefined; // гасит системную «Done»-полоску iOS у number-pad
+const KB_BAR_H = 60;
+const kbStore = { cfg: null, subs: new Set() };
+const kbEmit = () => kbStore.subs.forEach((f) => f());
+function kbShow(cfg) {
+  kbStore.cfg = cfg;
+  kbEmit();
+}
+function kbHide(key) {
+  if (kbStore.cfg && kbStore.cfg.key === key) {
+    kbStore.cfg = null;
+    kbEmit();
+  }
+}
+const kbSubscribe = (f) => {
+  kbStore.subs.add(f);
+  return () => kbStore.subs.delete(f);
+};
+const kbGet = () => kbStore.cfg;
+
+function KeyBarHost({ scope }) {
+  const cfg = useSyncExternalStore(kbSubscribe, kbGet);
+  const kb = useAnimatedKeyboard();
+  // запасной путь: высота из JS-событий клавиатуры (если UI-трекинг вдруг молчит)
+  const jsH = useSharedValue(0);
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return undefined;
+    const ease = (e) => ({ duration: e?.duration || 250, easing: Easing.out(Easing.cubic) });
+    const a = Keyboard.addListener('keyboardWillChangeFrame', (e) => {
+      jsH.value = withTiming(Math.max(0, SCREEN_H - e.endCoordinates.screenY), ease(e));
+    });
+    const b = Keyboard.addListener('keyboardWillHide', (e) => {
+      jsH.value = withTiming(0, ease(e));
+    });
+    return () => {
+      a.remove();
+      b.remove();
+    };
+  }, [jsH]);
+  const lastRef = useRef(null);
+  const mine = cfg && cfg.scope === scope ? cfg : null;
+  if (mine) lastRef.current = mine;
+  else if (cfg) lastRef.current = null; // фокус в другом окне — здесь не показываем
+  const shown = mine || lastRef.current; // пока клавиатура уезжает — держим последнюю подпись
+  const anim = useAnimatedStyle(() => {
+    const h = kb.height.value > 0 ? kb.height.value : jsH.value;
+    return { opacity: h > 40 ? 1 : 0, transform: [{ translateY: -h }] };
+  });
+  if (Platform.OS !== 'ios' || !shown) return null;
   return (
-    <InputAccessoryView nativeID={nativeID}>
+    <Animated.View style={[styles.keyBarWrap, anim]} pointerEvents={mine ? 'box-none' : 'none'}>
       <Glass style={styles.keyBar} intensity={60}>
         <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
           <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
         <Text style={styles.keyBarLabel} numberOfLines={1}>
-          {label}
+          {shown.label}
         </Text>
         <Pressable
-          style={[styles.keyBarRound, !hasPrev && { opacity: 0.35 }]}
-          disabled={!hasPrev}
+          style={[styles.keyBarRound, !shown.hasPrev && { opacity: 0.35 }]}
+          disabled={!shown.hasPrev}
           hitSlop={6}
-          onPress={onPrev}
+          onPress={() => kbStore.cfg?.onPrev?.()}
         >
           <Text style={styles.keyBarArrow}>↑</Text>
         </Pressable>
         <Pressable
-          style={[styles.keyBarNext, { backgroundColor: accent }]}
+          style={[styles.keyBarNext, { backgroundColor: shown.accent }]}
           hitSlop={6}
-          onPress={isLast ? () => Keyboard.dismiss() : onNext}
+          onPress={() => {
+            const c = kbStore.cfg;
+            if (!c || c.isLast) Keyboard.dismiss();
+            else c.onNext?.();
+          }}
         >
-          <Text style={styles.keyBarNextTxt}>{isLast ? 'Готово' : 'Далее ›'}</Text>
+          <Text style={styles.keyBarNextTxt}>{shown.isLast ? 'Готово' : 'Далее ›'}</Text>
         </Pressable>
       </Glass>
-    </InputAccessoryView>
+    </Animated.View>
   );
-});
+}
 
 function CheckRow({ checked, label, amount, accent, onToggle }) {
   const s = useSharedValue(1);
@@ -1188,7 +1249,7 @@ const CalcView = memo(function CalcView({
       if (!input || !sv || !input.measureInWindow) return;
       input.measureInWindow((x, y, w, h) => {
         const kb = Keyboard.isVisible() ? Keyboard.metrics() : null;
-        const bottom = (kb ? kb.screenY : SCREEN_H) - 20;
+        const bottom = (kb ? kb.screenY - KB_BAR_H : SCREEN_H) - 20;
         const top = scrollTop.current + 12;
         let delta = 0;
         if (y + h + 8 > bottom) delta = y + h + 8 - bottom;
@@ -2033,28 +2094,29 @@ export default function App() {
           else delete formRefs.current[key];
         },
         keyboardAppearance: 'dark',
-        inputAccessoryViewID: Platform.OS === 'ios' ? nid : undefined,
+        inputAccessoryViewID: KB_NONE,
         returnKeyType: next ? 'next' : 'done',
         submitBehavior: next ? 'submit' : 'blurAndSubmit',
         onSubmitEditing: () => focus(next),
+        onBlur: () => kbHide(nid),
         onFocus: () => {
           const r = formRefs.current[key];
+          kbShow({
+            key: nid,
+            scope: 'sheet',
+            label: `${label}  ·  ${i + 1}/${keys.length}`,
+            hasPrev: !!prev,
+            isLast: !next,
+            accent,
+            onPrev: () => focus(prev),
+            onNext: () => focus(next),
+          });
           // клавиатура уже есть — сразу; первая — ждём, пока выедет и шторка поднимется
           if (Keyboard.isVisible()) requestAnimationFrame(() => ensureSheetVisible(r));
           else setTimeout(() => ensureSheetVisible(r), 380);
         },
       },
-      bar: (
-        <KeyBar
-          nativeID={nid}
-          label={`${label}  ·  ${i + 1}/${keys.length}`}
-          hasPrev={!!prev}
-          isLast={!next}
-          accent={accent}
-          onPrev={() => focus(prev)}
-          onNext={() => focus(next)}
-        />
-      ),
+      bar: null, // панель — общая KeyBarHost в окне шторки
     };
   };
 
@@ -3020,6 +3082,7 @@ export default function App() {
         </ScaleButton>
       </View>
 
+      <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
   );
@@ -3683,6 +3746,7 @@ const styles = StyleSheet.create({
   tallyRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
+  keyBarWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50 },
   keyBar: {
     flexDirection: 'row',
     alignItems: 'center',
