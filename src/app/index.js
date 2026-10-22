@@ -204,6 +204,45 @@ function ItemCard({ children, style }) {
   );
 }
 
+/** Полоска прогресса (0…1); ширина плавно доезжает пружиной на UI-потоке. */
+function Meter({ value, color }) {
+  const w = useSharedValue(0);
+  const p = useSharedValue(0);
+  const v = Math.max(0, Math.min(1, Number(value) || 0));
+  useEffect(() => {
+    p.value = withSpring(v, softSpring);
+  }, [v, p]);
+  const fill = useAnimatedStyle(() => ({ width: w.value * p.value }));
+  return (
+    <View
+      style={styles.meter}
+      onLayout={(e) => {
+        w.value = e.nativeEvent.layout.width;
+      }}
+    >
+      <Animated.View style={[styles.meterFill, { backgroundColor: color }, fill]} />
+    </View>
+  );
+}
+
+/** Подпись + число в итоговой карточке. */
+function Stat({ k, v, tone }) {
+  return (
+    <View style={styles.stat3}>
+      <Text style={styles.k} numberOfLines={1}>
+        {k}
+      </Text>
+      <Text
+        style={[styles.statV, tone === 'good' && styles.good, tone === 'bad' && styles.bad]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+      >
+        {v}
+      </Text>
+    </View>
+  );
+}
+
 /**
  * Единый хост для всех шторок: ОДИН Modal (animationType="none"), содержимое
  * меняется внутри. iOS не может показать новый Modal, пока предыдущий ещё
@@ -432,7 +471,7 @@ const ROW_ENTER = FadeIn.duration(220);
 const ROW_EXIT = FadeOut.duration(180);
 const ROW_LAYOUT = LinearTransition.duration(220);
 
-const ExpenseRow = memo(function ExpenseRow({ item, pulse, onEdit, onDelete, onStatus, onSet }) {
+const ExpenseRow = memo(function ExpenseRow({ item, last, pulse, onEdit, onDelete, onStatus, onSet }) {
   const x = useSharedValue(0);
   const statusScale = useSharedValue(1);
   const st = displayStatus(item);
@@ -505,9 +544,8 @@ const ExpenseRow = memo(function ExpenseRow({ item, pulse, onEdit, onDelete, onS
   };
 
   return (
-    <Animated.View style={styles.rowOuter} entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-      <ItemCard>
-        <View style={styles.rowWrap}>
+    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
+        <View style={[styles.rowWrap, !last && styles.rowSep]}>
           <Animated.View style={[styles.revealLeft, leftStyle]}>
             <Text style={styles.revealTxt}>Изменить</Text>
           </Animated.View>
@@ -517,20 +555,24 @@ const ExpenseRow = memo(function ExpenseRow({ item, pulse, onEdit, onDelete, onS
           <GestureDetector gesture={pan}>
             <Animated.View style={[styles.item, rowStyle]}>
               <Pressable style={styles.itemPress} onPress={() => onEdit(id)}>
-                <Text style={styles.when}>{fmtDay(item.date)}</Text>
+                <View style={styles.whenCol}>
+                  <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
+                  <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
+                </View>
                 <View style={styles.mid}>
-                  <Text style={styles.itemTitle} numberOfLines={1}>
+                  <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
                     {item.title || 'Без названия'}
                   </Text>
                   <Text style={styles.meta}>
-                    {item.type === 'recurring' ? 'постоянный' : 'непредвид.'}
+                    {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
+                    {st === 'paid' ? ' · оплачено' : st === 'missed' ? ' · просрочен' : ''}
                   </Text>
                 </View>
                 <Text style={styles.amt}>{money(item.amount)}</Text>
               </Pressable>
               <GestureDetector gesture={hold}>
                 <View collapsable={false}>
-                  <Pressable onPress={openStatus} hitSlop={10}>
+                  <Pressable onPress={openStatus} hitSlop={12}>
                     <Animated.View
                       style={[
                         styles.status,
@@ -555,12 +597,11 @@ const ExpenseRow = memo(function ExpenseRow({ item, pulse, onEdit, onDelete, onS
             </Animated.View>
           </GestureDetector>
         </View>
-      </ItemCard>
     </Animated.View>
   );
 });
 
-const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent }) {
+const ShiftRow = memo(function ShiftRow({ item, last, onEdit, onDelete, onCalc, accent }) {
   const x = useSharedValue(0);
   const id = item.id;
   const pan = useRowSwipe(x, id, onEdit, onDelete);
@@ -573,11 +614,10 @@ const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent
   }));
 
   return (
-    <Animated.View style={styles.rowOuter} entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-      <ItemCard>
-        <View style={styles.rowWrap}>
+    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
+        <View style={[styles.rowWrap, !last && styles.rowSep]}>
           <Animated.View style={[styles.revealLeft, leftStyle]}>
-            <Text style={styles.revealTxt}>Сумма</Text>
+            <Text style={styles.revealTxt}>{item.source === 'calc' ? 'Открыть' : 'Сумма'}</Text>
           </Animated.View>
           <Animated.View style={[styles.revealRight, rightStyle]}>
             <Text style={styles.revealTxt}>Убрать</Text>
@@ -585,9 +625,14 @@ const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent
           <GestureDetector gesture={pan}>
             <Animated.View style={[styles.item, rowStyle]}>
               <Pressable style={styles.itemPress} onPress={() => onEdit(id)}>
-                <Text style={styles.when}>{fmtDay(item.date)}</Text>
+                <View style={styles.whenCol}>
+                  <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
+                  <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
+                </View>
                 <View style={styles.mid}>
-                  <Text style={styles.itemTitle}>{item.title}</Text>
+                  <Text style={styles.itemTitle} numberOfLines={1}>
+                    {item.title}
+                  </Text>
                   {item.source === 'calc' ? (
                     <Pressable
                       hitSlop={8}
@@ -598,11 +643,11 @@ const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent
                     </Pressable>
                   ) : (
                     <Text style={styles.meta}>
-                      {DOW[parse(item.date).getDay()]} · свайп или тап
+                      {item.amount == null || item.amount === '' ? 'без суммы — тап, чтобы вписать' : 'вручную'}
                     </Text>
                   )}
                 </View>
-                <Text style={styles.amt}>
+                <Text style={[styles.amt, (item.amount == null || item.amount === '') && styles.amtDim]}>
                   {item.amount == null || item.amount === '' ? '—' : money(item.amount)}
                 </Text>
                 <Text style={styles.chevMini}>›</Text>
@@ -610,7 +655,6 @@ const ShiftRow = memo(function ShiftRow({ item, onEdit, onDelete, onCalc, accent
             </Animated.View>
           </GestureDetector>
         </View>
-      </ItemCard>
     </Animated.View>
   );
 });
@@ -647,75 +691,132 @@ function ScaleButton({ onPress, style, children }) {
 }
 
 /** Капсула: тап + свайп + spring-доводка. Индикатор — плотная плашка без nested glass. */
-function SegmentCapsule({ value, labels, onChange, height = 56 }) {
-  const [boxW, setBoxW] = useState(0);
+/** Подпись сегмента: яркость считается из позиции плашки на UI-потоке (без ожидания JS). */
+function SegLabel({ label, index, pos, fontSize }) {
+  const on = useAnimatedStyle(() => ({
+    opacity: interpolate(Math.abs(pos.value - index), [0, 0.6], [1, 0], Extrapolation.CLAMP),
+  }));
+  return (
+    <View style={styles.seg} pointerEvents="none">
+      <Text style={[styles.segTxt, fontSize && { fontSize }]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Animated.Text style={[styles.segTxt, styles.segTxtOn, styles.segTxtAbs, fontSize && { fontSize }, on]} numberOfLines={1}>
+        {label}
+      </Animated.Text>
+    </View>
+  );
+}
+
+/**
+ * Сегмент-капсула (док и переключатели). Всё движение — на UI-потоке:
+ * тап/свайп → плашка сразу едет пружиной (shared value), и только потом
+ * через scheduleOnRN сообщаем JS (onChange). Жесты создаются один раз и
+ * не пересоздаются на каждый рендер; «последнее выбранное» хранится в
+ * shared value — быстрые тапы не путаются со старыми пропсами.
+ * glass — настоящий Liquid Glass (GlassView, иначе BlurView) для дока.
+ */
+function SegmentCapsule({ value, labels, onChange, height = 56, glass = false, fontSize }) {
   const n = labels.length;
-  const segW = boxW > 0 ? (boxW - 10) / n : 0;
-  const sv = useSharedValue(value);
+  const segW = useSharedValue(0);
+  const [measured, setMeasured] = useState(false);
+  const pos = useSharedValue(value);
+  const target = useSharedValue(value);
   const drag0 = useSharedValue(0);
+  const press = useSharedValue(0);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const commit = useCallback((p) => {
+    Haptics.selectionAsync();
+    onChangeRef.current(p);
+  }, []);
+
+  // внешняя смена value (не нашим жестом) — плавно доехать
   useEffect(() => {
-    sv.value = withSpring(value, capSpring);
-  }, [value, sv]);
-  const setJS = useCallback(
-    (p) => {
-      Haptics.selectionAsync();
-      onChange(p);
-    },
-    [onChange]
-  );
-  const pan = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetX([-8, 8])
-        .failOffsetY([-14, 14])
-        .onBegin(() => {
-          drag0.value = sv.value;
-        })
-        .onUpdate((e) => {
-          const next = Math.max(0, Math.min(n - 1, drag0.value + e.translationX / Math.max(segW, 1)));
-          sv.value = next;
-        })
-        .onEnd((e) => {
-          const projected = sv.value + e.velocityX / 5000;
-          const p = Math.max(0, Math.min(n - 1, Math.round(projected)));
-          sv.value = withSpring(p, capSpring);
-          if (p !== value) scheduleOnRN(setJS, p);
-        }),
-    [sv, drag0, n, segW, value, setJS]
-  );
+    if (target.value !== value) {
+      target.value = value;
+      pos.value = withSpring(value, capSpring);
+    }
+  }, [value, pos, target]);
+
+  const gesture = useMemo(() => {
+    const pick = (p) => {
+      'worklet';
+      pos.value = withSpring(p, capSpring);
+      if (p !== target.value) {
+        target.value = p;
+        scheduleOnRN(commit, p);
+      }
+    };
+    const tap = Gesture.Tap()
+      .maxDuration(5000)
+      .onBegin(() => {
+        press.value = withTiming(1, { duration: 90 });
+      })
+      .onEnd((e, ok) => {
+        const w = segW.value;
+        if (!ok || w <= 0) return;
+        pick(Math.max(0, Math.min(n - 1, Math.floor((e.x - 5) / w))));
+      })
+      .onFinalize(() => {
+        press.value = withTiming(0, { duration: 160 });
+      });
+    const pan = Gesture.Pan()
+      .activeOffsetX([-8, 8])
+      .failOffsetY([-14, 14])
+      .onBegin(() => {
+        drag0.value = pos.value;
+      })
+      .onStart(() => {
+        press.value = withTiming(1, { duration: 90 });
+      })
+      .onUpdate((e) => {
+        const w = Math.max(segW.value, 1);
+        pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
+      })
+      .onEnd((e) => {
+        const projected = pos.value + e.velocityX / 5000;
+        pick(Math.max(0, Math.min(n - 1, Math.round(projected))));
+      })
+      .onFinalize(() => {
+        press.value = withTiming(0, { duration: 160 });
+      });
+    return Gesture.Race(pan, tap);
+  }, [n, pos, target, drag0, press, segW, commit]);
+
   const ind = useAnimatedStyle(() => ({
-    width: segW,
-    transform: [{ translateX: sv.value * segW }],
+    width: segW.value,
+    transform: [{ translateX: pos.value * segW.value }, { scale: 1 + press.value * 0.04 }],
   }));
 
+  const Wrap = glass ? Glass : View;
   return (
-    <View
-      style={[styles.segCap, { height }]}
-      onLayout={(e) => {
-        const w = e.nativeEvent.layout.width;
-        setBoxW((old) => (old === w ? old : w));
-      }}
+    <Wrap
+      style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
+      intensity={50}
     >
-      <View style={styles.segCapBg} />
-      <GestureDetector gesture={pan}>
-        <View style={styles.segCapRow} collapsable={false}>
+      <GestureDetector gesture={gesture}>
+        <View
+          style={styles.segCapRow}
+          collapsable={false}
+          onLayout={(e) => {
+            const w = e.nativeEvent.layout.width;
+            segW.value = (w - 10) / n;
+            if (!measured) setMeasured(true);
+          }}
+        >
           {/* плашку рисуем только после замера ширины — без «прыжка» */}
-          {segW > 0 && <Animated.View pointerEvents="none" style={[styles.segInd, ind]} />}
+          {measured && (
+            <Animated.View pointerEvents="none" style={[styles.segInd, { borderRadius: (height - 10) / 2 }, ind]}>
+              <View style={styles.segIndEdge} />
+            </Animated.View>
+          )}
           {labels.map((lab, i) => (
-            <Pressable
-              key={lab}
-              style={styles.seg}
-              onPress={() => {
-                sv.value = withSpring(i, capSpring);
-                setJS(i);
-              }}
-            >
-              <Text style={[styles.segTxt, value === i && styles.segTxtOn]}>{lab}</Text>
-            </Pressable>
+            <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
           ))}
         </View>
       </GestureDetector>
-    </View>
+    </Wrap>
   );
 }
 
@@ -985,7 +1086,7 @@ function CheckRow({ checked, label, amount, accent, onToggle }) {
   );
 }
 
-function CalcView({
+const CalcView = memo(function CalcView({
   calc, date, day, accent, linkedShift, manualOnDate, scrollRef, scrollY, scrollTop,
   onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onShowShift,
 }) {
@@ -1300,7 +1401,7 @@ function CalcView({
       </Animated.View>
     </>
   );
-}
+});
 
 export default function App() {
   const [state, setState] = useState(null);
@@ -1422,6 +1523,34 @@ export default function App() {
   const mainScroll = useRef(null);
   const mainScrollY = useRef(0);
   const mainScrollTop = useRef(0);
+
+  // ── Вкладки: плашка дока едет на UI-потоке; JS лишь переключает display.
+  // Расчёт/Смены монтируем заранее (после загрузки, в простое), а если
+  // вкладку открыли раньше — после анимации плашки, а не во время неё.
+  const [mounted, setMounted] = useState({ 0: true });
+  const mountedRef = useRef(mounted);
+  mountedRef.current = mounted;
+  const onDock = useCallback((i) => {
+    Keyboard.dismiss();
+    setPage(i);
+    if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => ({ ...m, [i]: true })), 280);
+  }, []);
+  const goPage = useCallback((i) => {
+    setMounted((m) => (m[i] ? m : { ...m, [i]: true }));
+    setPage(i);
+  }, []);
+
+  // обработчики Расчёта, которые объявлены ниже guard'а — стабильные обёртки,
+  // чтобы memo(CalcView) не перерисовывался от каждого рендера App
+  const calcH = useRef({});
+  const calcStable = useMemo(
+    () => ({
+      openRates: () => calcH.current.openRates?.(),
+      reset: () => calcH.current.reset?.(),
+      showShift: () => calcH.current.showShift?.(),
+    }),
+    []
+  );
   const calcDay = useMemo(
     () => (calc ? calc.days[calcDate] || blankDay(calc.prefs) : null),
     [calc, calcDate]
@@ -1468,6 +1597,16 @@ export default function App() {
 
   // ── Расчёт → Смены: связанная смена обновляется сама (с задержкой, пока вводят)
   const loadedOnce = !!state;
+  // предзагрузка вкладок «Смены» и «Расчёт», пока пользователь смотрит первую
+  useEffect(() => {
+    if (!loadedOnce) return;
+    const t1 = setTimeout(() => setMounted((m) => (m[1] ? m : { ...m, 1: true })), 500);
+    const t2 = setTimeout(() => setMounted((m) => (m[2] ? m : { ...m, 2: true })), 1100);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [loadedOnce]);
   useEffect(() => {
     if (!calc || !loadedOnce) return;
     const t = setTimeout(() => patch((p) => syncCalcShifts(p, calc, paydayForDate, uid)), 400);
@@ -1645,8 +1784,8 @@ export default function App() {
   const openCalcOn = useCallback((date) => {
     Haptics.selectionAsync();
     setCalcDate(date);
-    setPage(2);
-  }, []);
+    goPage(2);
+  }, [goPage]);
 
   if (!state) {
     return (
@@ -1701,8 +1840,10 @@ export default function App() {
     patch((p) => seedMonth(p, y, m));
     setViewY(y);
     setViewM(m);
-    setPage(1);
+    goPage(1);
   };
+
+  calcH.current = { openRates: openCalcRates, reset: resetCalc, showShift: showCalcShift };
 
   const saveExpense = () => {
     const amount = Number(form.amount) || 0;
@@ -1787,6 +1928,11 @@ export default function App() {
     ? expensesForPayday(focus).reduce((a, e) => a + Number(e.amount || 0), 0)
     : 0;
   const got = focus ? earnedForPayday(focus) : 0;
+  const paidFocus = focus
+    ? expensesForPayday(focus)
+        .filter((e) => displayStatus(e) === 'paid')
+        .reduce((a, e) => a + Number(e.amount || 0), 0)
+    : 0;
   const balanceOk = got >= need;
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const unexp = paid.filter((e) => e.type !== 'recurring');
@@ -2452,17 +2598,25 @@ export default function App() {
             style={styles.navHit}
             onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, -1)) : goMonth(-1))}
           >
-            <Text style={styles.navTxt}>‹</Text>
+            <Glass style={styles.navGlass} intensity={40}>
+              <Text style={styles.navTxt}>‹</Text>
+            </Glass>
           </ScaleButton>
           <View style={styles.monthBlock}>
-            <Text style={styles.eyebrow}>{DOCK_LABELS[page]}</Text>
-            <Text style={styles.h1}>{page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}</Text>
+            <Text style={styles.eyebrow} numberOfLines={1}>
+              {DOCK_LABELS[page]} · {page === 2 ? DOW_FULL[parse(calcDate).getDay()] : viewY}
+            </Text>
+            <Text style={styles.h1} numberOfLines={1} adjustsFontSizeToFit>
+              {page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}
+            </Text>
           </View>
           <ScaleButton
             style={styles.navHit}
             onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, 1)) : goMonth(1))}
           >
-            <Text style={styles.navTxt}>›</Text>
+            <Glass style={styles.navGlass} intensity={40}>
+              <Text style={styles.navTxt}>›</Text>
+            </Glass>
           </ScaleButton>
         </View>
         <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={() => setSheet('add')}>
@@ -2470,71 +2624,79 @@ export default function App() {
         </ScaleButton>
       </View>
 
-      <ScrollView
+      {/* Все три вкладки живут смонтированными, скрытые — display:'none'.
+          Переключение = смена стиля, без монтирования сотен строк во время
+          анимации плашки. У каждой вкладки свой скролл (и своя позиция). */}
+      <View
         style={styles.pages}
-        contentContainerStyle={styles.pagesContent}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-        automaticallyAdjustKeyboardInsets
-        ref={mainScroll}
-        scrollEventThrottle={16}
-        onScroll={(e) => {
-          mainScrollY.current = e.nativeEvent.contentOffset.y;
-        }}
         onLayout={(e) => {
           mainScrollTop.current = e.nativeEvent.layout.y;
         }}
       >
-        {/* при смене страницы/месяца — без анимаций входа/выхода всего списка;
-            анимируются только добавление/удаление строк внутри */}
-        <LayoutAnimationConfig
-          key={page === 2 ? 'calc' : `${page}-${viewY}-${viewM}`}
-          skipEntering
-          skipExiting
+        <ScrollView
+          style={[styles.pages, page !== 0 && styles.hidden]}
+          contentContainerStyle={styles.pagesContent}
+          showsVerticalScrollIndicator={false}
         >
-          <View>
-            {page === 0 ? (
-              <>
-                {focus && (
-                  <Glass style={styles.balance} intensity={42}>
+          <LayoutAnimationConfig key={`e-${viewY}-${viewM}`} skipEntering skipExiting>
+            <View>
+              {focus && (
+                <Glass style={styles.balance} intensity={42}>
+                  <View style={styles.cardHead}>
                     <Text style={styles.period}>К зарплате {fmtShort(focus)}</Text>
-                    <Text style={styles.paySub}>заработано и сколько нужно закрыть</Text>
-                    <View style={styles.nums}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.k}>Заработано</Text>
-                        <Text style={[styles.v, balanceOk ? styles.good : styles.bad]}>{money(got)}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.k}>Нужно</Text>
-                        <Text style={styles.v}>{money(need)}</Text>
-                      </View>
+                    <View style={[styles.tag, balanceOk ? styles.tagGood : styles.tagBad]}>
+                      <Text style={[styles.tagTxt, balanceOk ? styles.good : styles.bad]}>
+                        {balanceOk ? 'хватает' : 'не хватает'}
+                      </Text>
                     </View>
-                  </Glass>
-                )}
-                {pays.map((p, i) => {
-                  const list = expensesForPayday(p);
-                  const sum = list.reduce((a, e) => a + Number(e.amount || 0), 0);
-                  const paidSum = list
-                    .filter((e) => displayStatus(e) === 'paid')
-                    .reduce((a, e) => a + Number(e.amount || 0), 0);
-                  return (
-                    <Animated.View key={p} style={styles.group} layout={ROW_LAYOUT}>
-                      <View style={styles.gHead}>
-                        <Text style={styles.gTitle}>
-                          {i === 0 ? 'Первая' : 'Вторая'} зарплата {fmtShort(p)}
-                        </Text>
-                        <Text style={styles.gSub}>
-                          {money(paidSum)} / {money(sum)}
-                        </Text>
-                      </View>
+                  </View>
+                  <Text style={styles.paySub}>
+                    {balanceOk ? 'останется после всех платежей' : 'не хватает на все платежи'}
+                  </Text>
+                  <Text
+                    style={[styles.bigPay, { color: balanceOk ? accent : '#ff453a' }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                  >
+                    {got - need < 0 ? '−' : ''}
+                    {money(Math.abs(got - need))}
+                  </Text>
+                  <Meter value={need > 0 ? paidFocus / need : 0} color={accent} />
+                  <Text style={styles.calcMeta}>
+                    оплачено {money(paidFocus)} из {money(need)}
+                  </Text>
+                  <View style={styles.statRow}>
+                    <Stat k="Заработано" v={money(got)} tone={balanceOk ? 'good' : 'bad'} />
+                    <Stat k="Нужно" v={money(need)} />
+                    <Stat k="Осталось" v={money(Math.max(0, need - paidFocus))} />
+                  </View>
+                </Glass>
+              )}
+              {pays.map((p, i) => {
+                const list = expensesForPayday(p);
+                const sum = list.reduce((a, e) => a + Number(e.amount || 0), 0);
+                const paidSum = list
+                  .filter((e) => displayStatus(e) === 'paid')
+                  .reduce((a, e) => a + Number(e.amount || 0), 0);
+                return (
+                  <Animated.View key={p} style={styles.group} layout={ROW_LAYOUT}>
+                    <View style={styles.gHead}>
+                      <Text style={styles.gTitle}>
+                        {ORDINALS[i] || `${i + 1}-я`} зарплата · {fmtShort(p)}
+                      </Text>
+                      <Text style={styles.gSub}>
+                        {money(paidSum)} из {money(sum)}
+                      </Text>
+                    </View>
+                    <ItemCard>
                       {list.length === 0 ? (
-                        <Text style={styles.empty}>Пока пусто</Text>
+                        <Text style={styles.empty}>Пока пусто — «+» вверху</Text>
                       ) : (
-                        list.map((e) => (
+                        list.map((e, j) => (
                           <ExpenseRow
                             key={e.id}
                             item={e}
+                            last={j === list.length - 1}
                             pulse={pulse.id === e.id ? pulse.t : 0}
                             onEdit={openExpense}
                             onDelete={confirmDeleteExpense}
@@ -2543,109 +2705,152 @@ export default function App() {
                           />
                         ))
                       )}
-                      <Animated.View style={styles.totalLine} layout={ROW_LAYOUT}>
-                        <Text style={styles.totalL}>Общ</Text>
-                        <Text style={styles.totalV}>{money(sum)}</Text>
+                      <Animated.View style={styles.cardFoot} layout={ROW_LAYOUT}>
+                        <Text style={styles.footL}>Итого</Text>
+                        <Text style={styles.footV}>{money(sum)}</Text>
                       </Animated.View>
+                    </ItemCard>
+                  </Animated.View>
+                );
+              })}
+              <Text style={[styles.hint, styles.pageHint]}>
+                Свайп вправо — изменить, влево — удалить. Тап по кружку — статус; зажмите кружок и
+                потяните: вверх ✓, вниз ✕.
+              </Text>
+            </View>
+          </LayoutAnimationConfig>
+        </ScrollView>
+
+        {mounted[1] && (
+          <ScrollView
+            style={[styles.pages, page !== 1 && styles.hidden]}
+            contentContainerStyle={styles.pagesContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <LayoutAnimationConfig key={`s-${viewY}-${viewM}`} skipEntering skipExiting>
+              <View>
+                {periodsTouchingMonth(viewY, viewM).map((per) => {
+                  const list = state.shifts
+                    .filter((s) => s.date >= per.start && s.date <= per.end)
+                    .sort((a, b) => a.date.localeCompare(b.date));
+                  const sum = list.reduce((a, s) => a + (Number(s.amount) || 0), 0);
+                  const withSum = list.filter((s) => s.amount != null && s.amount !== '').length;
+                  const fromCalc = list.filter(isLinkedShift).length;
+                  const mid = addDays(per.start, 6);
+                  const halves = [
+                    { title: 'Первая неделя', items: list.filter((s) => s.date <= mid) },
+                    { title: 'Вторая неделя', items: list.filter((s) => s.date > mid) },
+                  ];
+                  return (
+                    <Animated.View key={per.payday} style={styles.periodBlock} layout={ROW_LAYOUT}>
+                      <Glass style={styles.balance} intensity={42}>
+                        <View style={styles.cardHead}>
+                          <Text style={styles.period}>{fmtRange(per.start, per.end)}</Text>
+                          <View style={styles.tag}>
+                            <Text style={styles.tagTxt}>зарплата {fmtShort(per.payday)}</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.paySub}>набрано за период</Text>
+                        <Text style={[styles.bigPay, { color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+                          {money(sum)}
+                        </Text>
+                        <View style={styles.statRow}>
+                          <Stat k="Смен" v={String(list.length)} />
+                          <Stat k="С суммой" v={String(withSum)} />
+                          <Stat k="Из расчёта" v={String(fromCalc)} />
+                        </View>
+                      </Glass>
+                      {halves.map((h) => {
+                        const hs = h.items.reduce((a, s) => a + (Number(s.amount) || 0), 0);
+                        return (
+                          <Animated.View key={h.title} style={styles.group} layout={ROW_LAYOUT}>
+                            <View style={styles.gHead}>
+                              <Text style={styles.gTitle}>{h.title}</Text>
+                              {hs > 0 && <Text style={styles.gSub}>{money(hs)}</Text>}
+                            </View>
+                            <ItemCard>
+                              {h.items.length === 0 ? (
+                                <Text style={styles.empty}>Нет смен</Text>
+                              ) : (
+                                h.items.map((s, j) => (
+                                  <ShiftRow
+                                    key={s.id}
+                                    item={s}
+                                    last={j === h.items.length - 1}
+                                    onEdit={openShift}
+                                    onDelete={confirmDeleteShift}
+                                    onCalc={openCalcOn}
+                                    accent={accent}
+                                  />
+                                ))
+                              )}
+                            </ItemCard>
+                          </Animated.View>
+                        );
+                      })}
                     </Animated.View>
                   );
                 })}
-              </>
-            ) : page === 1 ? (
-              periodsTouchingMonth(viewY, viewM).map((per) => {
-                const list = state.shifts
-                  .filter((s) => s.date >= per.start && s.date <= per.end)
-                  .sort((a, b) => a.date.localeCompare(b.date));
-                const sum = list.reduce((a, s) => a + (Number(s.amount) || 0), 0);
-                const mid = addDays(per.start, 6);
-                const halves = [
-                  { title: 'Первая половина', items: list.filter((s) => s.date <= mid) },
-                  { title: 'Вторая половина', items: list.filter((s) => s.date > mid) },
-                ];
-                return (
-                  <Animated.View key={per.payday} layout={ROW_LAYOUT}>
-                    <Glass style={styles.balance} intensity={42}>
-                      <Text style={styles.period}>
-                        {fmtDay(per.start)}–{fmtDay(per.end)} {MONTHS_R[parse(per.start).getMonth()]}
-                      </Text>
-                      <Text style={styles.paySub}>Зарплата {fmtShort(per.payday)}</Text>
-                      <View style={styles.nums}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.k}>Набрано</Text>
-                          <Text style={styles.v}>{money(sum)}</Text>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.k}>Смен</Text>
-                          <Text style={styles.v}>{list.length}</Text>
-                        </View>
-                      </View>
-                    </Glass>
-                    {halves.map((h) => (
-                      <Animated.View key={h.title} style={styles.group} layout={ROW_LAYOUT}>
-                        <View style={styles.gHead}>
-                          <Text style={styles.gTitle}>{h.title}</Text>
-                        </View>
-                        {h.items.length === 0 ? (
-                          <Text style={styles.empty}>Нет смен</Text>
-                        ) : (
-                          h.items.map((s) => (
-                            <ShiftRow
-                              key={s.id}
-                              item={s}
-                              onEdit={openShift}
-                              onDelete={confirmDeleteShift}
-                              onCalc={openCalcOn}
-                              accent={accent}
-                            />
-                          ))
-                        )}
-                      </Animated.View>
-                    ))}
-                  </Animated.View>
-                );
-              })
-            ) : (
-              calc &&
-              calcDay && (
-                <CalcView
-                  calc={calc}
-                  date={calcDate}
-                  day={calcDay}
-                  accent={accent}
-                  linkedShift={linkedOnCalcDate}
-                  manualOnDate={manualOnCalcDate}
-                  scrollRef={mainScroll}
-                  scrollY={mainScrollY}
-                  scrollTop={mainScrollTop}
-                  onDate={setCalcDate}
-                  onPatchDay={patchDay}
-                  onRole={onCalcRole}
-                  onTime={onCalcTime}
-                  onStep={onCalcStep}
-                  onSet={onCalcSet}
-                  onOpenItem={openCalcItem}
-                  onOpenRates={openCalcRates}
-                  onReset={resetCalc}
-                  onShowShift={showCalcShift}
-                />
-              )
-            )}
-          </View>
-        </LayoutAnimationConfig>
-      </ScrollView>
+                <Text style={[styles.hint, styles.pageHint]}>
+                  Тап — сумма смены, свайп влево — убрать день. Смены «из расчёта» считаются сами.
+                </Text>
+              </View>
+            </LayoutAnimationConfig>
+          </ScrollView>
+        )}
+
+        {mounted[2] && (
+          <ScrollView
+            style={[styles.pages, page !== 2 && styles.hidden]}
+            contentContainerStyle={styles.pagesContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            automaticallyAdjustKeyboardInsets
+            ref={mainScroll}
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              mainScrollY.current = e.nativeEvent.contentOffset.y;
+            }}
+          >
+            <LayoutAnimationConfig key="calc" skipEntering skipExiting>
+              <View>
+                {calc && calcDay && (
+                  <CalcView
+                    calc={calc}
+                    date={calcDate}
+                    day={calcDay}
+                    accent={accent}
+                    linkedShift={linkedOnCalcDate}
+                    manualOnDate={manualOnCalcDate}
+                    scrollRef={mainScroll}
+                    scrollY={mainScrollY}
+                    scrollTop={mainScrollTop}
+                    onDate={setCalcDate}
+                    onPatchDay={patchDay}
+                    onRole={onCalcRole}
+                    onTime={onCalcTime}
+                    onStep={onCalcStep}
+                    onSet={onCalcSet}
+                    onOpenItem={openCalcItem}
+                    onOpenRates={calcStable.openRates}
+                    onReset={calcStable.reset}
+                    onShowShift={calcStable.showShift}
+                  />
+                )}
+              </View>
+            </LayoutAnimationConfig>
+          </ScrollView>
+        )}
+      </View>
 
       {/* Dock */}
       <View style={styles.dock}>
         <View style={styles.capsuleWrap}>
-          <SegmentCapsule
-            value={page}
-            labels={DOCK_LABELS}
-            height={64}
-            onChange={setPage}
-          />
+          <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
-          <Glass style={styles.gearInner} intensity={40}>
+          <Glass style={styles.gearInner} intensity={50}>
             <Text style={styles.gearIcon}>⚙</Text>
           </Glass>
         </ScaleButton>
@@ -2659,6 +2864,15 @@ export default function App() {
 }
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
+const ORDINALS = ['Первая', 'Вторая', 'Третья'];
+const DOW_FULL = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+/** «12–25 сентября» или «29 сентября – 12 октября». */
+function fmtRange(a, b) {
+  const da = parse(a);
+  const db = parse(b);
+  if (da.getMonth() === db.getMonth()) return `${da.getDate()}–${db.getDate()} ${MONTHS_R[db.getMonth()]}`;
+  return `${fmtShort(a)} – ${fmtShort(b)}`;
+}
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#050507' },
@@ -2676,16 +2890,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   monthWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8 },
-  navHit: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  navTxt: { color: '#fff', fontSize: 28, fontWeight: '300' },
-  monthBlock: { paddingHorizontal: 4 },
+  navHit: { width: 48, height: 48 },
+  navTxt: { color: '#fff', fontSize: 28, fontWeight: '300', marginTop: -2 },
+  monthBlock: { paddingHorizontal: 4, flexShrink: 1, minWidth: 0 },
   eyebrow: { color: 'rgba(235,235,245,0.55)', fontSize: 13, fontWeight: '600' },
   h1: { color: '#fff', fontSize: 30, fontWeight: '700', letterSpacing: -0.6 },
   round: {
@@ -2749,11 +2956,61 @@ const styles = StyleSheet.create({
   gTitle: { color: '#fff', fontSize: 15, fontWeight: '650', flex: 1 },
   gSub: { color: 'rgba(235,235,245,0.5)', fontSize: 13 },
 
-  rowOuter: { marginBottom: 8 },
+  rowSep: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
+  whenCol: { width: 38, alignItems: 'center' },
+  whenNum: { color: '#fff', fontSize: 19, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  whenDow: { color: 'rgba(235,235,245,0.45)', fontSize: 11, fontWeight: '600', marginTop: -1 },
+  itemTitleDim: { color: 'rgba(235,235,245,0.55)' },
+  amtDim: { color: 'rgba(235,235,245,0.3)' },
+  cardFoot: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    minHeight: 46,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  footL: { color: 'rgba(235,235,245,0.55)', fontSize: 14, fontWeight: '600' },
+  footV: { color: '#ffd60a', fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  pageHint: { textAlign: 'center', paddingHorizontal: 20, marginTop: 4 },
+  periodBlock: { marginBottom: 10 },
+  hidden: { display: 'none' },
+  cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  tag: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  tagGood: { backgroundColor: 'rgba(48,209,88,0.16)' },
+  tagBad: { backgroundColor: 'rgba(255,69,58,0.16)' },
+  tagTxt: { color: 'rgba(235,235,245,0.75)', fontSize: 12, fontWeight: '700' },
+  meter: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    overflow: 'hidden',
+    marginTop: 14,
+    marginBottom: 8,
+  },
+  meterFill: { height: 8, borderRadius: 4 },
+  statRow: {
+    flexDirection: 'row',
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+    gap: 10,
+  },
+  stat3: { flex: 1, minWidth: 0 },
+  statV: { color: '#fff', fontSize: 19, fontWeight: '700', letterSpacing: -0.3, marginTop: 4, fontVariant: ['tabular-nums'] },
+  navGlass: { flex: 1, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   itemCard: {
     borderRadius: 20,
     overflow: 'hidden',
-    backgroundColor: 'rgba(32,32,38,0.88)',
+    backgroundColor: 'rgba(30,30,36,0.94)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.1)',
   },
@@ -2783,27 +3040,26 @@ const styles = StyleSheet.create({
   item: {
     flexDirection: 'row',
     alignItems: 'center',
-    minHeight: 62,
-    paddingRight: 10,
-    backgroundColor: 'rgba(28,28,34,0.96)',
+    minHeight: 64,
+    paddingRight: 12,
+    backgroundColor: 'rgb(30,30,36)',
   },
   itemPress: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingLeft: 14,
-    gap: 8,
+    paddingVertical: 11,
+    paddingLeft: 10,
+    gap: 10,
   },
-  when: { width: 36, color: 'rgba(235,235,245,0.5)', fontSize: 16, fontWeight: '650' },
   mid: { flex: 1, minWidth: 0 },
   itemTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
   meta: { color: 'rgba(235,235,245,0.4)', fontSize: 12, marginTop: 2 },
   amt: { color: '#fff', fontSize: 16, fontWeight: '650', marginRight: 6 },
   status: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.14)',
@@ -2829,7 +3085,7 @@ const styles = StyleSheet.create({
   },
   totalL: { color: 'rgba(235,235,245,0.5)' },
   totalV: { color: '#ffd60a', fontWeight: '700' },
-  empty: { color: 'rgba(235,235,245,0.4)', textAlign: 'center', padding: 20 },
+  empty: { color: 'rgba(235,235,245,0.4)', textAlign: 'center', padding: 18, fontSize: 14 },
 
   dock: {
     position: 'absolute',
@@ -2848,7 +3104,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.12)',
   },
-  segCapBg: { ...StyleSheet.absoluteFillObject },
+  segCapGlass: { overflow: 'hidden' },
   segCapRow: { flex: 1, flexDirection: 'row', padding: 5 },
   seg: { flex: 1, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
   segInd: {
@@ -2857,10 +3113,21 @@ const styles = StyleSheet.create({
     left: 5,
     bottom: 5,
     borderRadius: 26,
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(255,255,255,0.17)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.24)',
   },
-  segTxt: { color: 'rgba(235,235,245,0.45)', fontSize: 15, fontWeight: '650' },
+  segIndEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 14,
+    right: 14,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  segTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 15, fontWeight: '650' },
   segTxtOn: { color: '#fff' },
+  segTxtAbs: { position: 'absolute' },
   gearDock: { width: 64, height: 64 },
   gearInner: {
     flex: 1,
