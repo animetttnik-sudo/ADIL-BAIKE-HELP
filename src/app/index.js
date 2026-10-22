@@ -243,6 +243,25 @@ function Stat({ k, v, tone }) {
   );
 }
 
+/** Скролл открытой шторки — чтобы поле в фокусе («Далее ›») было над клавиатурой. */
+const sheetScroll = { ref: null, y: 0 };
+function ensureSheetVisible(input) {
+  const sv = sheetScroll.ref;
+  if (!input || !sv || !input.measureInWindow || !Keyboard.isVisible()) return;
+  const kb = Keyboard.metrics();
+  if (!kb) return;
+  input.measureInWindow((x, y, w, h) => {
+    sv.measureInWindow((sx, sy) => {
+      const bottom = kb.screenY - 14;
+      const top = sy + 8;
+      let delta = 0;
+      if (y + h > bottom) delta = y + h - bottom;
+      else if (y < top) delta = y - top;
+      if (Math.abs(delta) > 1) sv.scrollTo({ y: Math.max(0, sheetScroll.y + delta), animated: true });
+    });
+  });
+}
+
 /**
  * Единый хост для всех шторок: ОДИН Modal (animationType="none"), содержимое
  * меняется внутри. iOS не может показать новый Modal, пока предыдущий ещё
@@ -373,7 +392,16 @@ function SheetHost({ active, render, onClosed }) {
                   </GestureDetector>
                   <ScrollView
                     key={shown}
+                    ref={(r) => {
+                      sheetScroll.ref = r;
+                      if (!r) sheetScroll.y = 0;
+                    }}
+                    scrollEventThrottle={16}
+                    onScroll={(e) => {
+                      sheetScroll.y = e.nativeEvent.contentOffset.y;
+                    }}
                     keyboardShouldPersistTaps="handled"
+                    keyboardDismissMode="interactive"
                     contentContainerStyle={{ paddingBottom: 40 }}
                     showsVerticalScrollIndicator={false}
                     style={{ flexShrink: 1 }}
@@ -390,8 +418,9 @@ function SheetHost({ active, render, onClosed }) {
   );
 }
 
-function DateWheel({ value, onChange, label = 'Дата' }) {
+function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158' }) {
   const [open, setOpen] = useState(false);
+  const initial = useRef(value);
   const ty = useSharedValue(SCREEN_H);
   const back = useSharedValue(0);
   const date = value ? parse(value) : new Date();
@@ -405,6 +434,7 @@ function DateWheel({ value, onChange, label = 'Дата' }) {
 
   const show = () => {
     Haptics.selectionAsync();
+    initial.current = value;
     ty.value = SCREEN_H;
     back.value = 0;
     setOpen(true);
@@ -423,9 +453,10 @@ function DateWheel({ value, onChange, label = 'Дата' }) {
   return (
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
-      <Pressable style={styles.input} onPress={show}>
+      <Pressable style={({ pressed }) => [styles.input, styles.dateField, pressed && styles.rowPressed]} onPress={show}>
         <Text style={styles.inputText}>
           {fmtShort(value || iso(date))} {date.getFullYear()}
+          <Text style={styles.dateDow}>  ·  {DOW[date.getDay()]}</Text>
         </Text>
         <Text style={styles.chev}>›</Text>
       </Pressable>
@@ -437,19 +468,49 @@ function DateWheel({ value, onChange, label = 'Дата' }) {
             onStartShouldSetResponder={() => true}
             style={[styles.wheelCard, card]}
           >
+            <View style={styles.handle} />
             <View style={styles.wheelBar}>
-              <Pressable onPress={hide}>
+              <Pressable
+                hitSlop={10}
+                onPress={() => {
+                  if (initial.current && initial.current !== value) onChange(initial.current);
+                  hide();
+                }}
+              >
                 <Text style={styles.linkMuted}>Отмена</Text>
               </Pressable>
-              <Text style={styles.sheetTitle}>Дата</Text>
+              <Text style={styles.sheetTitle}>{label}</Text>
               <Pressable
+                hitSlop={10}
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   hide();
                 }}
               >
-                <Text style={styles.link}>Готово</Text>
+                <Text style={[styles.link, { color: accent }]}>Готово</Text>
               </Pressable>
+            </View>
+            <View style={styles.wheelChips}>
+              {[
+                ['Вчера', -1],
+                ['Сегодня', 0],
+                ['Завтра', 1],
+              ].map(([t, d]) => {
+                const v = addDays(todayIso(), d);
+                const on = v === value;
+                return (
+                  <ScaleButton
+                    key={t}
+                    style={[styles.chip, styles.wheelChip, on && { backgroundColor: accent }]}
+                    onPress={() => {
+                      Haptics.selectionAsync();
+                      onChange(v);
+                    }}
+                  >
+                    <Text style={[styles.chipTxt, on ? styles.onAccent : styles.chipTxtOn]}>{t}</Text>
+                  </ScaleButton>
+                );
+              })}
             </View>
             <DateTimePicker
               value={date}
@@ -458,7 +519,7 @@ function DateWheel({ value, onChange, label = 'Дата' }) {
               locale="ru-RU"
               themeVariant="dark"
               onChange={(_, d) => d && onChange(iso(d))}
-              style={{ height: 200, width: SCREEN_W - 24 }}
+              style={{ height: 200, width: SCREEN_W - 40 }}
             />
           </Animated.View>
         </View>
@@ -820,7 +881,8 @@ function SegmentCapsule({ value, labels, onChange, height = 56, glass = false, f
   );
 }
 
-function AnalysisView({ state }) {
+const AN_RANGES = [3, 6, 0];
+function AnalysisView({ state, accent }) {
   const [range, setRange] = useState(6);
   const M = {};
   const get = (k) => M[k] || (M[k] = { e: 0, s: 0 });
@@ -841,64 +903,74 @@ function AnalysisView({ state }) {
 
   return (
     <>
-      <View style={[styles.segRow, { marginBottom: 14 }]}>
-        {[
-          [3, '3 мес'],
-          [6, '6 мес'],
-          [0, 'Всё'],
-        ].map(([r, n]) => (
-          <ScaleButton
-            key={r}
-            style={[styles.chip, range === r && styles.chipOn]}
-            onPress={() => setRange(r)}
-          >
-            <Text style={[styles.chipTxt, range === r && styles.chipTxtOn]}>{n}</Text>
-          </ScaleButton>
-        ))}
+      <View style={{ marginBottom: 14 }}>
+        <SegmentCapsule
+          value={AN_RANGES.indexOf(range)}
+          labels={['3 мес', '6 мес', 'Всё']}
+          height={46}
+          onChange={(i) => setRange(AN_RANGES[i])}
+        />
       </View>
       {ks.length === 0 ? (
         <Text style={styles.empty}>Пока нет данных</Text>
       ) : (
         <>
-          <View style={styles.stat}>
-            <Text style={styles.k}>Заработано</Text>
-            <Text style={[styles.v, styles.good]}>{money(te)}</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={styles.k}>Оплачено</Text>
-            <Text style={styles.v}>{money(ts)}</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={styles.k}>Итог</Text>
-            <Text style={[styles.v, te - ts >= 0 ? styles.good : styles.bad]}>{money(te - ts)}</Text>
-          </View>
-          <Text style={[styles.label, { marginTop: 18 }]}>ПО МЕСЯЦАМ</Text>
-          {ks.map((k) => (
-            <View key={k} style={styles.anRow}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={styles.setL}>{name(k)}</Text>
-                <Text style={[styles.itemTitle, { color: net(k) >= 0 ? '#30d158' : '#ff453a' }]}>
-                  {net(k) >= 0 ? '+' : ''}
-                  {money(net(k))}
+          <ItemCard style={[styles.listCard, styles.padCard]}>
+            <Text style={styles.k}>Итог за период</Text>
+            <Text
+              style={[styles.bigPay, { marginTop: 4, color: te - ts >= 0 ? accent : '#ff453a' }]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+            >
+              {te - ts < 0 ? '−' : '+'}
+              {money(Math.abs(te - ts))}
+            </Text>
+            <View style={styles.statRow}>
+              <Stat k="Заработано" v={money(te)} tone="good" />
+              <Stat k="Оплачено" v={money(ts)} />
+            </View>
+          </ItemCard>
+          <Text style={styles.sectionLabel}>По месяцам</Text>
+          <ItemCard style={styles.listCard}>
+            {ks.map((k, i) => (
+              <View key={k} style={[styles.anRow, i === ks.length - 1 && { borderBottomWidth: 0 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <Text style={styles.lTitle}>{name(k)}</Text>
+                  <Text style={[styles.lVal, net(k) >= 0 ? styles.good : styles.bad]}>
+                    {net(k) >= 0 ? '+' : '−'}
+                    {money(Math.abs(net(k)))}
+                  </Text>
+                </View>
+                <View style={styles.anTrack}>
+                  <View style={[styles.anFill, { width: `${(M[k].e / mx) * 100}%`, backgroundColor: '#30d158' }]} />
+                </View>
+                <View style={styles.anTrack}>
+                  <View style={[styles.anFill, { width: `${(M[k].s / mx) * 100}%`, backgroundColor: '#ff453a' }]} />
+                </View>
+                <Text style={styles.lSub}>
+                  заработано {money(M[k].e)} · оплачено {money(M[k].s)}
                 </Text>
               </View>
-              <View style={styles.anTrack}>
-                <View style={[styles.anFill, { width: `${(M[k].e / mx) * 100}%`, backgroundColor: '#30d158' }]} />
+            ))}
+          </ItemCard>
+          {ks.length > 0 && (
+            <ItemCard style={styles.listCard}>
+              <View style={[styles.lRow, ks.length > 1 && styles.lRowSep]}>
+                <Text style={styles.lKey}>Лучший месяц</Text>
+                <Text style={styles.lVal}>
+                  {name(by[0])} · {money(net(by[0]))}
+                </Text>
               </View>
-              <View style={styles.anTrack}>
-                <View style={[styles.anFill, { width: `${(M[k].s / mx) * 100}%`, backgroundColor: '#ff453a' }]} />
-              </View>
-              <Text style={styles.setS}>
-                заработано {money(M[k].e)} · оплачено {money(M[k].s)}
-              </Text>
-            </View>
-          ))}
-          <Text style={[styles.hint, { marginTop: 14 }]}>
-            Лучший месяц: {name(by[0])} ({money(net(by[0]))})
-            {ks.length > 1
-              ? `\nХудший месяц: ${name(by[by.length - 1])} (${money(net(by[by.length - 1]))})`
-              : ''}
-          </Text>
+              {ks.length > 1 && (
+                <View style={styles.lRow}>
+                  <Text style={styles.lKey}>Худший месяц</Text>
+                  <Text style={styles.lVal}>
+                    {name(by[by.length - 1])} · {money(net(by[by.length - 1]))}
+                  </Text>
+                </View>
+              )}
+            </ItemCard>
+          )}
         </>
       )}
     </>
@@ -1184,7 +1256,7 @@ const CalcView = memo(function CalcView({
 
   return (
     <>
-      <DateWheel value={date} onChange={onDate} label="Дата смены" />
+      <DateWheel value={date} onChange={onDate} label="Дата смены" accent={accent} />
 
       <Glass style={styles.balance} intensity={42}>
         <Text style={styles.period}>Моя зарплата</Text>
@@ -1965,6 +2037,12 @@ export default function App() {
         returnKeyType: next ? 'next' : 'done',
         submitBehavior: next ? 'submit' : 'blurAndSubmit',
         onSubmitEditing: () => focus(next),
+        onFocus: () => {
+          const r = formRefs.current[key];
+          // клавиатура уже есть — сразу; первая — ждём, пока выедет и шторка поднимется
+          if (Keyboard.isVisible()) requestAnimationFrame(() => ensureSheetVisible(r));
+          else setTimeout(() => ensureSheetVisible(r), 380);
+        },
       },
       bar: (
         <KeyBar
@@ -1992,12 +2070,31 @@ export default function App() {
           onClose: closeSheet,
           body: (
             <>
-              <ScaleButton style={styles.actBtn} onPress={() => openExpense(null)}>
-                <Text style={styles.actBtnTxt}>Новый расход</Text>
-              </ScaleButton>
-              <ScaleButton style={styles.actBtn} onPress={() => openShift(null)}>
-                <Text style={styles.actBtnTxt}>Новая смена</Text>
-              </ScaleButton>
+              <ItemCard style={styles.listCard}>
+                {[
+                  ['Новый расход', 'платёж, покупка, долг', () => openExpense(null)],
+                  ['Новая смена', 'сумма вручную', () => openShift(null)],
+                  ['Расчёт смены', 'по позициям — сам попадёт в смены', () => closeThen(() => goPage(2))],
+                ].map(([t, sub, fn], i) => (
+                  <Pressable
+                    key={t}
+                    style={({ pressed }) => [styles.lRow, i < 2 && styles.lRowSep, pressed && styles.rowPressed]}
+                    onPress={() => {
+                      Haptics.selectionAsync();
+                      fn();
+                    }}
+                  >
+                    <View style={[styles.addIcon, { backgroundColor: accent }]}>
+                      <Text style={[styles.addIconTxt, styles.onAccent]}>{i === 2 ? '∑' : '+'}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.lTitle}>{t}</Text>
+                      <Text style={styles.lSub}>{sub}</Text>
+                    </View>
+                    <Text style={styles.chev}>›</Text>
+                  </Pressable>
+                ))}
+              </ItemCard>
             </>
           ),
         };
@@ -2043,7 +2140,7 @@ export default function App() {
                 />
                 {kTitle.bar}
               </View>
-              <DateWheel value={form.date} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
+              <DateWheel value={form.date} accent={accent} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
                 <Text style={styles.label}>Тип</Text>
                 <SegmentCapsule
@@ -2139,7 +2236,7 @@ export default function App() {
                 {kAmt.bar}
                 <Text style={styles.fieldNote}>Пусто — смена без суммы (в итог не идёт).</Text>
               </View>
-              <DateWheel value={form.date} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
+              <DateWheel value={form.date} accent={accent} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
                 <Text style={styles.label}>Тип смены</Text>
                 <TextInput
@@ -2184,285 +2281,344 @@ export default function App() {
 
       case 'status': {
         const e = state.expenses.find((x) => x.id === editId);
+        const st = e ? displayStatus(e) : 'none';
         return {
           title: 'Статус',
           onClose: closeSheet,
           body: !e ? null : (
             <>
-              <Text style={styles.hint}>
-                {e.title || 'Без названия'} · {money(e.amount)}
-              </Text>
-              <ScaleButton style={[styles.actBtn, styles.statusPaidBtn]} onPress={() => setStatus('paid')}>
+              <ItemCard style={styles.listCard}>
+                <View style={styles.lRow}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.lTitle} numberOfLines={1}>
+                      {e.title || 'Без названия'}
+                    </Text>
+                    <Text style={styles.lSub}>
+                      {fmtShort(e.date)} · {e.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
+                    </Text>
+                  </View>
+                  <Text style={[styles.lVal, styles.lValBig]}>{money(e.amount)}</Text>
+                </View>
+              </ItemCard>
+              <ScaleButton style={[styles.actBtn, styles.statusPaidBtn, st === 'paid' && styles.btnOn]} onPress={() => setStatus('paid')}>
                 <Text style={styles.actBtnTxt}>✓  Оплатил</Text>
               </ScaleButton>
-              <ScaleButton style={[styles.actBtn, styles.statusMissBtn]} onPress={() => setStatus('missed')}>
+              <ScaleButton style={[styles.actBtn, styles.statusMissBtn, st === 'missed' && styles.btnOn]} onPress={() => setStatus('missed')}>
                 <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>✕  Не оплатил вовремя</Text>
               </ScaleButton>
-              <ScaleButton style={styles.actBtn} onPress={() => setStatus(null)}>
-                <Text style={styles.actBtnTxt}>Убрать метку</Text>
+              {st !== 'none' && (
+                <ScaleButton style={styles.actBtn} onPress={() => setStatus(null)}>
+                  <Text style={styles.actBtnTxt}>Убрать метку</Text>
+                </ScaleButton>
+              )}
+              <Text style={[styles.hint, { textAlign: 'center' }]}>
+                Быстрее: зажмите кружок в списке и потяните вверх ✓ или вниз ✕.
+              </Text>
+            </>
+          ),
+        };
+      }
+
+      case 'settings': {
+        const nav = [
+          { key: 'custom', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
+          { key: 'recurring', title: 'Постоянные платежи', sub: `${(state.recurring || []).length} шт. · каждый месяц` },
+          { key: 'analysis', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
+          { key: 'stats', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
+        ];
+        return {
+          title: 'Настройки',
+          onClose: closeSheet,
+          body: (
+            <>
+              <Text style={styles.sectionLabel}>Режим смен</Text>
+              <SegmentCapsule
+                value={state.settings.mode === 'work' ? 1 : 0}
+                labels={['Учёба', 'Работа']}
+                height={50}
+                onChange={(i) =>
+                  patch((p) =>
+                    seedMonth(
+                      {
+                        ...p,
+                        settings: { ...p.settings, mode: i === 1 ? 'work' : 'study' },
+                      },
+                      viewY,
+                      viewM
+                    )
+                  )
+                }
+              />
+              <Text style={[styles.fieldNote, { marginBottom: 16 }]}>
+                Учёба — смены пт, сб, вс · работа — все дни
+              </Text>
+              <ItemCard style={styles.listCard}>
+                {nav.map((n, i) => (
+                  <Pressable
+                    key={n.key}
+                    style={({ pressed }) => [styles.lRow, i < nav.length - 1 && styles.lRowSep, pressed && styles.rowPressed]}
+                    onPress={() => {
+                      Haptics.selectionAsync();
+                      setSheet(n.key);
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.lTitle}>{n.title}</Text>
+                      <Text style={styles.lSub}>{n.sub}</Text>
+                    </View>
+                    <Text style={styles.chev}>›</Text>
+                  </Pressable>
+                ))}
+              </ItemCard>
+            </>
+          ),
+        };
+      }
+
+      case 'custom': {
+        const light = state.settings.light ?? 54;
+        const LIGHTS = [36, 44, 54, 62, 70];
+        const li = LIGHTS.indexOf(light);
+        return {
+          title: 'Кастомизация',
+          onClose: toSettings,
+          body: (
+            <>
+              <Text style={styles.sectionLabel}>Фон</Text>
+              <View style={styles.calcBtns}>
+                <ScaleButton style={[styles.actBtn, { flex: 1 }]} onPress={pickBg}>
+                  <Text style={styles.actBtnTxt}>{state.custom?.bg ? 'Сменить фото' : 'Фото из галереи'}</Text>
+                </ScaleButton>
+                {!!state.custom?.bg && (
+                  <ScaleButton
+                    style={[styles.actBtn, styles.dangerBtn, { flex: 1, marginTop: 0 }]}
+                    onPress={() => {
+                      patch((p) => ({ ...p, custom: { ...p.custom, bg: null } }));
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    }}
+                  >
+                    <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать</Text>
+                  </ScaleButton>
+                )}
+              </View>
+
+              <Text style={[styles.sectionLabel, { marginTop: 10 }]}>Цвет акцента</Text>
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <View style={styles.colorRow}>
+                  {ACCENT_PRESETS.map((c) => {
+                    const active = state.settings.hue === c.h;
+                    return (
+                      <ScaleButton
+                        key={c.h}
+                        style={[styles.colorDot, active && styles.colorDotOn]}
+                        onPress={() => {
+                          patch((p) => ({ ...p, settings: { ...p.settings, hue: c.h } }));
+                          Haptics.selectionAsync();
+                        }}
+                      >
+                        <View style={[styles.colorFill, { backgroundColor: `hsl(${c.h},72%,${light}%)` }]} />
+                      </ScaleButton>
+                    );
+                  })}
+                </View>
+                <Text style={styles.lSub}>Любой оттенок</Text>
+                <View style={styles.hueTrack}>
+                  {[0, 30, 60, 120, 180, 210, 260, 300, 330].map((h) => (
+                    <Pressable
+                      key={h}
+                      hitSlop={{ top: 8, bottom: 8 }}
+                      onPress={() => {
+                        patch((p) => ({ ...p, settings: { ...p.settings, hue: h } }));
+                        Haptics.selectionAsync();
+                      }}
+                      style={[styles.hueSeg, { backgroundColor: `hsl(${h},70%,50%)` }, state.settings.hue === h && styles.hueSegOn]}
+                    />
+                  ))}
+                </View>
+              </ItemCard>
+
+              <Text style={[styles.sectionLabel, { marginTop: 4 }]}>Яркость · {light}%</Text>
+              <SegmentCapsule
+                value={li < 0 ? 2 : li}
+                labels={LIGHTS.map(String)}
+                height={48}
+                onChange={(i) => patch((p) => ({ ...p, settings: { ...p.settings, light: LIGHTS[i] } }))}
+              />
+              <View style={[styles.previewRow]}>
+                <View style={[styles.previewBtn, { backgroundColor: accent }]}>
+                  <Text style={[styles.actBtnTxt, styles.onAccent]}>Так выглядит кнопка</Text>
+                </View>
+              </View>
+            </>
+          ),
+        };
+      }
+
+      case 'recurring': {
+        const kT = fieldKb('rTitle', ['rTitle', 'rAmt'], 'Название');
+        const kA = fieldKb('rAmt', ['rTitle', 'rAmt'], 'Сумма');
+        const rDay = Math.min(31, Math.max(1, Number(form.rDay) || 13));
+        const canAdd = !!(form.rTitle || '').trim();
+        const list = [...(state.recurring || [])].sort((a, b) => a.day - b.day);
+        const total = list.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+        return {
+          title: 'Постоянные платежи',
+          onClose: toSettings,
+          body: (
+            <>
+              <ItemCard style={styles.listCard}>
+                {list.length === 0 && <Text style={styles.empty}>Пока нет постоянных платежей</Text>}
+                {list.map((r, i) => (
+                  <Animated.View key={r.id} style={[styles.lRow, i < list.length - 1 && styles.lRowSep]} entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
+                    <View style={styles.dayBadge}>
+                      <Text style={styles.dayBadgeTxt}>{r.day}</Text>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.lTitle} numberOfLines={1}>{r.title}</Text>
+                      <Text style={styles.lSub}>{r.day}-е число каждого месяца</Text>
+                    </View>
+                    <Text style={styles.lVal}>{money(r.amount)}</Text>
+                    <Pressable
+                      hitSlop={10}
+                      style={styles.delRound}
+                      onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        patch((p) => ({
+                          ...p,
+                          recurring: p.recurring.filter((x) => x.id !== r.id),
+                        }));
+                      }}
+                    >
+                      <Text style={styles.delRoundTxt}>✕</Text>
+                    </Pressable>
+                  </Animated.View>
+                ))}
+                {list.length > 0 && (
+                  <Animated.View style={styles.cardFoot} layout={ROW_LAYOUT}>
+                    <Text style={styles.footL}>В месяц</Text>
+                    <Text style={styles.footV}>{money(total)}</Text>
+                  </Animated.View>
+                )}
+              </ItemCard>
+              <Text style={styles.hint}>
+                Платёж сам появится в «Расходах» каждого месяца; число решает, в какую зарплату он попадёт.
+              </Text>
+
+              <Text style={styles.sectionLabel}>Новый платёж</Text>
+              <View style={styles.field}>
+                <TextInput
+                  {...kT.props}
+                  style={styles.input}
+                  value={form.rTitle || ''}
+                  onChangeText={(t) => setForm((f) => ({ ...f, rTitle: t }))}
+                  placeholder="Название, например «Вайфай»"
+                  placeholderTextColor="rgba(235,235,245,0.3)"
+                />
+                {kT.bar}
+              </View>
+              <View style={[styles.field, styles.dayStepRow]}>
+                <Text style={[styles.setL, { flex: 1 }]}>Число месяца</Text>
+                <ScaleButton
+                  style={styles.stepBtn}
+                  onPress={() => setForm((f) => ({ ...f, rDay: String(rDay <= 1 ? 31 : rDay - 1) }))}
+                >
+                  <Text style={styles.stepTxt}>−</Text>
+                </ScaleButton>
+                <Text style={[styles.cCountTxt, styles.staffNum]}>{rDay}</Text>
+                <ScaleButton
+                  style={styles.stepBtn}
+                  onPress={() => setForm((f) => ({ ...f, rDay: String(rDay >= 31 ? 1 : rDay + 1) }))}
+                >
+                  <Text style={styles.stepTxt}>+</Text>
+                </ScaleButton>
+              </View>
+              <View style={styles.field}>
+                <View style={styles.bigField}>
+                  <TextInput
+                    {...kA.props}
+                    style={[styles.bigInput, { fontSize: 26 }]}
+                    keyboardType="number-pad"
+                    value={form.rAmt || ''}
+                    onChangeText={(t) => setForm((f) => ({ ...f, rAmt: t.replace(/[^0-9]/g, '') }))}
+                    placeholder="Сумма"
+                    placeholderTextColor="rgba(235,235,245,0.25)"
+                  />
+                  <Text style={styles.bigUnit}>сом</Text>
+                </View>
+                {kA.bar}
+              </View>
+              <ScaleButton
+                style={[styles.actBtn, { backgroundColor: accent }, !canAdd && { opacity: 0.45 }]}
+                onPress={() => {
+                  const title = (form.rTitle || '').trim();
+                  const amount = Number(form.rAmt) || 0;
+                  if (!title) return;
+                  patch((p) => ({
+                    ...p,
+                    recurring: [...p.recurring, { id: uid(), title, day: rDay, amount }],
+                  }));
+                  setForm((f) => ({ ...f, rTitle: '', rAmt: '' }));
+                  Keyboard.dismiss();
+                  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                }}
+              >
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>Добавить платёж</Text>
               </ScaleButton>
             </>
           ),
         };
       }
 
-      case 'settings':
-        return {
-          title: 'Настройки',
-          onClose: closeSheet,
-          body: (
-            <>
-              <View style={{ marginBottom: 14 }}>
-                <Text style={[styles.setL, { marginBottom: 4 }]}>Режим</Text>
-                <Text style={[styles.setS, { marginBottom: 10 }]}>учёба — пт/сб/вс · работа — все дни</Text>
-                <SegmentCapsule
-                  value={state.settings.mode === 'work' ? 1 : 0}
-                  labels={['Учёба', 'Работа']}
-                  onChange={(i) =>
-                    patch((p) =>
-                      seedMonth(
-                        {
-                          ...p,
-                          settings: { ...p.settings, mode: i === 1 ? 'work' : 'study' },
-                        },
-                        viewY,
-                        viewM
-                      )
-                    )
-                  }
-                />
-              </View>
-              <ScaleButton style={styles.setItem} onPress={() => setSheet('custom')}>
-                <View>
-                  <Text style={styles.setL}>Кастомизация</Text>
-                  <Text style={styles.setS}>фото, цвета</Text>
-                </View>
-                <Text style={[styles.link, { color: accent }]}>Открыть</Text>
-              </ScaleButton>
-              <ScaleButton style={styles.setItem} onPress={() => setSheet('recurring')}>
-                <Text style={styles.setL}>Постоянные платежи</Text>
-                <Text style={[styles.link, { color: accent }]}>Открыть</Text>
-              </ScaleButton>
-              <ScaleButton style={styles.setItem} onPress={() => setSheet('analysis')}>
-                <View>
-                  <Text style={styles.setL}>Анализ</Text>
-                  <Text style={styles.setS}>по месяцам, лучшие и худшие</Text>
-                </View>
-                <Text style={[styles.link, { color: accent }]}>Смотреть</Text>
-              </ScaleButton>
-              <ScaleButton style={[styles.setItem, { marginBottom: 4 }]} onPress={() => setSheet('stats')}>
-                <View>
-                  <Text style={styles.setL}>Результаты</Text>
-                  <Text style={styles.setS}>заработано и оплачено</Text>
-                </View>
-                <Text style={[styles.link, { color: accent }]}>Смотреть</Text>
-              </ScaleButton>
-            </>
-          ),
-        };
-
-      case 'custom':
-        return {
-          title: 'Кастомизация',
-          onClose: toSettings,
-          body: (
-            <>
-              <Text style={styles.label}>Фон (фото)</Text>
-              <ScaleButton style={styles.actBtn} onPress={pickBg}>
-                <Text style={styles.actBtnTxt}>
-                  {state.custom?.bg ? 'Сменить фото' : 'Выбрать из галереи'}
-                </Text>
-              </ScaleButton>
-              {!!state.custom?.bg && (
-                <ScaleButton
-                  style={styles.actBtn}
-                  onPress={() => {
-                    patch((p) => ({ ...p, custom: { ...p.custom, bg: null } }));
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }}
-                >
-                  <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать фото</Text>
-                </ScaleButton>
-              )}
-              <Text style={[styles.label, { marginTop: 16 }]}>Цвет кнопок</Text>
-              <View style={styles.colorRow}>
-                {ACCENT_PRESETS.map((c) => {
-                  const active = state.settings.hue === c.h;
-                  return (
-                    <ScaleButton
-                      key={c.h}
-                      style={[
-                        styles.colorDot,
-                        { backgroundColor: `hsl(${c.h},72%,54%)` },
-                        active && styles.colorDotOn,
-                      ]}
-                      onPress={() => {
-                        patch((p) => ({ ...p, settings: { ...p.settings, hue: c.h } }));
-                        Haptics.selectionAsync();
-                      }}
-                    />
-                  );
-                })}
-              </View>
-              <Text style={styles.setS}>Шкала оттенка</Text>
-              <View style={styles.hueTrack}>
-                {[0, 30, 60, 120, 180, 210, 260, 300, 330].map((h) => (
-                  <Pressable
-                    key={h}
-                    onPress={() => {
-                      patch((p) => ({ ...p, settings: { ...p.settings, hue: h } }));
-                      Haptics.selectionAsync();
-                    }}
-                    style={[styles.hueSeg, { backgroundColor: `hsl(${h},70%,50%)` }]}
-                  />
-                ))}
-              </View>
-              <Text style={[styles.label, { marginTop: 18 }]}>
-                Яркость · {state.settings.light ?? 54}%
-              </Text>
-              <View style={styles.sliderRow}>
-                {[36, 44, 54, 62, 70].map((l) => (
-                  <ScaleButton
-                    key={l}
-                    style={[
-                      styles.lightChip,
-                      (state.settings.light ?? 54) === l && { backgroundColor: accent },
-                    ]}
-                    onPress={() => patch((p) => ({ ...p, settings: { ...p.settings, light: l } }))}
-                  >
-                    <Text
-                      style={[
-                        styles.chipTxt,
-                        (state.settings.light ?? 54) === l && { color: '#102012' },
-                      ]}
-                    >
-                      {l}
-                    </Text>
-                  </ScaleButton>
-                ))}
-              </View>
-            </>
-          ),
-        };
-
-      case 'recurring':
-        return {
-          title: 'Постоянные',
-          onClose: toSettings,
-          body: (
-            <>
-              <Text style={styles.hint}>Дата решает, в какую зарплату попадёт платёж.</Text>
-              {(state.recurring || []).map((r) => (
-                <View key={r.id} style={styles.setItem}>
-                  <View>
-                    <Text style={styles.setL}>{r.title}</Text>
-                    <Text style={styles.setS}>
-                      {r.day}-е · {money(r.amount)}
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() =>
-                      patch((p) => ({
-                        ...p,
-                        recurring: p.recurring.filter((x) => x.id !== r.id),
-                      }))
-                    }
-                  >
-                    <Text style={{ color: '#ff453a', fontWeight: '600' }}>Удалить</Text>
-                  </Pressable>
-                </View>
-              ))}
-              <View style={styles.field}>
-                <Text style={styles.label}>Название</Text>
-                <TextInput
-                  style={styles.input}
-                  value={form.rTitle || ''}
-                  onChangeText={(t) => setForm((f) => ({ ...f, rTitle: t }))}
-                  placeholder="Вайфай"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
-              </View>
-              <View style={styles.field}>
-                <Text style={styles.label}>День месяца</Text>
-                <TextInput
-                  style={styles.input}
-                  keyboardType="number-pad"
-                  value={form.rDay || '13'}
-                  onChangeText={(t) => setForm((f) => ({ ...f, rDay: t }))}
-                />
-              </View>
-              <View style={styles.field}>
-                <Text style={styles.label}>Сумма</Text>
-                <TextInput
-                  style={styles.input}
-                  keyboardType="number-pad"
-                  value={form.rAmt || ''}
-                  onChangeText={(t) => setForm((f) => ({ ...f, rAmt: t }))}
-                />
-              </View>
-              <ScaleButton
-                style={[styles.actBtn, { backgroundColor: accent }]}
-                onPress={() => {
-                  const title = (form.rTitle || '').trim();
-                  const day = Number(form.rDay) || 0;
-                  const amount = Number(form.rAmt) || 0;
-                  if (!title || !day) return;
-                  patch((p) => ({
-                    ...p,
-                    recurring: [...p.recurring, { id: uid(), title, day, amount }],
-                  }));
-                  setForm((f) => ({ ...f, rTitle: '', rAmt: '' }));
-                  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                }}
-              >
-                <Text style={[styles.actBtnTxt, { color: '#102012' }]}>Добавить</Text>
-              </ScaleButton>
-            </>
-          ),
-        };
-
       case 'analysis':
         return {
           title: 'Анализ',
           onClose: toSettings,
-          body: <AnalysisView state={state} />,
+          body: <AnalysisView state={state} accent={accent} />,
         };
 
-      case 'stats':
+      case 'stats': {
+        const left = earnedAll - spent;
+        const unexpSum = unexp.reduce((a, e) => a + Number(e.amount || 0), 0);
+        const recSum = rec.reduce((a, e) => a + Number(e.amount || 0), 0);
         return {
           title: 'Результаты',
           onClose: toSettings,
           body: (
             <>
-              <View style={styles.stat}>
-                <Text style={styles.k}>Всего заработано</Text>
-                <Text style={[styles.v, styles.good]}>{money(earnedAll)}</Text>
-              </View>
-              <View style={styles.stat}>
-                <Text style={styles.k}>Всего оплачено</Text>
-                <Text style={styles.v}>{money(spent)}</Text>
-              </View>
-              <View style={styles.stat}>
-                <Text style={styles.k}>Остаток</Text>
-                <Text style={[styles.v, earnedAll - spent >= 0 ? styles.good : styles.bad]}>
-                  {money(earnedAll - spent)}
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <Text style={styles.k}>Остаток за всё время</Text>
+                <Text style={[styles.bigPay, { marginTop: 4, color: left >= 0 ? accent : '#ff453a' }]} numberOfLines={1} adjustsFontSizeToFit>
+                  {left < 0 ? '−' : ''}
+                  {money(Math.abs(left))}
                 </Text>
-              </View>
-              <View style={styles.stat}>
-                <Text style={styles.k}>Непредвиденные</Text>
-                <Text style={styles.v}>
-                  {money(unexp.reduce((a, e) => a + Number(e.amount || 0), 0))}
+                <Meter value={earnedAll > 0 ? spent / earnedAll : 0} color={left >= 0 ? accent : '#ff453a'} />
+                <Text style={styles.calcMeta}>
+                  потрачено {earnedAll > 0 ? Math.round((spent / earnedAll) * 100) : 0}% заработанного
                 </Text>
-              </View>
-              <View style={styles.stat}>
-                <Text style={styles.k}>Постоянные</Text>
-                <Text style={styles.v}>
-                  {money(rec.reduce((a, e) => a + Number(e.amount || 0), 0))}
-                </Text>
-              </View>
+              </ItemCard>
+              <ItemCard style={styles.listCard}>
+                <View style={[styles.lRow, styles.lRowSep]}>
+                  <Text style={styles.lKey}>Заработано</Text>
+                  <Text style={[styles.lVal, styles.good]}>{money(earnedAll)}</Text>
+                </View>
+                <View style={[styles.lRow, styles.lRowSep]}>
+                  <Text style={styles.lKey}>Оплачено всего</Text>
+                  <Text style={styles.lVal}>{money(spent)}</Text>
+                </View>
+                <View style={[styles.lRow, styles.lRowSep]}>
+                  <Text style={styles.lKey}>· постоянные</Text>
+                  <Text style={styles.lVal}>{money(recSum)}</Text>
+                </View>
+                <View style={styles.lRow}>
+                  <Text style={styles.lKey}>· непредвиденные</Text>
+                  <Text style={styles.lVal}>{money(unexpSum)}</Text>
+                </View>
+              </ItemCard>
+              <Text style={styles.hint}>Учитываются расходы со статусом «✓ оплачено» и все смены с суммой.</Text>
             </>
           ),
         };
+      }
 
       case 'calcItem': {
         const it = CALC_ITEMS.find((x) => x.id === calcItem);
@@ -2542,21 +2698,29 @@ export default function App() {
                 Выработка = позиции × ставка, делится на сотрудников. Наставник и остановки добавляются,
                 только если отмечены галочкой.
               </Text>
-              {RATE_FIELDS.map(([k, label]) => (
-                <View key={k} style={styles.field}>
-                  <Text style={styles.label}>{label}</Text>
-                  <TextInput
-                    style={styles.input}
-                    keyboardType="number-pad"
-                    value={form.rates?.[k] ?? ''}
-                    onChangeText={(t) =>
-                      setForm((f) => ({ ...f, rates: { ...f.rates, [k]: t.replace(/[^0-9]/g, '') } }))
-                    }
-                    placeholder="0"
-                    placeholderTextColor="rgba(235,235,245,0.3)"
-                  />
-                </View>
-              ))}
+              <ItemCard style={styles.listCard}>
+                {RATE_FIELDS.map(([k, label], i) => {
+                  const kb = fieldKb(`rate_${k}`, RATE_FIELDS.map(([x]) => `rate_${x}`), label);
+                  return (
+                    <View key={k} style={[styles.lRow, i < RATE_FIELDS.length - 1 && styles.lRowSep]}>
+                      <Text style={styles.lKey}>{label}</Text>
+                      <TextInput
+                        {...kb.props}
+                        style={styles.rateInput}
+                        keyboardType="number-pad"
+                        selectTextOnFocus
+                        value={form.rates?.[k] ?? ''}
+                        onChangeText={(t) =>
+                          setForm((f) => ({ ...f, rates: { ...f.rates, [k]: t.replace(/[^0-9]/g, '') } }))
+                        }
+                        placeholder="0"
+                        placeholderTextColor="rgba(235,235,245,0.3)"
+                      />
+                      {kb.bar}
+                    </View>
+                  );
+                })}
+              </ItemCard>
               <ScaleButton
                 style={styles.actBtn}
                 onPress={() =>
@@ -2953,7 +3117,7 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     gap: 8,
   },
-  gTitle: { color: '#fff', fontSize: 15, fontWeight: '650', flex: 1 },
+  gTitle: { color: '#fff', fontSize: 15, fontWeight: '600', flex: 1 },
   gSub: { color: 'rgba(235,235,245,0.5)', fontSize: 13 },
 
   rowSep: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
@@ -3055,7 +3219,7 @@ const styles = StyleSheet.create({
   mid: { flex: 1, minWidth: 0 },
   itemTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
   meta: { color: 'rgba(235,235,245,0.4)', fontSize: 12, marginTop: 2 },
-  amt: { color: '#fff', fontSize: 16, fontWeight: '650', marginRight: 6 },
+  amt: { color: '#fff', fontSize: 16, fontWeight: '600', marginRight: 6 },
   status: {
     width: 40,
     height: 40,
@@ -3125,7 +3289,7 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     backgroundColor: 'rgba(255,255,255,0.5)',
   },
-  segTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 15, fontWeight: '650' },
+  segTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 15, fontWeight: '600' },
   segTxtOn: { color: '#fff' },
   segTxtAbs: { position: 'absolute' },
   gearDock: { width: 64, height: 64 },
@@ -3169,7 +3333,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  link: { fontWeight: '650', fontSize: 17 },
+  link: { fontWeight: '600', fontSize: 17 },
   linkLine: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3240,7 +3404,7 @@ const styles = StyleSheet.create({
   label: {
     color: 'rgba(235,235,245,0.5)',
     fontSize: 12,
-    fontWeight: '650',
+    fontWeight: '600',
     marginBottom: 6,
   },
   input: {
@@ -3318,7 +3482,8 @@ const styles = StyleSheet.create({
   holdTxt: { color: '#fff', fontSize: 18, fontWeight: '700' },
 
   anRow: {
-    paddingVertical: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     gap: 5,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(255,255,255,0.06)',
@@ -3346,17 +3511,67 @@ const styles = StyleSheet.create({
 
   colorRow: { flexDirection: 'row', gap: 10, marginBottom: 10, flexWrap: 'wrap' },
   colorDot: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     borderWidth: 2,
     borderColor: 'transparent',
+    padding: 3,
   },
   colorDotOn: { borderColor: '#fff' },
+  colorFill: { flex: 1, borderRadius: 20 },
+  hueSegOn: { borderWidth: 2, borderColor: '#fff' },
+  padCard: { padding: 16 },
+  rowPressed: { backgroundColor: 'rgba(255,255,255,0.06)' },
+  btnOn: { borderColor: 'rgba(255,255,255,0.5)', borderWidth: 1 },
+  previewRow: { marginTop: 16, marginBottom: 6 },
+  previewBtn: { height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center' },
+  rateInput: {
+    minWidth: 96,
+    height: 42,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
+  },
+  addIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  addIconTxt: { fontSize: 20, fontWeight: '700', marginTop: -1 },
+  dayBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dayBadgeTxt: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  delRound: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,69,58,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  delRoundTxt: { color: '#ff453a', fontSize: 14, fontWeight: '700' },
+  dayStepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 18,
+    paddingLeft: 16,
+    paddingRight: 8,
+    minHeight: 58,
+  },
   hueTrack: {
     flexDirection: 'row',
-    height: 32,
-    borderRadius: 10,
+    height: 40,
+    borderRadius: 14,
     overflow: 'hidden',
     marginTop: 6,
   },
@@ -3384,12 +3599,20 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.55)',
   },
   wheelCard: {
-    backgroundColor: '#1c1c1e',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingBottom: 24,
+    backgroundColor: 'rgba(28,28,32,0.98)',
+    borderRadius: 28,
+    marginHorizontal: 8,
+    marginBottom: 16,
+    paddingBottom: 14,
     alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.14)',
+    overflow: 'hidden',
   },
+  wheelChips: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, alignSelf: 'stretch' },
+  wheelChip: { flex: 1, alignItems: 'center', minHeight: 42, justifyContent: 'center' },
+  dateField: { minHeight: 54 },
+  dateDow: { color: 'rgba(235,235,245,0.45)', fontSize: 15 },
   wheelBar: {
     width: '100%',
     flexDirection: 'row',
@@ -3415,7 +3638,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   checkMark: { color: '#102012', fontSize: 16, fontWeight: '800', marginTop: -1 },
-  checkSum: { color: 'rgba(235,235,245,0.42)', fontSize: 15, fontWeight: '650' },
+  checkSum: { color: 'rgba(235,235,245,0.42)', fontSize: 15, fontWeight: '600' },
   staffRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 8 },
   staffNum: { minWidth: 40, textAlign: 'center' },
   cRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, paddingLeft: 14, paddingRight: 8 },
@@ -3456,7 +3679,7 @@ const styles = StyleSheet.create({
   sumTotal: { borderBottomWidth: 0, paddingTop: 10 },
   sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15 },
   sumDim: { color: 'rgba(235,235,245,0.4)' },
-  sumV: { color: '#fff', fontSize: 15, fontWeight: '650', fontVariant: ['tabular-nums'] },
+  sumV: { color: '#fff', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
   tallyRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
