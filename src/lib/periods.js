@@ -67,13 +67,7 @@ export function defaultState() {
   return {
     settings: { mode: 'study', hue: 145, light: 54 },
     custom: { bg: null },
-    recurring: [
-      { id: uid(), title: 'О!Банк', amount: 1387, day: 7 },
-      { id: uid(), title: 'Вайфай', amount: 1350, day: 13 },
-      { id: uid(), title: 'Мбанк', amount: 5075, day: 15 },
-      { id: uid(), title: 'О!Банк', amount: 1385, day: 21 },
-      { id: uid(), title: 'М+', amount: 5667, day: 26 },
-    ],
+    // type — след старой функции «Постоянные платежи» (интерфейс его больше не показывает)
     expenses: [
       { id: uid(), date: '2026-09-04', amount: 1000, title: 'Адилет Аке', type: 'unexpected', status: 'paid' },
       { id: uid(), date: '2026-09-04', amount: 7000, title: 'апама карыз', type: 'unexpected', status: 'paid' },
@@ -94,7 +88,7 @@ export function defaultState() {
 }
 
 /**
- * Досеивает постоянные платежи и смены для месяца (y, m).
+ * Досеивает смены для месяца (y, m).
  * Вызывается синхронно ДО рендера нового месяца/режима, чтобы список
  * не появлялся пустым и не «допрыгивал» кадром позже.
  * Возвращает тот же объект, если ничего не добавилось.
@@ -109,27 +103,8 @@ export function seedMonth(state, viewY, viewM) {
     settings: { ...state.settings },
     custom: { ...(state.custom || { bg: null }) },
     removed: [...(state.removed || [])],
-    recurring: [...(state.recurring || [])],
   };
-  const last = new Date(viewY, viewM + 1, 0).getDate();
-  // месяц из импортированного плана: там уже полный список — постоянные не досеиваем
-  const planned = (state.plan?.months || []).includes(`${viewY}-${pad(viewM + 1)}`);
-  (planned ? [] : state.recurring || []).forEach((r) => {
-    if (r.day > last) return;
-    const date = `${viewY}-${pad(viewM + 1)}-${pad(r.day)}`;
-    // сравнение по исходной дате: перенесённый («Не плачу») платёж не досеивается заново
-    if (!next.expenses.some((e) => (e.movedFrom || e.date) === date && e.title === r.title && e.type === 'recurring')) {
-      next.expenses.push({
-        id: uid(),
-        date,
-        amount: r.amount,
-        title: r.title,
-        type: 'recurring',
-        status: null,
-      });
-      changed = true;
-    }
-  });
+  // «Постоянные платежи» убраны: расходы сами больше не добавляются — только смены.
   periodsTouchingMonth(viewY, viewM).forEach((period) => {
     for (let d = period.start; d <= period.end; d = addDays(d, 1)) {
       if (next.removed.includes(d) || next.shifts.some((s) => s.date === d)) continue;
@@ -162,7 +137,6 @@ export function normalizeApp(raw) {
   const ok =
     Array.isArray(raw.expenses) &&
     Array.isArray(raw.shifts) &&
-    Array.isArray(raw.recurring) &&
     Array.isArray(raw.removed) &&
     raw.settings && typeof raw.settings === 'object' &&
     raw.custom && typeof raw.custom === 'object';
@@ -171,7 +145,6 @@ export function normalizeApp(raw) {
     ...raw,
     settings: { mode: 'study', hue: 145, light: 54, ...(raw.settings || {}) },
     custom: { bg: null, ...(raw.custom || {}) },
-    recurring: arr(raw.recurring),
     expenses: arr(raw.expenses),
     shifts: arr(raw.shifts),
     removed: arr(raw.removed),

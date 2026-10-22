@@ -71,18 +71,18 @@ test('«Отменить» возвращает расход как был; уд
   assert.equal(carryInState(app, 'nope').state, app);
 });
 
-test('перенос не ломает досев постоянных и повторный импорт плана', () => {
-  // постоянный О!Банк 7 окт перенесли на 21 окт — октябрь не досевает его заново
-  let app = seedMonth(defaultState(), 2026, 9);
-  const ob = app.expenses.find((e) => e.date === '2026-10-07' && e.title === 'О!Банк');
-  app = carryInState(app, ob.id).state;
-  assert.equal(seedMonth(app, 2026, 9), app);
-  // импорт плана, перенос пункта (дважды), повторный импорт ничего не добавляет
+test('постоянных платежей больше нет: досев не добавляет расходы; перенос не ломает повторный импорт', () => {
+  const base = defaultState();
+  assert.equal(seedMonth(base, 2026, 9).expenses.length, base.expenses.length);
+  // старые сохранения с правилами recurring тоже ничего не досевают
+  const old = { ...base, recurring: [{ id: 'r', title: 'О!Банк', amount: 1387, day: 7 }] };
+  assert.equal(seedMonth(old, 2026, 9).expenses.length, base.expenses.length);
+  // импорт плана, перенос пункта (дважды), повторный импорт ничего не меняет
   let n = 0;
   let pl = applyImport(defaultState(), PLAN_BLOCKS, () => `p${++n}`, PLAN_ID);
   const it = pl.expenses.find((e) => e.src === 'plan' && e.date.startsWith('2026-11'));
   pl = carryInState(carryInState(pl, it.id).state, it.id).state;
-  assert.equal(previewImport(pl, PLAN_BLOCKS).add.length, 0);
+  assert.equal(previewImport(pl, PLAN_BLOCKS).changes, 0);
 });
 
 const nb = (s) => s.replace(/\s/g, ' ');
@@ -232,8 +232,7 @@ test('границы листания и досев месяцев страни�
   assert.equal(PAYDAYS[pagerRange([{ date: '2026-08-25' }], ANCHOR).lo], '2026-08-21');
   const base = defaultState();
   const s = seedPaydays(base, ['2026-10-30']); // период 30 окт – 12 ноя: октябрь и ноябрь
-  assert.ok(s.expenses.some((e) => e.date === '2026-11-07'));
-  assert.ok(s.expenses.some((e) => e.date === '2026-10-26'));
+  assert.equal(s.expenses.length, base.expenses.length); // постоянных платежей больше нет — расходы не досеваются
   assert.equal(seedPaydays(s, ['2026-10-30']), s); // повторно — тот же объект
 });
 

@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { parsePlan, blockSum, monthIndex } from '../scripts/parse-plan.mjs';
 import { PLAN_BLOCKS, PLAN_ID } from '../src/lib/plan2026.js';
-import { applyImport, checkPlan, previewImport, normTitle, groupPaydayOf } from '../src/lib/planImport.js';
+import {
+  applyImport, checkPlan, previewImport, normTitle, groupPaydayOf, autoAddedRecurring, autoAddedLeft, removeExpenses,
+} from '../src/lib/planImport.js';
+import { expensesInPeriod } from '../src/lib/totals.js';
 import { defaultState, seedMonth } from '../src/lib/periods.js';
 
 const TEXT = readFileSync(new URL('../scripts/plan.txt', import.meta.url), 'utf8');
@@ -68,32 +71,85 @@ test('зарплаты плана = расписание приложения; �
   assert.equal(groupPaydayOf('2027-01-06'), '2026-12-25');
 });
 
-test('импорт: дубли пропускаются, ✅ → paid, существующие не меняются, повтор ничего не добавляет', () => {
+const sumOf = (list) => list.reduce((a, e) => a + Number(e.amount || 0), 0);
+const paidLines = PLAN_BLOCKS.flatMap((b) => b.items).filter((x) => x.paid);
+function allPaidPresent(app) {
+  const pool = [...app.expenses];
+  return paidLines.every((x) => {
+    const i = pool.findIndex(
+      (e) => e.date === x.date && e.amount === x.amount && normTitle(e.title) === normTitle(x.title) && e.status === 'paid'
+    );
+    if (i >= 0) pool.splice(i, 1);
+    return i >= 0;
+  });
+}
+
+test('импорт на стартовых данных: каждая строка — одно действие, ✅ все оплачены, итоги = заметка', () => {
   const app = defaultState();
-  const before = JSON.stringify(app.expenses);
   const pv = previewImport(app, PLAN_BLOCKS);
-  assert.equal(pv.add.length + pv.dups.length + pv.similar.length, 88);
-  assert.equal(pv.dups.length, 9); // сентябрь 2026 уже есть в стартовых данных
-  assert.equal(pv.similar.length, 1); // 26 сент М+: в плане 2833, в приложении 5667
+  assert.equal(pv.lines.length, 88);
+  assert.deepEqual(
+    { add: pv.add.length, mark: pv.markPaid.length, replace: pv.replace.length, same: pv.same.length, keep: pv.keep.length },
+    { add: 78, mark: 3, replace: 1, same: 6, keep: 0 }
+  );
+  // 26 сент М+: в заметке 2833 ✅, в приложении старый постоянный 5667 → замена
+  assert.equal(pv.replace[0].plan.amount, 2833);
+  assert.equal(pv.replace[0].existing.amount, 5667);
   const next = applyImport(app, PLAN_BLOCKS, makeId, PLAN_ID, '2026-10-22T00:00:00Z');
-  assert.equal(JSON.stringify(app.expenses), before);
-  assert.deepEqual(next.expenses.slice(0, app.expenses.length), app.expenses);
-  const added = next.expenses.slice(app.expenses.length);
-  assert.equal(added.length, 78);
-  assert.ok(added.every((e) => e.src === 'plan' && typeof e.id === 'string' && e.date && e.amount > 0));
-  const oct = added.filter((e) => e.date.startsWith('2026-10') && e.status === 'paid');
-  assert.equal(oct.length, 8);
-  assert.equal(added.find((e) => normTitle(e.title) === 'вайфай').type, 'recurring');
-  assert.equal(added.find((e) => e.title === 'Контракт 1').type, 'unexpected');
-  assert.equal(next.plan.months.length, 13);
-  assert.equal(previewImport(next, PLAN_BLOCKS).add.length, 0);
+  assert.equal(paidLines.length, 18);
+  assert.ok(allPaidPresent(next));
+  for (const b of PLAN_BLOCKS) {
+    assert.equal(sumOf(expensesInPeriod(next.expenses, b.payday)), blockSum(b), b.payday);
+  }
+  assert.ok(next.expenses.filter((e) => e.src === 'plan').every((e) => !('type' in e) || e.type === 'recurring'));
+  assert.ok(!next.expenses.some((e) => e.src === 'plan' && e.type === 'unexpected'));
+  assert.equal(next.plan.id, PLAN_ID);
+  // идемпотентно
+  const again = previewImport(next, PLAN_BLOCKS);
+  assert.equal(again.changes, 0);
+  assert.equal(again.same.length, 88);
+  assert.deepEqual(applyImport(next, PLAN_BLOCKS, makeId, PLAN_ID, 'x').expenses, next.expenses);
 });
 
-test('после импорта постоянные платежи в месяцы плана не досеиваются, вне плана — как раньше', () => {
-  const app = applyImport(defaultState(), PLAN_BLOCKS, makeId, PLAN_ID);
-  assert.equal(seedMonth(app, 2026, 10).expenses.length, app.expenses.length); // ноябрь 2026 — в плане
-  const oct27 = seedMonth(app, 2027, 9); // октябрь 2027 — вне плана
-  assert.equal(oct27.expenses.length - app.expenses.length, app.recurring.length);
-  const old = defaultState(); // без поля plan — поведение прежнее
-  assert.equal(seedMonth(old, 2026, 10).expenses.length - old.expenses.length, old.recurring.length);
+test('замену можно выключить: старый остаётся, строка — «оставить как есть»', () => {
+  const pv = previewImport(defaultState(), PLAN_BLOCKS, { replace: false });
+  assert.equal(pv.replace.length, 0);
+  assert.equal(pv.keep.length, 1);
+});
+
+test('старые данные с автодобавленными постоянными: импорт + чистка → итоги = заметка', () => {
+  // как на телефоне: правила recurring и досеянные ими расходы во всех месяцах плана
+  const rules = [
+    { id: 'r1', title: 'О!Банк', amount: 1387, day: 7 },
+    { id: 'r2', title: 'Вайфай', amount: 1350, day: 13 },
+    { id: 'r3', title: 'Мбанк', amount: 5075, day: 15 },
+    { id: 'r4', title: 'О!Банк', amount: 1385, day: 21 },
+    { id: 'r5', title: 'М+', amount: 5667, day: 26 },
+  ];
+  const app = { ...defaultState(), recurring: rules };
+  let k = 0;
+  for (let y = 2026, m = 9; y * 12 + m <= 2027 * 12 + 8; m === 11 ? ((m = 0), y++) : m++) {
+    for (const r of rules) {
+      app.expenses.push({ id: `a${++k}`, date: `${y}-${String(m + 1).padStart(2, '0')}-${String(r.day).padStart(2, '0')}`, amount: r.amount, title: r.title, type: 'recurring', status: null });
+    }
+  }
+  // ручной «постоянный», уже отмеченный, — не трогаем
+  app.expenses.push({ id: 'man', date: '2026-11-26', amount: 5667, title: 'М+', type: 'recurring', status: 'paid' });
+  const auto0 = autoAddedRecurring(app);
+  assert.equal(auto0.length, k + 2); // + сентябрьские О!Банк 1385 и М+ 5667 из стартовых данных
+  const pv = previewImport(app, PLAN_BLOCKS);
+  assert.ok(pv.replace.length > 0);
+  const left = autoAddedLeft(app, pv);
+  let next = applyImport(app, PLAN_BLOCKS, makeId, PLAN_ID);
+  assert.ok(allPaidPresent(next));
+  // оставшиеся автодобавленные — ровно те, что превью обещало показать
+  assert.deepEqual(autoAddedRecurring(next).map((e) => e.id).sort(), left.map((e) => e.id).sort());
+  next = removeExpenses(next, autoAddedRecurring(next).map((e) => e.id));
+  assert.ok(next.expenses.some((e) => e.id === 'man'));
+  assert.ok(allPaidPresent(next));
+  for (const b of PLAN_BLOCKS) {
+    const list = expensesInPeriod(next.expenses, b.payday).filter((e) => e.id !== 'man');
+    assert.equal(sumOf(list), blockSum(b), b.payday);
+  }
+  assert.equal(previewImport(next, PLAN_BLOCKS).changes, 0);
 });

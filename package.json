@@ -9,6 +9,7 @@
     "@react-native-picker/picker": "2.11.4",
     "expo": "~57.0.27",
     "expo-blur": "~57.0.3",
+    "expo-clipboard": "~57.0.2",
     "expo-constants": "~57.0.21",
     "expo-device": "~57.0.2",
     "expo-font": "~57.0.4",
@@ -45,7 +46,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/totals.test.mjs"
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/totals.test.mjs"
   },
   "private": true
 }

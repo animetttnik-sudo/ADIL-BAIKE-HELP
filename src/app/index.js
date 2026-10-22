@@ -17,6 +17,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { BlurView } from 'expo-blur';
+import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
@@ -72,7 +73,8 @@ import {
   toggleInState,
   undoCarry,
 } from '../lib/totals';
-import { applyImport, monthTitle, previewImport } from '../lib/planImport';
+import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
+import { parsePlan } from '../lib/planParse';
 import {
     CALC_ITEMS,
     CALC_KEY,
@@ -904,6 +906,59 @@ const IslandMenu = memo(function IslandMenu({ arc }) {
   );
 });
 
+/**
+ * Маленькое стеклянное меню у кнопки «+» (вкладка «Расходы»). Анимация — на UI-потоке
+ * (withTiming без перелёта), стекло видно ступенькой, растёт из угла кнопки. Тап мимо — закрыть.
+ */
+const ADD_MENU_W = 248;
+const ADD_MENU_IN = { duration: 200, easing: Easing.out(Easing.cubic) };
+const ADD_MENU_OUT = { duration: 140, easing: Easing.in(Easing.cubic) };
+const AddMenu = memo(function AddMenu({ visible, anchor, items, accent, onClose }) {
+  const open = useSharedValue(0);
+  useEffect(() => {
+    open.value = withTiming(visible ? 1 : 0, visible ? ADD_MENU_IN : ADD_MENU_OUT);
+  }, [visible, open]);
+  const back = useAnimatedStyle(() => ({ opacity: open.value }));
+  const box = useAnimatedStyle(() => {
+    const o = open.value;
+    return {
+      opacity: o > 0.02 ? 1 : 0,
+      transform: [{ translateY: -8 * (1 - o) }, { scale: 0.6 + 0.4 * o }],
+    };
+  });
+  const top = anchor ? anchor.y + anchor.h + 8 : 100;
+  const right = anchor ? Math.max(8, SCREEN_W - (anchor.x + anchor.w)) : 16;
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents={visible ? 'box-none' : 'none'}>
+      <Animated.View style={[StyleSheet.absoluteFill, styles.addMenuBack, back]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      </Animated.View>
+      <Animated.View style={[styles.addMenuBox, { top, right }, box]}>
+        <TintGlass style={styles.addMenu} fill="rgba(30,30,38,0.62)" radius={22} interactive>
+          {items.map((it, i) => (
+            <Pressable
+              key={it.title}
+              style={({ pressed }) => [styles.addMenuRow, i < items.length - 1 && styles.lRowSep, pressed && styles.rowPressed]}
+              onPress={() => {
+                hapticSelect();
+                it.onPress();
+              }}
+            >
+              <View style={[styles.addMenuIcon, { backgroundColor: accent }]}>
+                <Text style={[styles.addIconTxt, styles.onAccent]}>{it.icon}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lTitle} numberOfLines={1}>{it.title}</Text>
+                <Text style={styles.lSub} numberOfLines={1}>{it.sub}</Text>
+              </View>
+            </Pressable>
+          ))}
+        </TintGlass>
+      </Animated.View>
+    </View>
+  );
+});
+
 /** Короткая плашка «Перенесено на …» с «Отменить». */
 function Toast({ toast, onUndo, onHide }) {
   useEffect(() => {
@@ -967,10 +1022,11 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
             <Text style={[styles.itemTitle, !item.title && styles.itemTitleDim]} numberOfLines={1}>
               {item.title || 'Без названия'}
             </Text>
-            <Text style={styles.meta} numberOfLines={1}>
-              {item.type === 'recurring' ? 'постоянный' : 'непредвиденный'}
-              {st === 'paid' ? <Text style={styles.good}> · оплачено</Text> : null}
-            </Text>
+            {st === 'paid' ? (
+              <Text style={[styles.meta, styles.good]} numberOfLines={1}>
+                оплачено
+              </Text>
+            ) : null}
             {item.movedFrom ? (
               <Text style={styles.metaMoved} numberOfLines={1}>
                 ↪ перенесено с {fmtShort(item.movedFrom)}
@@ -2130,6 +2186,12 @@ export default function App() {
   const [sheet, setSheet] = useState(null);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
+  const [addMenu, setAddMenu] = useState(null); // { x, y, w, h } кнопки «+» — меню открыто
+  const addBtnRef = useRef(null);
+  // импорт из заметок: текст, разобранный результат, замена похожих старых, «все строки»
+  const [notes, setNotes] = useState({ text: '', parsed: null });
+  const [impReplace, setImpReplace] = useState(true);
+  const [impAll, setImpAll] = useState(false);
   const [toast, setToast] = useState(null); // { k, text, undo }
   // Расходы: показанная зарплата (индекс в PAYDAYS) + shared values пейджера
   const [pi, setPi] = useState(null);
@@ -2521,14 +2583,13 @@ export default function App() {
     const st = stateRef.current;
     const e = id
       ? st.expenses.find((x) => x.id === id)
-      : { date: newExpenseDate(piRef.current), amount: '', title: '', type: 'unexpected' };
+      : { date: newExpenseDate(piRef.current), amount: '', title: '' };
     if (!e) return;
     setEditId(id || null);
     setForm({
       date: e.date,
       amount: e.amount != null ? String(e.amount) : '',
       title: e.title || '',
-      type: e.type || 'unexpected',
     });
     setSheet('exp');
   }, []);
@@ -2726,14 +2787,18 @@ export default function App() {
   const saveExpense = () => {
     const amount = Number(form.amount) || 0;
     const title = (form.title || '').trim();
-    const { date, type } = form;
+    const { date } = form;
     patch((prev) => {
       const expenses = [...prev.expenses];
       if (editId) {
         const i = expenses.findIndex((x) => x.id === editId);
-        if (i >= 0) expenses[i] = { ...expenses[i], date, amount, title, type };
+        // старый тип («постоянный») при правке снимаем: отредактированный расход — уже не автодобавленный
+        if (i >= 0) {
+          const { type: _oldType, ...rest } = expenses[i];
+          expenses[i] = { ...rest, date, amount, title, edited: true };
+        }
       } else {
-        expenses.push({ id: uid(), date, amount, title, type, status: null });
+        expenses.push({ id: uid(), date, amount, title, status: null });
       }
       return { ...prev, expenses };
     });
@@ -2786,8 +2851,6 @@ export default function App() {
   };
 
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
-  const unexp = paid.filter((e) => e.type !== 'recurring');
-  const rec = paid.filter((e) => e.type === 'recurring');
   const spent = paid.reduce((a, e) => a + Number(e.amount || 0), 0);
   const earnedAll = state.shifts.reduce((a, s) => a + (Number(s.amount) || 0), 0);
 
@@ -2840,6 +2903,273 @@ export default function App() {
 
   const toSettings = () => setSheet('settings');
   const closeSheet = () => setSheet(null);
+
+  // ── «+»: на «Расходах» — меню у кнопки, на других вкладках — прежняя шторка
+  const closeAddMenu = () => setAddMenu(null);
+  const onPlus = () => {
+    if (page !== 0) return setSheet('add');
+    const v = addBtnRef.current;
+    if (!v || typeof v.measureInWindow !== 'function') return setSheet('add');
+    try {
+      v.measureInWindow((x, y, w, h) => {
+        if ([x, y, w, h].every(Number.isFinite)) setAddMenu({ x, y, w, h });
+        else setSheet('add');
+      });
+    } catch (err) {
+      console.warn('measure + failed', err);
+      setSheet('add');
+    }
+  };
+  const openNotes = () => {
+    setNotes({ text: '', parsed: null });
+    setImpReplace(true);
+    setImpAll(false);
+    setSheet('notes');
+  };
+  const addItems = [
+    {
+      icon: '+',
+      title: 'Новый расход',
+      sub: 'в показанную зарплату',
+      onPress: () => {
+        setAddMenu(null);
+        openExpense(null);
+      },
+    },
+    {
+      icon: '≡',
+      title: 'Импорт из заметок',
+      sub: 'вставить текст или годовой план',
+      onPress: () => {
+        setAddMenu(null);
+        openNotes();
+      },
+    },
+  ];
+  /** Сразу на нужную зарплату (без пружины через десятки страниц). */
+  const jumpPayIdx = (k) => {
+    if (!Number.isInteger(k) || k < 0 || k >= PAYDAYS.length) return;
+    pageCur.value = k;
+    pagePos.value = k;
+    onPage(k);
+  };
+  const KIND_TAG = {
+    add: 'добавить',
+    markPaid: 'отметить ✓',
+    replace: 'заменить',
+    same: 'уже есть',
+    keep: 'оставить',
+  };
+  /**
+   * Общее превью импорта (Настройки «Импорт плана» и «Импорт из заметок»): по месяцам,
+   * что заменится / отметится, «Не распознано», предупреждение об автодобавленных, кнопка.
+   */
+  const importBody = ({ blocks, unparsed = [], planId = null, label }) => {
+    const pv = previewImport(state, blocks, { replace: impReplace });
+    const addN = pv.add.length;
+    const addSum = pv.add.reduce((a, x) => a + x.amount, 0);
+    const paidN = pv.add.filter((x) => x.paid).length;
+    const total = pv.lines.reduce((a, r) => a + r.plan.amount, 0);
+    const left = autoAddedLeft(state, pv);
+    const similar = [...pv.replace, ...pv.keep];
+    const near = pv.lines.filter((r) => r.kind === 'add' && r.near);
+    const noName = pv.add.filter((x) => !x.title);
+    const n = pv.changes;
+    const word = (k) => (k % 10 === 1 && k % 100 !== 11 ? 'строка' : [2, 3, 4].includes(k % 10) && ![12, 13, 14].includes(k % 100) ? 'строки' : 'строк');
+    const confirm = () => {
+      if (!n) return;
+      const parts = [
+        addN ? `добавить ${addN}` : null,
+        pv.markPaid.length ? `отметить оплаченными ${pv.markPaid.length}` : null,
+        pv.replace.length ? `заменить ${pv.replace.length}` : null,
+      ].filter(Boolean);
+      Alert.alert(label, `${parts.join(', ')}?`, [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: addN ? `Добавить ${n}` : 'Применить',
+          onPress: () => {
+            const replace = impReplace;
+            const changed = pv.lines.filter((r) => r.kind !== 'same' && r.kind !== 'keep').map((r) => r.plan.payday);
+            patch((p) => seedMonth(applyImport(p, blocks, uid, planId, undefined, { replace }), viewY, viewM));
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            // к зарплате с изменениями: ближайшая с сегодняшней, иначе последняя
+            const cur = paydayOnOrBefore(todayIso());
+            const ps = [...new Set(changed)].sort();
+            const target = ps.find((x) => x >= cur) || ps[ps.length - 1];
+            closeThen(() => {
+              goPage(0);
+              const k = PAYDAYS.indexOf(target);
+              if (k >= 0) requestAnimationFrame(() => jumpPayIdx(k));
+            });
+          },
+        },
+      ]);
+    };
+    return (
+      <>
+        <ItemCard style={[styles.listCard, styles.padCard]}>
+          <Text style={styles.k}>{n ? 'Будет изменено' : 'Всё уже в приложении'}</Text>
+          <Text style={[styles.bigPay, { marginTop: 4, color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+            {pv.lines.length} {word(pv.lines.length)} · {money(total)} сом
+          </Text>
+          <Text style={styles.calcMeta}>
+            добавить {addN}
+            {addN ? ` (${money(addSum)} сом, ${paidN} ✓)` : ''} · отметить оплаченным {pv.markPaid.length} · заменить{' '}
+            {pv.replace.length} · уже есть {pv.same.length + pv.keep.length}
+          </Text>
+        </ItemCard>
+        <Text style={styles.hint}>
+          Заметка — источник правды. Каждый расход встанет под ту же зарплату, что в заметке; ✅ — оплачен.
+          Точные совпадения (дата + сумма + название) не дублируются, а если в заметке ✅ — отмечаются оплаченными.
+        </Text>
+        {left.length > 0 && (
+          <Pressable
+            style={({ pressed }) => [styles.warnCard, pressed && styles.rowPressed]}
+            onPress={() => {
+              Haptics.selectionAsync();
+              setSheet('cleanup');
+            }}
+          >
+            <Text style={styles.warnTxt}>
+              В приложении {left.length} автодобавленных платежей (старые «постоянные»), которых нет в заметке, — из-за
+              них итоги могут не совпасть.
+            </Text>
+            <Text style={[styles.warnLink, { color: accent }]}>Удалить автодобавленные ›</Text>
+          </Pressable>
+        )}
+        {unparsed.length > 0 && (
+          <>
+            <Text style={styles.sectionLabel}>Не распознано · {unparsed.length}</Text>
+            <ItemCard style={styles.listCard}>
+              {unparsed.map((u, i) => (
+                <View key={i} style={[styles.lRow, i < unparsed.length - 1 && styles.lRowSep]}>
+                  <Text style={[styles.lSub, styles.unparsedTxt]}>{String(u.text ?? u)}</Text>
+                </View>
+              ))}
+            </ItemCard>
+            <Text style={styles.hint}>Эти строки не будут добавлены — поправьте их в тексте, если это расходы.</Text>
+          </>
+        )}
+        <Text style={styles.sectionLabel}>По зарплатам</Text>
+        <ItemCard style={styles.listCard}>
+          {pv.months.length === 0 && <Text style={styles.empty}>Нет строк с датой и суммой</Text>}
+          {pv.months.map((k, i) => {
+            const m = pv.byMonth[k];
+            const bits = [
+              m.add - m.replace ? `+${m.add - m.replace}` : null,
+              m.mark ? `✓ ${m.mark}` : null,
+              m.replace ? `заменить ${m.replace}` : null,
+              m.skip ? `уже есть ${m.skip}` : null,
+            ].filter(Boolean);
+            return (
+              <View key={k} style={[styles.lRow, i < pv.months.length - 1 && styles.lRowSep]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.lTitle}>{monthTitle(k)}</Text>
+                  <Text style={styles.lSub}>{bits.join(' · ')}</Text>
+                </View>
+                <Text style={[styles.lVal, !m.add && !m.mark && { opacity: 0.4 }]}>{money(m.sum)}</Text>
+              </View>
+            );
+          })}
+        </ItemCard>
+        {similar.length > 0 && (
+          <>
+            <Text style={styles.sectionLabel}>Похожие старые платежи</Text>
+            <ItemCard style={styles.listCard}>
+              <Pressable
+                style={[styles.lRow, styles.lRowSep]}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  setImpReplace((v) => !v);
+                }}
+              >
+                <View style={[styles.checkBox, impReplace && { backgroundColor: accent, borderColor: accent }]}>
+                  {impReplace && <Text style={styles.checkMark}>✓</Text>}
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.lTitle}>Заменить строкой из заметки</Text>
+                  <Text style={styles.lSub}>старые неоплаченные «постоянные» с другой суммой или датой</Text>
+                </View>
+              </Pressable>
+              {similar.map((d, i) => (
+                <View key={i} style={[styles.lRow, i < similar.length - 1 && styles.lRowSep]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.lTitle}>
+                      {fmtShort(d.plan.date)} · {d.plan.title || 'Без названия'}
+                    </Text>
+                    <Text style={styles.lSub}>
+                      в заметке {money(d.plan.amount)}
+                      {d.plan.paid ? ' ✅' : ''}, в приложении {money(d.existing.amount)}
+                      {d.existing.date !== d.plan.date ? ` (${fmtShort(d.existing.date)})` : ''}
+                    </Text>
+                  </View>
+                  <Text style={styles.impTag}>{KIND_TAG[d.kind]}</Text>
+                </View>
+              ))}
+            </ItemCard>
+          </>
+        )}
+        {pv.markPaid.length > 0 && (
+          <>
+            <Text style={styles.sectionLabel}>Отметить оплаченным · {pv.markPaid.length}</Text>
+            <ItemCard style={styles.listCard}>
+              {pv.markPaid.map((d, i) => (
+                <View key={i} style={[styles.lRow, i < pv.markPaid.length - 1 && styles.lRowSep]}>
+                  <Text style={[styles.lTitle, { flex: 1 }]} numberOfLines={1}>
+                    {fmtShort(d.plan.date)} · {d.plan.title || 'Без названия'}
+                  </Text>
+                  <Text style={styles.lVal}>{money(d.plan.amount)}</Text>
+                </View>
+              ))}
+            </ItemCard>
+          </>
+        )}
+        {near.length > 0 && (
+          <Text style={styles.hint}>
+            Добавятся рядом с уже введёнными (другая сумма):{' '}
+            {near.map((r) => `${fmtShort(r.plan.date)} ${r.plan.title} ${money(r.plan.amount)} (есть ${money(r.near.amount)})`).join(', ')}
+          </Text>
+        )}
+        {noName.length > 0 && (
+          <Text style={styles.hint}>
+            Без названия: {noName.map((x) => `${fmtShort(x.date)} — ${money(x.amount)}`).join(', ')}
+          </Text>
+        )}
+        {pv.lines.length > 0 && (
+          <Pressable onPress={() => setImpAll((v) => !v)} hitSlop={8}>
+            <Text style={[styles.link, styles.showAll, { color: accent }]}>
+              {impAll ? 'Скрыть строки' : `Все строки (${pv.lines.length})`}
+            </Text>
+          </Pressable>
+        )}
+        {impAll && (
+          <ItemCard style={styles.listCard}>
+            {pv.lines.map((r, i) => (
+              <View key={i} style={[styles.lRow, i < pv.lines.length - 1 && styles.lRowSep]}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.lTitle} numberOfLines={1}>
+                    {r.plan.title || 'Без названия'}
+                    {r.plan.paid ? ' ✅' : ''}
+                  </Text>
+                  <Text style={styles.lSub}>
+                    {fmtShort(r.plan.date)} · {money(r.plan.amount)} сом
+                  </Text>
+                </View>
+                <Text style={[styles.impTag, (r.kind === 'same' || r.kind === 'keep') && { opacity: 0.5 }]}>
+                  {KIND_TAG[r.kind]}
+                </Text>
+              </View>
+            ))}
+          </ItemCard>
+        )}
+        <ScaleButton style={[styles.actBtn, { backgroundColor: accent }, !n && { opacity: 0.45 }]} onPress={confirm}>
+          <Text style={[styles.actBtnTxt, styles.onAccent]}>
+            {!n ? 'Всё уже добавлено' : addN ? `Добавить ${n}` : `Применить ${n}`}
+          </Text>
+        </ScaleButton>
+      </>
+    );
+  };
 
   /** Содержимое шторки — строится только для открытой. */
   const renderSheet = (key) => {
@@ -2921,15 +3251,6 @@ export default function App() {
                 {kTitle.bar}
               </View>
               <DateWheel value={form.date} accent={accent} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
-              <View style={styles.field}>
-                <Text style={styles.label}>Тип</Text>
-                <SegmentCapsule
-                  height={46}
-                  labels={['Непредвиденный', 'Постоянный']}
-                  value={form.type === 'recurring' ? 1 : 0}
-                  onChange={(i) => setForm((f) => ({ ...f, type: i === 1 ? 'recurring' : 'unexpected' }))}
-                />
-              </View>
               {editId && (
                 <ScaleButton
                   style={[styles.actBtn, styles.dangerBtn]}
@@ -3060,9 +3381,9 @@ export default function App() {
       }
 
       case 'settings': {
+        const autoN = autoAddedRecurring(state).length;
         const nav = [
           { key: 'custom', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
-          { key: 'recurring', title: 'Постоянные платежи', sub: `${(state.recurring || []).length} шт. · каждый месяц` },
           { key: 'analysis', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
           { key: 'stats', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
           {
@@ -3072,6 +3393,11 @@ export default function App() {
               state.plan?.id === PLAN_ID
                 ? `добавлено ${state.plan.added ?? ''} · ${fmtShort(state.plan.importedAt.slice(0, 10))}`
                 : 'расходы сен 2026 – сен 2027 из заметки',
+          },
+          {
+            key: 'cleanup',
+            title: 'Удалить автодобавленные платежи',
+            sub: autoN ? `${autoN} неоплаченных от старых «постоянных»` : 'нет — ничего удалять',
           },
         ];
         return {
@@ -3202,210 +3528,174 @@ export default function App() {
         };
       }
 
-      case 'recurring': {
-        const kT = fieldKb('rTitle', ['rTitle', 'rAmt'], 'Название');
-        const kA = fieldKb('rAmt', ['rTitle', 'rAmt'], 'Сумма');
-        const rDay = Math.min(31, Math.max(1, Number(form.rDay) || 13));
-        const canAdd = !!(form.rTitle || '').trim();
-        const list = [...(state.recurring || [])].sort((a, b) => a.day - b.day);
-        const total = list.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+      case 'cleanup': {
+        const list = autoAddedRecurring(state).sort((x, y) => (x.date < y.date ? -1 : 1));
+        const hasRules = Array.isArray(state.recurring) && state.recurring.length > 0;
+        const byM = {};
+        for (const e of list) (byM[e.date.slice(0, 7)] = byM[e.date.slice(0, 7)] || []).push(e);
+        const months = Object.keys(byM).sort();
+        const sum = list.reduce((a, e) => a + Number(e.amount || 0), 0);
         return {
-          title: 'Постоянные платежи',
+          title: 'Автодобавленные',
           onClose: toSettings,
           body: (
             <>
-              <ItemCard style={styles.listCard}>
-                {list.length === 0 && <Text style={styles.empty}>Пока нет постоянных платежей</Text>}
-                {list.map((r, i) => (
-                  <Animated.View key={r.id} style={[styles.lRow, i < list.length - 1 && styles.lRowSep]} entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-                    <View style={styles.dayBadge}>
-                      <Text style={styles.dayBadgeTxt}>{r.day}</Text>
-                    </View>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.lTitle} numberOfLines={1}>{r.title}</Text>
-                      <Text style={styles.lSub}>{r.day}-е число каждого месяца</Text>
-                    </View>
-                    <Text style={styles.lVal}>{money(r.amount)}</Text>
-                    <Pressable
-                      hitSlop={10}
-                      style={styles.delRound}
-                      onPress={() => {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        patch((p) => ({
-                          ...p,
-                          recurring: p.recurring.filter((x) => x.id !== r.id),
-                        }));
-                      }}
-                    >
-                      <Text style={styles.delRoundTxt}>✕</Text>
-                    </Pressable>
-                  </Animated.View>
-                ))}
-                {list.length > 0 && (
-                  <Animated.View style={styles.cardFoot} layout={ROW_LAYOUT}>
-                    <Text style={styles.footL}>В месяц</Text>
-                    <Text style={styles.footV}>{money(total)}</Text>
-                  </Animated.View>
-                )}
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <Text style={styles.k}>Будет удалено</Text>
+                <Text style={[styles.bigPay, { marginTop: 4, color: list.length ? '#ff453a' : accent }]} numberOfLines={1}>
+                  {list.length} · {money(sum)} сом
+                </Text>
+                <Text style={styles.calcMeta}>только неоплаченные и не изменённые — оплаченные ✓ остаются</Text>
               </ItemCard>
               <Text style={styles.hint}>
-                Платёж сам появится в «Расходах» каждого месяца; число решает, в какую зарплату он попадёт.
+                {hasRules
+                  ? 'Это платежи, которые раньше сами добавляла функция «Постоянные платежи»: то же название, сумма и число, что в её списке, без правок и переносов.'
+                  : 'Списка старых «Постоянных платежей» в данных нет — автодобавленные нельзя отличить от введённых вручную, поэтому ничего не удаляем.'}
               </Text>
-
-              <Text style={styles.sectionLabel}>Новый платёж</Text>
-              <View style={styles.field}>
-                <TextInput
-                  {...kT.props}
-                  style={styles.input}
-                  value={form.rTitle || ''}
-                  onChangeText={(t) => setForm((f) => ({ ...f, rTitle: t }))}
-                  placeholder="Название, например «Вайфай»"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
-                {kT.bar}
-              </View>
-              <View style={[styles.field, styles.dayStepRow]}>
-                <Text style={[styles.setL, { flex: 1 }]}>Число месяца</Text>
-                <ScaleButton
-                  style={styles.stepBtn}
-                  onPress={() => setForm((f) => ({ ...f, rDay: String(rDay <= 1 ? 31 : rDay - 1) }))}
-                >
-                  <Text style={styles.stepTxt}>−</Text>
-                </ScaleButton>
-                <Text style={[styles.cCountTxt, styles.staffNum]}>{rDay}</Text>
-                <ScaleButton
-                  style={styles.stepBtn}
-                  onPress={() => setForm((f) => ({ ...f, rDay: String(rDay >= 31 ? 1 : rDay + 1) }))}
-                >
-                  <Text style={styles.stepTxt}>+</Text>
-                </ScaleButton>
-              </View>
-              <View style={styles.field}>
-                <View style={styles.bigField}>
-                  <TextInput
-                    {...kA.props}
-                    style={[styles.bigInput, { fontSize: 26 }]}
-                    keyboardType="number-pad"
-                    value={form.rAmt || ''}
-                    onChangeText={(t) => setForm((f) => ({ ...f, rAmt: t.replace(/[^0-9]/g, '') }))}
-                    placeholder="Сумма"
-                    placeholderTextColor="rgba(235,235,245,0.25)"
-                  />
-                  <Text style={styles.bigUnit}>сом</Text>
+              {months.map((k) => (
+                <View key={k}>
+                  <Text style={styles.sectionLabel}>
+                    {monthTitle(k)} · {byM[k].length}
+                  </Text>
+                  <ItemCard style={styles.listCard}>
+                    {byM[k].map((e, i) => (
+                      <View key={e.id} style={[styles.lRow, i < byM[k].length - 1 && styles.lRowSep]}>
+                        <Text style={[styles.lTitle, { flex: 1 }]} numberOfLines={1}>
+                          {fmtShort(e.date)} · {e.title || 'Без названия'}
+                        </Text>
+                        <Text style={styles.lVal}>{money(e.amount)}</Text>
+                      </View>
+                    ))}
+                  </ItemCard>
                 </View>
-                {kA.bar}
-              </View>
+              ))}
               <ScaleButton
-                style={[styles.actBtn, { backgroundColor: accent }, !canAdd && { opacity: 0.45 }]}
+                style={[styles.actBtn, styles.dangerBtn, !list.length && { opacity: 0.45 }]}
                 onPress={() => {
-                  const title = (form.rTitle || '').trim();
-                  const amount = Number(form.rAmt) || 0;
-                  if (!title) return;
-                  patch((p) => ({
-                    ...p,
-                    recurring: [...p.recurring, { id: uid(), title, day: rDay, amount }],
-                  }));
-                  setForm((f) => ({ ...f, rTitle: '', rAmt: '' }));
-                  Keyboard.dismiss();
-                  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                  if (!list.length) return;
+                  Alert.alert(
+                    'Удалить автодобавленные?',
+                    `${list.length} неоплаченных платежей на ${money(sum)} сом исчезнут из «Расходов». Оплаченные останутся.`,
+                    [
+                      { text: 'Отмена', style: 'cancel' },
+                      {
+                        text: 'Удалить',
+                        style: 'destructive',
+                        onPress: () => {
+                          const ids = list.map((e) => e.id);
+                          patch((p) => removeExpenses(p, ids));
+                          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                        },
+                      },
+                    ]
+                  );
                 }}
               >
-                <Text style={[styles.actBtnTxt, styles.onAccent]}>Добавить платёж</Text>
+                <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>
+                  {list.length ? `Удалить ${list.length}` : 'Нечего удалять'}
+                </Text>
               </ScaleButton>
             </>
           ),
         };
       }
 
-      case 'plan': {
-        const pv = previewImport(state, PLAN_BLOCKS);
-        const done = state.plan?.id === PLAN_ID;
-        const addSum = pv.add.reduce((a, x) => a + x.amount, 0);
-        const paidN = pv.add.filter((x) => x.paid).length;
-        const noName = pv.add.filter((x) => !x.title);
+      case 'plan':
         return {
           title: 'Импорт плана',
           onClose: toSettings,
+          body: importBody({ blocks: PLAN_BLOCKS, planId: PLAN_ID, label: 'Импорт плана' }),
+        };
+
+      case 'notes': {
+        const P = notes.parsed;
+        if (P) {
+          return {
+            title: 'Импорт из заметок',
+            onClose: closeSheet,
+            body: (
+              <>
+                <Pressable hitSlop={8} onPress={() => setNotes((x) => ({ ...x, parsed: null }))}>
+                  <Text style={[styles.link, styles.notesBack, { color: accent }]}>‹ {P.planId ? 'Назад' : 'Изменить текст'}</Text>
+                </Pressable>
+                {importBody({ ...P, label: 'Импорт из заметок' })}
+              </>
+            ),
+          };
+        }
+        const kN = fieldKb('notes', ['notes'], 'Заметка');
+        const canParse = !!notes.text.trim();
+        const doParse = () => {
+          try {
+            const r = parsePlan(notes.text, { ref: new Date() });
+            Keyboard.dismiss();
+            setImpAll(false);
+            setNotes((x) => ({ ...x, parsed: { blocks: r.blocks, unparsed: r.unparsed, planId: null } }));
+          } catch (err) {
+            console.warn('parse notes failed', err);
+            Alert.alert('Не получилось разобрать', String(err?.message || err));
+          }
+        };
+        return {
+          title: 'Импорт из заметок',
+          onClose: closeSheet,
           body: (
             <>
-              <ItemCard style={[styles.listCard, styles.padCard]}>
-                <Text style={styles.k}>{done ? 'План уже импортирован' : 'Будет добавлено'}</Text>
-                <Text style={[styles.bigPay, { marginTop: 4, color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
-                  {pv.add.length} {pv.add.length === 1 ? 'расход' : pv.add.length < 5 && pv.add.length > 1 ? 'расхода' : 'расходов'}
-                </Text>
-                <Text style={styles.calcMeta}>
-                  на {money(addSum)} сом · {paidN} уже оплачены ✓ · пропущено {pv.dups.length + pv.similar.length}
-                </Text>
-              </ItemCard>
-              <Text style={styles.hint}>
-                Каждый расход встанет под ту же зарплату, что в заметке. Существующие расходы не меняются,
-                точные дубли (дата + сумма + название) пропускаются. В месяцах плана «Постоянные платежи»
-                больше не добавляются сами — план уже содержит их.
-              </Text>
-              <Text style={styles.sectionLabel}>По месяцам</Text>
-              <ItemCard style={styles.listCard}>
-                {pv.months.map((k, i) => {
-                  const m = pv.byMonth[k];
-                  return (
-                    <View key={k} style={[styles.lRow, i < pv.months.length - 1 && styles.lRowSep]}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.lTitle}>{monthTitle(k)}</Text>
-                        <Text style={styles.lSub}>
-                          {m.add ? `+${m.add} · ${money(m.sum)} сом` : 'нечего добавлять'}
-                          {m.skip ? ` · уже есть ${m.skip}` : ''}
-                        </Text>
-                      </View>
-                      <Text style={[styles.lVal, !m.add && { opacity: 0.4 }]}>+{m.add}</Text>
-                    </View>
-                  );
-                })}
-              </ItemCard>
-              {pv.similar.length > 0 && (
-                <>
-                  <Text style={styles.sectionLabel}>Уже есть похожие — пропущены</Text>
-                  <ItemCard style={styles.listCard}>
-                    {pv.similar.map((d, i) => (
-                      <View key={i} style={[styles.lRow, i < pv.similar.length - 1 && styles.lRowSep]}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.lTitle}>
-                            {fmtShort(d.plan.date)} · {d.plan.title || 'Без названия'}
-                          </Text>
-                          <Text style={styles.lSub}>
-                            в плане {money(d.plan.amount)}, в приложении {money(d.existing.amount)}
-                            {d.existing.date !== d.plan.date ? ` (${fmtShort(d.existing.date)})` : ''}
-                          </Text>
-                        </View>
-                      </View>
-                    ))}
-                  </ItemCard>
-                </>
-              )}
-              {noName.length > 0 && (
-                <Text style={styles.hint}>
-                  Без названия: {noName.map((x) => `${fmtShort(x.date)} — ${money(x.amount)}`).join(', ')}
-                </Text>
-              )}
+              <View style={styles.field}>
+                <TextInput
+                  {...kN.props}
+                  multiline
+                  returnKeyType="default"
+                  submitBehavior="newline"
+                  onSubmitEditing={undefined}
+                  style={[styles.input, styles.notesInput]}
+                  value={notes.text}
+                  onChangeText={(t) => setNotes((x) => ({ ...x, text: t }))}
+                  placeholder={'Расходы Ноябрь\n4 ноября - 1000 Адилет Аке ✅\n15.11 – 5 075 Мбанк'}
+                  placeholderTextColor="rgba(235,235,245,0.3)"
+                  textAlignVertical="top"
+                  scrollEnabled={false}
+                />
+              </View>
+              <View style={styles.notesBtns}>
+                <ScaleButton
+                  style={[styles.actBtn, styles.notesBtn]}
+                  onPress={async () => {
+                    try {
+                      const t = await Clipboard.getStringAsync();
+                      if (!t) return Alert.alert('Буфер пуст', 'Скопируйте текст заметки и нажмите «Вставить».');
+                      Haptics.selectionAsync();
+                      setNotes((x) => ({ ...x, text: x.text.trim() ? `${x.text.trimEnd()}\n${t}` : t }));
+                    } catch (err) {
+                      console.warn('clipboard failed', err);
+                    }
+                  }}
+                >
+                  <Text style={styles.actBtnTxt}>Вставить</Text>
+                </ScaleButton>
+                <ScaleButton
+                  style={[styles.actBtn, styles.notesBtn]}
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    Keyboard.dismiss();
+                    setImpAll(false);
+                    setNotes((x) => ({ ...x, parsed: { blocks: PLAN_BLOCKS, unparsed: [], planId: PLAN_ID } }));
+                  }}
+                >
+                  <Text style={styles.actBtnTxt}>Мой годовой план</Text>
+                </ScaleButton>
+              </View>
               <ScaleButton
-                style={[styles.actBtn, { backgroundColor: accent }, !pv.add.length && { opacity: 0.45 }]}
-                onPress={() => {
-                  if (!pv.add.length) return;
-                  Alert.alert('Импорт плана', `Добавить ${pv.add.length} расходов в «Расходы»?`, [
-                    { text: 'Отмена', style: 'cancel' },
-                    {
-                      text: 'Добавить',
-                      onPress: () => {
-                        patch((p) => seedMonth(applyImport(p, PLAN_BLOCKS, uid, PLAN_ID), viewY, viewM));
-                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                        closeThen(() => goPage(0));
-                      },
-                    },
-                  ]);
-                }}
+                style={[styles.actBtn, { backgroundColor: accent }, !canParse && { opacity: 0.45 }]}
+                onPress={() => canParse && doParse()}
               >
-                <Text style={[styles.actBtnTxt, styles.onAccent]}>
-                  {pv.add.length ? `Добавить ${pv.add.length}` : 'Всё уже добавлено'}
-                </Text>
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
               </ScaleButton>
+              <Text style={styles.hint}>
+                Строки вида «15 октября - 5075 Мбанк ✅», «15 окт 5075 Мбанк», «15.10 – 5 075 Мбанк». Заголовки «Расходы
+                Ноябрь» и «… зарплата 30 октября» не обязательны — каждая строка с датой попадёт под свою зарплату. Год —
+                ближайший к сегодняшнему дню. ✅ — уже оплачено.
+              </Text>
             </>
           ),
         };
@@ -3420,8 +3710,6 @@ export default function App() {
 
       case 'stats': {
         const left = earnedAll - spent;
-        const unexpSum = unexp.reduce((a, e) => a + Number(e.amount || 0), 0);
-        const recSum = rec.reduce((a, e) => a + Number(e.amount || 0), 0);
         return {
           title: 'Результаты',
           onClose: toSettings,
@@ -3443,17 +3731,9 @@ export default function App() {
                   <Text style={styles.lKey}>Заработано</Text>
                   <Text style={[styles.lVal, styles.good]}>{money(earnedAll)}</Text>
                 </View>
-                <View style={[styles.lRow, styles.lRowSep]}>
+                <View style={styles.lRow}>
                   <Text style={styles.lKey}>Оплачено всего</Text>
                   <Text style={styles.lVal}>{money(spent)}</Text>
-                </View>
-                <View style={[styles.lRow, styles.lRowSep]}>
-                  <Text style={styles.lKey}>· постоянные</Text>
-                  <Text style={styles.lVal}>{money(recSum)}</Text>
-                </View>
-                <View style={styles.lRow}>
-                  <Text style={styles.lKey}>· непредвиденные</Text>
-                  <Text style={styles.lVal}>{money(unexpSum)}</Text>
                 </View>
               </ItemCard>
               <Text style={styles.hint}>Учитываются расходы со статусом «✓ оплачено» и все смены с суммой.</Text>
@@ -3632,9 +3912,11 @@ export default function App() {
             </ScaleButton>
           </View>
         )}
-        <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={() => setSheet('add')}>
-          <Text style={[styles.plus, { color: '#102012' }]}>+</Text>
-        </ScaleButton>
+        <View ref={addBtnRef} collapsable={false}>
+          <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={onPlus}>
+            <Text style={[styles.plus, { color: '#102012' }]}>+</Text>
+          </ScaleButton>
+        </View>
       </View>
 
       {/* Все три вкладки живут смонтированными, скрытые — display:'none'.
@@ -3803,6 +4085,7 @@ export default function App() {
 
       <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
       <IslandMenu arc={arc} />
+      <AddMenu visible={!!addMenu && page === 0} anchor={addMenu} items={addItems} accent={accent} onClose={closeAddMenu} />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
@@ -4048,6 +4331,27 @@ const styles = StyleSheet.create({
   tgEdge: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.32)' },
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
   menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
+  addMenuBack: { backgroundColor: 'rgba(0,0,0,0.18)' },
+  addMenuBox: { position: 'absolute', width: ADD_MENU_W, transformOrigin: 'top right' },
+  addMenu: { width: ADD_MENU_W, paddingVertical: 4 },
+  addMenuRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 11, paddingHorizontal: 14 },
+  addMenuIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  warnCard: {
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 14,
+    backgroundColor: 'rgba(255,159,10,0.13)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,159,10,0.4)',
+  },
+  warnTxt: { color: 'rgba(255,214,160,0.95)', fontSize: 14, lineHeight: 19 },
+  warnLink: { fontSize: 15, fontWeight: '700', marginTop: 8 },
+  unparsedTxt: { flex: 1, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13 },
+  impTag: { color: 'rgba(235,235,245,0.7)', fontSize: 12, fontWeight: '700', marginLeft: 8 },
+  notesInput: { minHeight: 150, maxHeight: 340, paddingTop: 14, fontSize: 15, lineHeight: 20 },
+  notesBtns: { flexDirection: 'row', gap: 10 },
+  notesBtn: { flex: 1, backgroundColor: 'rgba(255,255,255,0.1)' },
+  notesBack: { marginBottom: 10 },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
   islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {
