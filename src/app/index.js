@@ -23,6 +23,7 @@ import { StatusBar } from 'expo-status-bar';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Alert,
+    AppState,
     Dimensions, ImageBackground,
     KeyboardAvoidingView,
     Modal,
@@ -54,6 +55,19 @@ import Animated, {
     withTiming
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
+import {
+    CALC_GROUPS,
+    CALC_ITEMS,
+    CALC_KEY,
+    DEFAULT_RATES,
+    DEFAULT_STAFF,
+    RATE_FIELDS,
+    computeCalc,
+    hasCounts,
+    itemTotal,
+    ownPay,
+    shiftTitle,
+} from '../lib/calc';
 
 // expo-glass-effect — опционально
 let GlassView = null;
@@ -894,6 +908,357 @@ function AnalysisView({ state }) {
   );
 }
 
+// ───────────────────────── Расчёт смены ─────────────────────────
+
+const fmtNumF = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 3 });
+const fmtNum = (n) => fmtNumF.format(Number(n) || 0);
+const ROLE_LABELS = ['Рядовой', 'Кассир'];
+const TIME_LABELS = ['День', 'Ночь'];
+const EMPTY_COUNTS = {};
+const ITEMS_BY_GROUP = CALC_GROUPS.reduce((acc, g) => {
+  acc[g.id] = CALC_ITEMS.filter((it) => it.group === g.id);
+  return acc;
+}, {});
+const roleLabel = (role, time) =>
+  `${role === 'ryad' ? 'Рядовой' : 'Кассир'} · ${time === 'day' ? 'день' : 'ночь'}`;
+
+function normalizeCalc(raw) {
+  const c = raw && typeof raw === 'object' ? raw : {};
+  return {
+    v: 1,
+    rates: { ...DEFAULT_RATES, ...(c.rates || {}) },
+    prefs: { role: 'kass', time: 'night', ...(c.prefs || {}) },
+    days: c.days && typeof c.days === 'object' ? c.days : {},
+  };
+}
+function blankDay(prefs) {
+  return {
+    counts: EMPTY_COUNTS,
+    staff: DEFAULT_STAFF,
+    role: prefs.role,
+    time: prefs.time,
+    mentor: false,
+    stops: false,
+  };
+}
+const talliesOf = (v) => (Array.isArray(v) && v.length ? v.map((x) => Number(x) || 0) : [itemTotal(v)]);
+
+/** Числовое поле: тап — ввод с клавиатуры, пустое = 0; внешние ± сразу видны. */
+function NumInput({ value, onChange, style }) {
+  const [draft, setDraft] = useState(null);
+  const v = Number(value) || 0;
+  const shown = draft !== null && (Number(draft) || 0) === v ? draft : v ? String(v) : '';
+  return (
+    <TextInput
+      style={style}
+      keyboardType="number-pad"
+      selectTextOnFocus
+      maxLength={5}
+      value={shown}
+      placeholder="0"
+      placeholderTextColor="rgba(235,235,245,0.3)"
+      onFocus={() => setDraft(v ? String(v) : '')}
+      onBlur={() => setDraft(null)}
+      onChangeText={(t) => {
+        const d = t.replace(/[^0-9]/g, '');
+        setDraft(d);
+        onChange(Number(d) || 0);
+      }}
+    />
+  );
+}
+
+const CountRow = memo(function CountRow({ item, tallies, last, onStep, onSet, onOpen }) {
+  const total = itemTotal(tallies);
+  const multi = Array.isArray(tallies) && tallies.length > 1;
+  return (
+    <View style={[styles.cRow, !last && styles.cRowSep]}>
+      <Pressable style={styles.cName} onPress={() => onOpen(item.id)}>
+        <Text style={[styles.cNameTxt, total > 0 && styles.cNameOn]} numberOfLines={1}>
+          {item.name}
+        </Text>
+        {multi && (
+          <Text style={styles.cTallies} numberOfLines={1}>
+            {tallies.map((n) => Number(n) || 0).join(' + ')}
+          </Text>
+        )}
+      </Pressable>
+      <ScaleButton style={styles.stepBtn} onPress={() => onStep(item.id, -1)}>
+        <Text style={styles.stepTxt}>−</Text>
+      </ScaleButton>
+      {multi ? (
+        <Pressable style={styles.cCount} onPress={() => onOpen(item.id)}>
+          <Text style={styles.cCountTxt}>{total}</Text>
+        </Pressable>
+      ) : (
+        <NumInput value={total} onChange={(n) => onSet(item.id, n)} style={[styles.cCount, styles.cCountTxt]} />
+      )}
+      <ScaleButton style={styles.stepBtn} onPress={() => onStep(item.id, 1)}>
+        <Text style={styles.stepTxt}>+</Text>
+      </ScaleButton>
+    </View>
+  );
+});
+
+function CheckRow({ checked, label, amount, accent, onToggle }) {
+  const s = useSharedValue(1);
+  const anim = useAnimatedStyle(() => ({ transform: [{ scale: s.value }] }));
+  return (
+    <Pressable
+      style={styles.checkRow}
+      onPress={() => {
+        Haptics.selectionAsync();
+        s.value = withSequence(withTiming(0.86, { duration: 70 }), withSpring(1, capSpring));
+        onToggle();
+      }}
+    >
+      <Animated.View style={[styles.checkBox, checked && { backgroundColor: accent, borderColor: accent }, anim]}>
+        {checked && <Text style={styles.checkMark}>✓</Text>}
+      </Animated.View>
+      <Text style={[styles.setL, { flex: 1 }]}>{label}</Text>
+      <Text style={[styles.checkSum, checked && { color: '#fff' }]}>+{money(amount)}</Text>
+    </Pressable>
+  );
+}
+
+function CalcView({
+  calc, date, day, accent, shiftOnDate,
+  onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onAddShift,
+}) {
+  const [collapsed, setCollapsed] = useState({});
+  const [showUsage, setShowUsage] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  const res = useMemo(() => computeCalc(day.counts, calc.rates, day.staff), [day.counts, calc.rates, day.staff]);
+  const own = ownPay(res, calc.rates, day);
+  const ownR = Math.round(own);
+  const filled = hasCounts(day.counts);
+  const inShifts = !!shiftOnDate && Number(shiftOnDate.amount) === ownR;
+
+  const saved = useMemo(
+    () =>
+      Object.keys(calc.days)
+        .filter((d) => hasCounts(calc.days[d].counts))
+        .sort((a, b) => b.localeCompare(a))
+        .map((d) => {
+          const x = calc.days[d];
+          const r = computeCalc(x.counts, calc.rates, x.staff);
+          return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
+        }),
+    [calc.days, calc.rates]
+  );
+
+  const toggleGroup = (id) => {
+    Haptics.selectionAsync();
+    setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+  };
+
+  return (
+    <>
+      <DateWheel value={date} onChange={onDate} label="Дата смены" />
+
+      <Glass style={styles.balance} intensity={42}>
+        <Text style={styles.period}>Моя зарплата</Text>
+        <Text style={styles.paySub}>
+          {roleLabel(day.role, day.time)} · {fmtShort(date)}
+        </Text>
+        <Text style={[styles.bigPay, { color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+          {money(own)}
+        </Text>
+        <Text style={styles.calcMeta}>
+          {res.positions} поз. × {money(calc.rates.perItem)} = {money(res.output)} · на {res.people} чел.
+        </Text>
+        <View style={styles.calcSegs}>
+          <View style={{ flex: 1 }}>
+            <SegmentCapsule value={day.role === 'ryad' ? 0 : 1} labels={ROLE_LABELS} height={46} onChange={onRole} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <SegmentCapsule value={day.time === 'day' ? 0 : 1} labels={TIME_LABELS} height={46} onChange={onTime} />
+          </View>
+        </View>
+        <CheckRow
+          checked={!!day.mentor}
+          label="Наставник"
+          amount={calc.rates.mentor}
+          accent={accent}
+          onToggle={() => onPatchDay((d) => ({ ...d, mentor: !d.mentor }))}
+        />
+        <CheckRow
+          checked={!!day.stops}
+          label="Мал. остановки"
+          amount={calc.rates.stops}
+          accent={accent}
+          onToggle={() => onPatchDay((d) => ({ ...d, stops: !d.stops }))}
+        />
+        <View style={styles.staffRow}>
+          <Text style={[styles.setL, { flex: 1 }]}>Сотрудники</Text>
+          <ScaleButton
+            style={styles.stepBtn}
+            onPress={() => onPatchDay((d) => ({ ...d, staff: Math.max(1, (Number(d.staff) || DEFAULT_STAFF) - 1) }))}
+          >
+            <Text style={styles.stepTxt}>−</Text>
+          </ScaleButton>
+          <Text style={[styles.cCountTxt, styles.staffNum]}>{res.people}</Text>
+          <ScaleButton
+            style={styles.stepBtn}
+            onPress={() => onPatchDay((d) => ({ ...d, staff: Math.min(30, (Number(d.staff) || DEFAULT_STAFF) + 1) }))}
+          >
+            <Text style={styles.stepTxt}>+</Text>
+          </ScaleButton>
+        </View>
+      </Glass>
+
+      {filled && (
+        <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
+          <ScaleButton
+            style={[styles.actBtn, inShifts ? styles.statusPaidBtn : { backgroundColor: accent }]}
+            onPress={() => onAddShift(ownR, shiftTitle(day.role, day.time))}
+          >
+            <Text style={[styles.actBtnTxt, !inShifts && { color: '#102012' }]}>
+              {inShifts ? '✓  В сменах' : `Добавить в смены · ${money(ownR)}`}
+            </Text>
+          </ScaleButton>
+        </Animated.View>
+      )}
+      <Animated.View style={styles.calcBtns} layout={ROW_LAYOUT}>
+        <ScaleButton style={[styles.actBtn, { flex: 1 }]} onPress={onOpenRates}>
+          <Text style={styles.actBtnTxt}>Ставки</Text>
+        </ScaleButton>
+        <ScaleButton style={[styles.actBtn, { flex: 1 }]} onPress={onReset}>
+          <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Сбросить</Text>
+        </ScaleButton>
+      </Animated.View>
+
+      <Animated.View layout={ROW_LAYOUT}>
+        <Text style={[styles.hint, { paddingHorizontal: 6 }]}>
+          − / + или тап по числу. Тап по названию — несколько подсчётов (например, 59 + 98).
+        </Text>
+      </Animated.View>
+
+      {CALC_GROUPS.map((g) => {
+        const items = ITEMS_BY_GROUP[g.id];
+        const sum = items.reduce((a, it) => a + itemTotal(day.counts[it.id]), 0);
+        const closed = !!collapsed[g.id];
+        return (
+          <Animated.View key={g.id} style={styles.group} layout={ROW_LAYOUT}>
+            <Pressable style={styles.gHead} onPress={() => toggleGroup(g.id)}>
+              <Text style={styles.gTitle}>
+                {g.title}
+                {g.note ? <Text style={styles.gSub}>{`  ${g.note}`}</Text> : null}
+              </Text>
+              {sum > 0 && <Text style={styles.gSub}>{fmtNum(sum)}</Text>}
+              <Text style={[styles.chevMini, !closed && styles.chevOpen]}>›</Text>
+            </Pressable>
+            {!closed && (
+              <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT}>
+                <ItemCard>
+                  {items.map((it, i) => (
+                    <CountRow
+                      key={it.id}
+                      item={it}
+                      tallies={day.counts[it.id]}
+                      last={i === items.length - 1}
+                      onStep={onStep}
+                      onSet={onSet}
+                      onOpen={onOpenItem}
+                    />
+                  ))}
+                </ItemCard>
+              </Animated.View>
+            )}
+          </Animated.View>
+        );
+      })}
+
+      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
+        <View style={styles.gHead}>
+          <Text style={styles.gTitle}>Итог по позициям</Text>
+          <Text style={styles.gSub}>единица {fmtNum(res.unit)}</Text>
+        </View>
+        <ItemCard style={styles.sumCard}>
+          {res.summary
+            .filter((s) => s.inTotal || s.value > 0)
+            .map((s) => (
+              <View key={s.label} style={styles.sumRow}>
+                <Text style={[styles.sumL, !s.inTotal && styles.sumDim]}>
+                  {s.label}
+                  {!s.inTotal ? ' · не в общем' : ''}
+                </Text>
+                <Text style={styles.sumV}>{fmtNum(s.value)}</Text>
+              </View>
+            ))}
+          <View style={[styles.sumRow, styles.sumTotal]}>
+            <Text style={styles.totalL}>Общее</Text>
+            <Text style={styles.totalV}>{fmtNum(res.total)}</Text>
+          </View>
+        </ItemCard>
+      </Animated.View>
+
+      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
+        <Pressable
+          style={styles.gHead}
+          onPress={() => {
+            Haptics.selectionAsync();
+            setShowUsage((v) => !v);
+          }}
+        >
+          <Text style={styles.gTitle}>Расход ингредиентов</Text>
+          <Text style={styles.gSub}>{showUsage ? 'скрыть' : 'показать'}</Text>
+          <Text style={[styles.chevMini, showUsage && styles.chevOpen]}>›</Text>
+        </Pressable>
+        {showUsage && (
+          <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT}>
+            <ItemCard style={styles.sumCard}>
+              {res.usage.map((u) => (
+                <View key={u.label} style={[styles.sumRow, u.label === 'Единица' && styles.sumTotal]}>
+                  <Text style={u.label === 'Единица' ? styles.totalL : styles.sumL}>{u.label}</Text>
+                  <Text style={u.label === 'Единица' ? styles.totalV : styles.sumV}>{fmtNum(u.value)}</Text>
+                </View>
+              ))}
+            </ItemCard>
+          </Animated.View>
+        )}
+      </Animated.View>
+
+      {saved.length > 0 && (
+        <Animated.View style={styles.group} layout={ROW_LAYOUT}>
+          <View style={styles.gHead}>
+            <Text style={styles.gTitle}>Сохранённые расчёты</Text>
+            <Text style={styles.gSub}>{saved.length}</Text>
+          </View>
+          {(showAll ? saved : saved.slice(0, 7)).map((s) => (
+            <ScaleButton
+              key={s.date}
+              style={[styles.setItem, s.date === date && { borderColor: accent }]}
+              onPress={() => onDate(s.date)}
+            >
+              <View>
+                <Text style={styles.setL}>
+                  {fmtShort(s.date)} {s.date.slice(0, 4)}
+                </Text>
+                <Text style={styles.setS}>
+                  {roleLabel(s.role, s.time)} · {s.positions} поз.
+                </Text>
+              </View>
+              <Text style={[styles.itemTitle, s.date === date && { color: accent }]}>{money(s.pay)}</Text>
+            </ScaleButton>
+          ))}
+          {saved.length > 7 && (
+            <Pressable onPress={() => setShowAll((v) => !v)} hitSlop={8}>
+              <Text style={[styles.link, styles.showAll, { color: accent }]}>
+                {showAll ? 'Свернуть' : 'Показать все'}
+              </Text>
+            </Pressable>
+          )}
+        </Animated.View>
+      )}
+      <Animated.View layout={ROW_LAYOUT}>
+        <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
+      </Animated.View>
+    </>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState(0);
@@ -903,6 +1268,119 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
   const [pulse, setPulse] = useState({ id: null, t: 0 });
+
+  // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
+  const [calc, setCalc] = useState(null);
+  const [calcDate, setCalcDate] = useState(todayIso);
+  const [calcItem, setCalcItem] = useState(null);
+  const calcDateRef = useRef(calcDate);
+  calcDateRef.current = calcDate;
+  const calcTimer = useRef(null);
+  const calcPending = useRef(null);
+
+  const flushCalc = useCallback(() => {
+    if (calcTimer.current) clearTimeout(calcTimer.current);
+    calcTimer.current = null;
+    const data = calcPending.current;
+    calcPending.current = null;
+    if (data) AsyncStorage.setItem(CALC_KEY, JSON.stringify(data)).catch(() => {});
+  }, []);
+  const patchCalc = useCallback(
+    (fn) => {
+      setCalc((prev) => {
+        if (!prev) return prev;
+        const next = fn(prev);
+        if (next !== prev) {
+          // частые +/− пишем пачкой
+          calcPending.current = next;
+          if (calcTimer.current) clearTimeout(calcTimer.current);
+          calcTimer.current = setTimeout(flushCalc, 300);
+        }
+        return next;
+      });
+    },
+    [flushCalc]
+  );
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s !== 'active') flushCalc();
+    });
+    return () => {
+      sub.remove();
+      flushCalc();
+    };
+  }, [flushCalc]);
+
+  /** Изменить расчёт текущей даты (prefs — запомнить роль/смену по умолчанию). */
+  const patchDay = useCallback(
+    (fn, prefs) => {
+      const date = calcDateRef.current;
+      patchCalc((p) => {
+        const d = p.days[date] || blankDay(p.prefs);
+        const nd = fn(d);
+        if (nd === d && !prefs) return p;
+        return {
+          ...p,
+          prefs: prefs ? { ...p.prefs, ...prefs } : p.prefs,
+          days: { ...p.days, [date]: { ...nd, updated: Date.now() } },
+        };
+      });
+    },
+    [patchCalc]
+  );
+  const editTallies = useCallback(
+    (id, fn) =>
+      patchDay((d) => {
+        const cur = talliesOf(d.counts[id]);
+        const next = fn([...cur]);
+        if (!next || (next.length === cur.length && next.every((x, i) => x === cur[i]))) return d;
+        return { ...d, counts: { ...d.counts, [id]: next } };
+      }),
+    [patchDay]
+  );
+  const stepTally = useCallback(
+    (id, delta, idx) =>
+      editTallies(id, (t) => {
+        const i = idx == null ? t.length - 1 : idx;
+        t[i] = Math.max(0, t[i] + delta);
+        return t;
+      }),
+    [editTallies]
+  );
+  const setTally = useCallback(
+    (id, n, idx) =>
+      editTallies(id, (t) => {
+        t[idx || 0] = Math.max(0, Number(n) || 0);
+        return t;
+      }),
+    [editTallies]
+  );
+  const onCalcStep = useCallback((id, d) => stepTally(id, d), [stepTally]);
+  const onCalcSet = useCallback((id, n) => setTally(id, n, 0), [setTally]);
+  const openCalcItem = useCallback((id) => {
+    Haptics.selectionAsync();
+    setCalcItem(id);
+    setSheet('calcItem');
+  }, []);
+  const onCalcRole = useCallback(
+    (i) => {
+      const role = i === 0 ? 'ryad' : 'kass';
+      patchDay((d) => (d.role === role ? d : { ...d, role }), { role });
+    },
+    [patchDay]
+  );
+  const onCalcTime = useCallback(
+    (i) => {
+      const time = i === 0 ? 'day' : 'night';
+      patchDay((d) => (d.time === time ? d : { ...d, time }), { time });
+    },
+    [patchDay]
+  );
+  const calcDay = useMemo(
+    () => (calc ? calc.days[calcDate] || blankDay(calc.prefs) : null),
+    [calc, calcDate]
+  );
+
 
   useEffect(() => {
     (async () => {
@@ -916,6 +1394,14 @@ export default function App() {
       // досеиваем стартовый месяц до первого рендера списка
       const seeded = seedMonth(loaded, INIT_Y, INIT_M);
       if (seeded !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(seeded)).catch(() => {});
+      let calcLoaded;
+      try {
+        const rawC = await AsyncStorage.getItem(CALC_KEY);
+        calcLoaded = normalizeCalc(rawC ? JSON.parse(rawC) : null);
+      } catch {
+        calcLoaded = normalizeCalc(null);
+      }
+      setCalc(calcLoaded);
       setState(seeded);
     })();
   }, []);
@@ -1081,6 +1567,67 @@ export default function App() {
       </View>
     );
   }
+
+  const openCalcRates = () => {
+    setForm({ rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, String(calc.rates[k] ?? '')])) });
+    setSheet('calcRates');
+  };
+  const saveCalcRates = () => {
+    const fr = form.rates || {};
+    patchCalc((p) => ({
+      ...p,
+      rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, Number(fr[k]) || 0])),
+    }));
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSheet(null);
+  };
+  const resetCalc = () => {
+    const date = calcDate;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    Alert.alert('Сбросить расчёт?', `Все подсчёты за ${fmtShort(date)} будут удалены.`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Сбросить',
+        style: 'destructive',
+        onPress: () =>
+          patchCalc((p) => {
+            if (!p.days[date]) return p;
+            const days = { ...p.days };
+            delete days[date];
+            return { ...p, days };
+          }),
+      },
+    ]);
+  };
+  const shiftOnCalcDate = state.shifts.find((s) => s.date === calcDate) || null;
+  /** Своя зарплата из расчёта → смена на ту же дату (новая или обновить сумму). */
+  const addCalcShift = (amount, title) => {
+    const date = calcDate;
+    const apply = () => {
+      const per = workPeriod(paydayOnOrBefore(addDays(date, 20)));
+      patch((prev) => {
+        const shifts = [...prev.shifts];
+        const i = shifts.findIndex((s) => s.date === date);
+        if (i >= 0) shifts[i] = { ...shifts[i], amount, title };
+        else shifts.push({ id: uid(), date, amount, title, payday: per.payday });
+        return { ...prev, shifts, removed: prev.removed.filter((x) => x !== date) };
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    };
+    const ex = shiftOnCalcDate;
+    if (ex && ex.amount != null && ex.amount !== '' && Number(ex.amount) !== amount) {
+      Alert.alert(
+        'Заменить сумму смены?',
+        `${fmtShort(date)}: ${money(ex.amount)} → ${money(amount)}`,
+        [
+          { text: 'Отмена', style: 'cancel' },
+          { text: 'Заменить', onPress: apply },
+        ]
+      );
+    } else if (!(ex && Number(ex.amount) === amount && ex.title === title)) {
+      apply();
+    }
+  };
 
   const saveExpense = () => {
     const amount = Number(form.amount) || 0;
@@ -1586,6 +2133,114 @@ export default function App() {
           ),
         };
 
+      case 'calcItem': {
+        const it = CALC_ITEMS.find((x) => x.id === calcItem);
+        const t = calcDay ? talliesOf(calcDay.counts[calcItem]) : [0];
+        return {
+          title: it ? it.name : '',
+          onClose: closeSheet,
+          right: (
+            <Pressable onPress={closeSheet}>
+              <Text style={[styles.link, { color: accent }]}>Готово</Text>
+            </Pressable>
+          ),
+          body: (
+            <LayoutAnimationConfig skipEntering>
+              <View>
+                <Text style={styles.hint}>Подсчёты складываются. Например, 59 + 98.</Text>
+                {t.map((n, i) => (
+                  <Animated.View key={i} style={styles.tallyRow} entering={ROW_ENTER} layout={ROW_LAYOUT}>
+                    <Text style={[styles.setL, { flex: 1 }]}>Подсчёт {i + 1}</Text>
+                    <ScaleButton style={styles.stepBtn} onPress={() => stepTally(calcItem, -1, i)}>
+                      <Text style={styles.stepTxt}>−</Text>
+                    </ScaleButton>
+                    <NumInput
+                      value={n}
+                      onChange={(v) => setTally(calcItem, v, i)}
+                      style={[styles.cCount, styles.cCountTxt]}
+                    />
+                    <ScaleButton style={styles.stepBtn} onPress={() => stepTally(calcItem, 1, i)}>
+                      <Text style={styles.stepTxt}>+</Text>
+                    </ScaleButton>
+                    {t.length > 1 ? (
+                      <Pressable
+                        hitSlop={10}
+                        onPress={() => editTallies(calcItem, (x) => x.filter((_, j) => j !== i))}
+                      >
+                        <Text style={styles.tallyDel}>✕</Text>
+                      </Pressable>
+                    ) : (
+                      <View style={{ width: 18 }} />
+                    )}
+                  </Animated.View>
+                ))}
+                <Animated.View layout={ROW_LAYOUT}>
+                  <View style={[styles.segRow, { marginVertical: 8 }]}>
+                    {[5, 10, 20, 50].map((n) => (
+                      <ScaleButton key={n} style={styles.chip} onPress={() => stepTally(calcItem, n)}>
+                        <Text style={styles.chipTxt}>+{n}</Text>
+                      </ScaleButton>
+                    ))}
+                  </View>
+                  <ScaleButton style={styles.actBtn} onPress={() => editTallies(calcItem, (x) => [...x, 0])}>
+                    <Text style={styles.actBtnTxt}>Добавить подсчёт</Text>
+                  </ScaleButton>
+                  <View style={styles.totalLine}>
+                    <Text style={styles.totalL}>Всего</Text>
+                    <Text style={styles.totalV}>{fmtNum(itemTotal(t))}</Text>
+                  </View>
+                </Animated.View>
+              </View>
+            </LayoutAnimationConfig>
+          ),
+        };
+      }
+
+      case 'calcRates':
+        return {
+          title: 'Ставки',
+          onClose: closeSheet,
+          right: (
+            <Pressable onPress={saveCalcRates}>
+              <Text style={[styles.link, { color: accent }]}>Готово</Text>
+            </Pressable>
+          ),
+          body: (
+            <>
+              <Text style={styles.hint}>
+                Выработка = позиции × ставка, делится на сотрудников. Наставник и остановки добавляются,
+                только если отмечены галочкой.
+              </Text>
+              {RATE_FIELDS.map(([k, label]) => (
+                <View key={k} style={styles.field}>
+                  <Text style={styles.label}>{label}</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="number-pad"
+                    value={form.rates?.[k] ?? ''}
+                    onChangeText={(t) =>
+                      setForm((f) => ({ ...f, rates: { ...f.rates, [k]: t.replace(/[^0-9]/g, '') } }))
+                    }
+                    placeholder="0"
+                    placeholderTextColor="rgba(235,235,245,0.3)"
+                  />
+                </View>
+              ))}
+              <ScaleButton
+                style={styles.actBtn}
+                onPress={() =>
+                  setForm((f) => ({
+                    ...f,
+                    rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, String(DEFAULT_RATES[k])])),
+                  }))
+                }
+              >
+                <Text style={styles.actBtnTxt}>Вернуть стандартные</Text>
+              </ScaleButton>
+            </>
+          ),
+        };
+
       default:
         return { title: '', onClose: closeSheet, body: null };
     }
@@ -1608,14 +2263,20 @@ export default function App() {
 
       <View style={styles.header}>
         <View style={styles.monthWrap}>
-          <ScaleButton style={styles.navHit} onPress={() => goMonth(-1)}>
+          <ScaleButton
+            style={styles.navHit}
+            onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, -1)) : goMonth(-1))}
+          >
             <Text style={styles.navTxt}>‹</Text>
           </ScaleButton>
           <View style={styles.monthBlock}>
-            <Text style={styles.eyebrow}>{page === 0 ? 'Расходы' : 'Смены'}</Text>
-            <Text style={styles.h1}>{MONTHS[viewM]}</Text>
+            <Text style={styles.eyebrow}>{DOCK_LABELS[page]}</Text>
+            <Text style={styles.h1}>{page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}</Text>
           </View>
-          <ScaleButton style={styles.navHit} onPress={() => goMonth(1)}>
+          <ScaleButton
+            style={styles.navHit}
+            onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, 1)) : goMonth(1))}
+          >
             <Text style={styles.navTxt}>›</Text>
           </ScaleButton>
         </View>
@@ -1628,10 +2289,17 @@ export default function App() {
         style={styles.pages}
         contentContainerStyle={styles.pagesContent}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets
       >
         {/* при смене страницы/месяца — без анимаций входа/выхода всего списка;
             анимируются только добавление/удаление строк внутри */}
-        <LayoutAnimationConfig key={`${page}-${viewY}-${viewM}`} skipEntering skipExiting>
+        <LayoutAnimationConfig
+          key={page === 2 ? 'calc' : `${page}-${viewY}-${viewM}`}
+          skipEntering
+          skipExiting
+        >
           <View>
             {page === 0 ? (
               <>
@@ -1690,7 +2358,7 @@ export default function App() {
                   );
                 })}
               </>
-            ) : (
+            ) : page === 1 ? (
               periodsTouchingMonth(viewY, viewM).map((per) => {
                 const list = state.shifts
                   .filter((s) => s.date >= per.start && s.date <= per.end)
@@ -1741,6 +2409,27 @@ export default function App() {
                   </Animated.View>
                 );
               })
+            ) : (
+              calc &&
+              calcDay && (
+                <CalcView
+                  calc={calc}
+                  date={calcDate}
+                  day={calcDay}
+                  accent={accent}
+                  shiftOnDate={shiftOnCalcDate}
+                  onDate={setCalcDate}
+                  onPatchDay={patchDay}
+                  onRole={onCalcRole}
+                  onTime={onCalcTime}
+                  onStep={onCalcStep}
+                  onSet={onCalcSet}
+                  onOpenItem={openCalcItem}
+                  onOpenRates={openCalcRates}
+                  onReset={resetCalc}
+                  onAddShift={addCalcShift}
+                />
+              )
             )}
           </View>
         </LayoutAnimationConfig>
@@ -1770,7 +2459,7 @@ export default function App() {
   return <GestureHandlerRootView style={{ flex: 1 }}>{content}</GestureHandlerRootView>;
 }
 
-const DOCK_LABELS = ['Расходы', 'Смены'];
+const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#050507' },
@@ -2170,4 +2859,66 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
    paddingVertical: 12,
   },
+
+  // Расчёт
+  bigPay: { fontSize: 52, fontWeight: '800', letterSpacing: -1.6, marginTop: 10 },
+  calcMeta: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
+  calcSegs: { flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 6 },
+  calcBtns: { flexDirection: 'row', gap: 10 },
+  checkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  checkBox: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkMark: { color: '#102012', fontSize: 16, fontWeight: '800', marginTop: -1 },
+  checkSum: { color: 'rgba(235,235,245,0.42)', fontSize: 15, fontWeight: '650' },
+  staffRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 8 },
+  staffNum: { minWidth: 40, textAlign: 'center' },
+  cRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, paddingLeft: 14, paddingRight: 8 },
+  cRowSep: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.07)' },
+  cName: { flex: 1, minWidth: 0, paddingVertical: 4 },
+  cNameTxt: { color: 'rgba(235,235,245,0.62)', fontSize: 16, fontWeight: '600' },
+  cNameOn: { color: '#fff' },
+  cTallies: { color: 'rgba(235,235,245,0.4)', fontSize: 12, marginTop: 2 },
+  stepBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepTxt: { color: '#fff', fontSize: 22, fontWeight: '500', marginTop: -2 },
+  cCount: {
+    width: 58,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+    padding: 0,
+  },
+  cCountTxt: { color: '#fff', fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  chevOpen: { transform: [{ rotate: '90deg' }] },
+  sumCard: { paddingHorizontal: 14, paddingVertical: 6 },
+  sumRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
+  },
+  sumTotal: { borderBottomWidth: 0, paddingTop: 10 },
+  sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15 },
+  sumDim: { color: 'rgba(235,235,245,0.4)' },
+  sumV: { color: '#fff', fontSize: 15, fontWeight: '650', fontVariant: ['tabular-nums'] },
+  tallyRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
+  tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
+  showAll: { textAlign: 'center', paddingVertical: 8 },
 });
