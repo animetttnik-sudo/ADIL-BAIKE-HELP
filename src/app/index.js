@@ -58,7 +58,6 @@ import Animated, {
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import {
-    CALC_GROUPS,
     CALC_ITEMS,
     CALC_KEY,
     DEFAULT_RATES,
@@ -985,10 +984,7 @@ const fmtNum = (n) => fmtNumF.format(Number(n) || 0);
 const ROLE_LABELS = ['Рядовой', 'Кассир'];
 const TIME_LABELS = ['День', 'Ночь'];
 const EMPTY_COUNTS = {};
-const ITEMS_BY_GROUP = CALC_GROUPS.reduce((acc, g) => {
-  acc[g.id] = CALC_ITEMS.filter((it) => it.group === g.id);
-  return acc;
-}, {});
+const CALC_ORDER = CALC_ITEMS.map((it) => it.id);
 const roleLabel = (role, time) =>
   `${role === 'ryad' ? 'Рядовой' : 'Кассир'} · ${time === 'day' ? 'день' : 'ночь'}`;
 
@@ -1067,6 +1063,11 @@ const CountRow = memo(function CountRow({
         <Text style={[styles.cNameTxt, total > 0 && styles.cNameOn]} numberOfLines={1}>
           {item.name}
         </Text>
+        {!multi && !!item.note && (
+          <Text style={styles.cTallies} numberOfLines={1}>
+            {item.note}
+          </Text>
+        )}
         {multi && (
           <Text style={styles.cTallies} numberOfLines={1}>
             {t.map((n) => Number(n) || 0).join(' + ')} = {total}
@@ -1223,17 +1224,13 @@ const CalcView = memo(function CalcView({
   calc, date, day, accent, linkedShift, manualOnDate, scrollRef, scrollY, scrollTop,
   onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onShowShift,
 }) {
-  const [collapsed, setCollapsed] = useState({});
   const [showUsage, setShowUsage] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
-  // ── ввод с клавиатуры: Далее → следующая позиция (свёрнутые группы пропускаем)
+  // ── ввод с клавиатуры: Далее / ↑ идут по списку сверху вниз, как строки в Excel
   const inputs = useRef(new Map());
   const focusRef = useRef(null);
-  const order = useMemo(
-    () => CALC_GROUPS.filter((g) => !collapsed[g.id]).flatMap((g) => ITEMS_BY_GROUP[g.id].map((it) => it.id)),
-    [collapsed]
-  );
+  const order = CALC_ORDER;
   const orderRef = useRef(order);
   orderRef.current = order;
   const register = useCallback((id, r) => {
@@ -1310,10 +1307,6 @@ const CalcView = memo(function CalcView({
     [calc.days, calc.rates]
   );
 
-  const toggleGroup = (id) => {
-    Haptics.selectionAsync();
-    setCollapsed((c) => ({ ...c, [id]: !c[id] }));
-  };
 
   return (
     <>
@@ -1405,47 +1398,34 @@ const CalcView = memo(function CalcView({
         </Text>
       </Animated.View>
 
-      {CALC_GROUPS.map((g) => {
-        const items = ITEMS_BY_GROUP[g.id];
-        const sum = items.reduce((a, it) => a + itemTotal(day.counts[it.id]), 0);
-        const closed = !!collapsed[g.id];
-        return (
-          <Animated.View key={g.id} style={styles.group} layout={ROW_LAYOUT}>
-            <Pressable style={styles.gHead} onPress={() => toggleGroup(g.id)}>
-              <Text style={styles.gTitle}>
-                {g.title}
-                {g.note ? <Text style={styles.gSub}>{`  ${g.note}`}</Text> : null}
-              </Text>
-              {sum > 0 && <Text style={styles.gSub}>{fmtNum(sum)}</Text>}
-              <Text style={[styles.chevMini, !closed && styles.chevOpen]}>›</Text>
-            </Pressable>
-            {!closed && (
-              <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT}>
-                <ItemCard>
-                  {items.map((it, i) => (
-                    <CountRow
-                      key={it.id}
-                      item={it}
-                      tallies={day.counts[it.id]}
-                      last={i === items.length - 1}
-                      isLastField={order[order.length - 1] === it.id}
-                      pos={order.indexOf(it.id)}
-                      count={order.length}
-                      accent={accent}
-                      onStep={onStep}
-                      onSet={onSet}
-                      onOpen={onOpenItem}
-                      register={register}
-                      onFocusItem={onFocusItem}
-                      onNext={onNext}
-                    />
-                  ))}
-                </ItemCard>
-              </Animated.View>
-            )}
-          </Animated.View>
-        );
-      })}
+      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
+        <View style={styles.gHead}>
+          <Text style={styles.gTitle}>Позиции · как в таблице</Text>
+          <Text style={styles.gSub}>
+            {fmtNum(CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0))}
+          </Text>
+        </View>
+        <ItemCard>
+          {CALC_ITEMS.map((it, i) => (
+            <CountRow
+              key={it.id}
+              item={it}
+              tallies={day.counts[it.id]}
+              last={i === CALC_ITEMS.length - 1}
+              isLastField={i === CALC_ITEMS.length - 1}
+              pos={i}
+              count={CALC_ITEMS.length}
+              accent={accent}
+              onStep={onStep}
+              onSet={onSet}
+              onOpen={onOpenItem}
+              register={register}
+              onFocusItem={onFocusItem}
+              onNext={onNext}
+            />
+          ))}
+        </ItemCard>
+      </Animated.View>
 
       <Animated.View style={styles.group} layout={ROW_LAYOUT}>
         <View style={styles.gHead}>

@@ -1,7 +1,7 @@
 // node --test tests/   — сверка с Excel-калькулятором на его же примерах
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { computeCalc, ownPay, DEFAULT_RATES, itemTotal } from '../src/lib/calc.js';
+import { computeCalc, ownPay, DEFAULT_RATES, itemTotal, CALC_ITEMS } from '../src/lib/calc.js';
 
 // Входные данные листа (C3..C45; D42=59, D43=98 — второй подсчёт)
 const SAMPLE = {
@@ -66,4 +66,19 @@ test('кофе не влияет на зарплату; сотрудники и 
   assert.equal(r.output, 632 * 12);
   assert.equal(itemTotal([59, '98', -3, 'x']), 157);
   assert.equal(computeCalc({}, DEFAULT_RATES, 3).pay.kassNight, 400 + 400 + 140 + 200);
+});
+
+test('позиции идут одним списком строго в порядке строк Excel (B3…B45, затем I18–I20)', () => {
+  assert.deepEqual(
+    CALC_ITEMS.map((it) => it.name),
+    [
+      'best burger', 'best cheese', 'PRIME', 'SPECIAL', 'Биг Говядина', 'Биг Курица', 'КП', 'ГП ОМ', 'ГП',
+      'КП ОМ', 'Гиппер', 'ГП ДВ', 'КП ДВ', 'ГС ДВ', 'КС ДВ', 'Криспи', 'Не Острые 4шт', 'Не Острые 8шт',
+      'Острые 4шт', 'Острые 8шт', 'Самсы Гов 4шт', 'Самсы Гов 8шт', 'Самсы Кур 4шт', 'Самсы Кур 8шт',
+      'Курица Сыр', 'Стикенсы 4шт', 'Стикенсы 8шт', 'Тести говядина', 'Тести курица', 'Фри',
+      'Хот Дог класс', 'Хот Дог сырный', 'КС', 'ГС', 'Чизмакс', 'Чили', 'Кофе', 'Какао', 'Зерн.кофе',
+    ]
+  );
+  assert.equal(new Set(CALC_ITEMS.map((it) => it.id)).size, CALC_ITEMS.length);
+  assert.ok(CALC_ITEMS.every((it) => !('group' in it)));
 });

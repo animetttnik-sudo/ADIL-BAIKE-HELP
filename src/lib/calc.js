@@ -8,62 +8,51 @@
 
 export const CALC_KEY = 'zp_calc_v1';
 
-export const CALC_GROUPS = [
-  { id: 'burgers', title: 'Бургеры' },
-  { id: 'classic', title: 'КП · ГП · КС · ГС' },
-  { id: 'chicken', title: 'Курица и наггетсы' },
-  { id: 'samsa', title: 'Самсы' },
-  { id: 'rolls', title: 'Роллы' },
-  { id: 'fries', title: 'Фри и хот-доги' },
-  { id: 'drinks', title: 'Напитки', note: 'на зарплату не влияют' },
-];
-
+/**
+ * Позиции — ОДНИМ списком строго в порядке строк Excel (Лист1, столбец B, строки 3–45),
+ * подписи как в таблице. Напитки в Excel — отдельные ячейки I18–I20, идут в конце.
+ * Данные zp_calc_v1 хранятся по id (counts[id]), поэтому порядок можно менять свободно.
+ */
 export const CALC_ITEMS = [
-  { id: 'bb', name: 'best burger', group: 'burgers' },
-  { id: 'bc', name: 'best cheese', group: 'burgers' },
-  { id: 'prime', name: 'PRIME', group: 'burgers' },
-  { id: 'special', name: 'SPECIAL', group: 'burgers' },
-  { id: 'bigG', name: 'Биг Говядина', group: 'burgers' },
-  { id: 'bigK', name: 'Биг Курица', group: 'burgers' },
-  { id: 'gipper', name: 'Гиппер', group: 'burgers' },
-  { id: 'crispy', name: 'Криспи', group: 'burgers' },
-  { id: 'cheesemax', name: 'Чизмакс', group: 'burgers' },
-  { id: 'chili', name: 'Чили', group: 'burgers' },
-
-  { id: 'kp', name: 'КП', group: 'classic' },
-  { id: 'gp', name: 'ГП', group: 'classic' },
-  { id: 'kpOm', name: 'КП ОМ', group: 'classic' },
-  { id: 'gpOm', name: 'ГП ОМ', group: 'classic' },
-  { id: 'kpDv', name: 'КП ДВ', group: 'classic' },
-  { id: 'gpDv', name: 'ГП ДВ', group: 'classic' },
-  { id: 'ks', name: 'КС', group: 'classic' },
-  { id: 'gs', name: 'ГС', group: 'classic' },
-  { id: 'ksDv', name: 'КС ДВ', group: 'classic' },
-  { id: 'gsDv', name: 'ГС ДВ', group: 'classic' },
-
-  { id: 'mild4', name: 'Не Острые 4шт', group: 'chicken' },
-  { id: 'mild8', name: 'Не Острые 8шт', group: 'chicken' },
-  { id: 'hot4', name: 'Острые 4шт', group: 'chicken' },
-  { id: 'hot8', name: 'Острые 8шт', group: 'chicken' },
-  { id: 'st4', name: 'Стикенсы 4шт', group: 'chicken' },
-  { id: 'st8', name: 'Стикенсы 8шт', group: 'chicken' },
-
-  { id: 'sg4', name: 'Самсы Гов 4шт', group: 'samsa' },
-  { id: 'sg8', name: 'Самсы Гов 8шт', group: 'samsa' },
-  { id: 'sk4', name: 'Самсы Кур 4шт', group: 'samsa' },
-  { id: 'sk8', name: 'Самсы Кур 8шт', group: 'samsa' },
-  { id: 'kurSyr', name: 'Курица Сыр', group: 'samsa' },
-
-  { id: 'tg', name: 'Тести говядина', group: 'rolls' },
-  { id: 'tk', name: 'Тести курица', group: 'rolls' },
-
-  { id: 'fri', name: 'Фри', group: 'fries' },
-  { id: 'hdClassic', name: 'Хот Дог класс', group: 'fries' },
-  { id: 'hdCheese', name: 'Хот Дог сырный', group: 'fries' },
-
-  { id: 'coffee', name: 'Кофе', group: 'drinks' },
-  { id: 'cocoa', name: 'Какао', group: 'drinks' },
-  { id: 'beans', name: 'Зерн.кофе', group: 'drinks' },
+  { id: 'bb', name: 'best burger' }, // B3
+  { id: 'bc', name: 'best cheese' }, // B4
+  { id: 'prime', name: 'PRIME' }, // B5
+  { id: 'special', name: 'SPECIAL' }, // B6
+  { id: 'bigG', name: 'Биг Говядина' }, // B7
+  { id: 'bigK', name: 'Биг Курица' }, // B8
+  { id: 'kp', name: 'КП' }, // B9
+  { id: 'gpOm', name: 'ГП ОМ' }, // B10
+  { id: 'gp', name: 'ГП' }, // B11
+  { id: 'kpOm', name: 'КП ОМ' }, // B12
+  { id: 'gipper', name: 'Гиппер' }, // B13
+  { id: 'gpDv', name: 'ГП ДВ' }, // B14
+  { id: 'kpDv', name: 'КП ДВ' }, // B15
+  { id: 'gsDv', name: 'ГС ДВ' }, // B16
+  { id: 'ksDv', name: 'КС ДВ' }, // B17
+  { id: 'crispy', name: 'Криспи' }, // B18
+  { id: 'mild4', name: 'Не Острые 4шт' }, // B20
+  { id: 'mild8', name: 'Не Острые 8шт' }, // B21
+  { id: 'hot4', name: 'Острые 4шт' }, // B22
+  { id: 'hot8', name: 'Острые 8шт' }, // B23
+  { id: 'sg4', name: 'Самсы Гов 4шт' }, // B25
+  { id: 'sg8', name: 'Самсы Гов 8шт' }, // B26
+  { id: 'sk4', name: 'Самсы Кур 4шт' }, // B27
+  { id: 'sk8', name: 'Самсы Кур 8шт' }, // B28
+  { id: 'kurSyr', name: 'Курица Сыр' }, // B29
+  { id: 'st4', name: 'Стикенсы 4шт' }, // B31
+  { id: 'st8', name: 'Стикенсы 8шт' }, // B32
+  { id: 'tg', name: 'Тести говядина' }, // B34
+  { id: 'tk', name: 'Тести курица' }, // B35
+  { id: 'fri', name: 'Фри' }, // B37
+  { id: 'hdClassic', name: 'Хот Дог класс' }, // B39
+  { id: 'hdCheese', name: 'Хот Дог сырный' }, // B40
+  { id: 'ks', name: 'КС' }, // B42
+  { id: 'gs', name: 'ГС' }, // B43
+  { id: 'cheesemax', name: 'Чизмакс' }, // B44
+  { id: 'chili', name: 'Чили' }, // B45
+  { id: 'coffee', name: 'Кофе', note: 'на зарплату не влияет' }, // I18
+  { id: 'cocoa', name: 'Какао', note: 'на зарплату не влияет' }, // I19
+  { id: 'beans', name: 'Зерн.кофе', note: 'на зарплату не влияет' }, // I20
 ];
 
 /** Ставки (строка 114–115 Excel). */
