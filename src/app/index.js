@@ -92,6 +92,7 @@ import {
     shiftTitle,
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
+import { computeBoxes, fmtKg } from '../lib/boxes';
 import {
   KEY,
   ANCHOR,
@@ -2163,15 +2164,30 @@ function CalcSummaryList({ day, rates }) {
 /** «Расход ингредиентов» — в шторке. */
 function CalcUsageList({ day, rates }) {
   const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
+  const boxes = useMemo(() => computeBoxes(day.counts), [day.counts]);
   return (
-    <ItemCard style={styles.sumCard}>
-      {res.usage.map((u) => (
-        <View key={u.label} style={[styles.sumRow, u.label === 'Единица' && styles.sumTotal]}>
-          <Text style={u.label === 'Единица' ? styles.totalL : styles.sumL}>{u.label}</Text>
-          <Text style={u.label === 'Единица' ? styles.totalV : styles.sumV}>{fmtNum(u.value)}</Text>
-        </View>
-      ))}
-    </ItemCard>
+    <View>
+      <ItemCard style={styles.sumCard}>
+        {res.usage.map((u) => (
+          <View key={u.label} style={[styles.sumRow, u.label === 'Единица' && styles.sumTotal]}>
+            <Text style={u.label === 'Единица' ? styles.totalL : styles.sumL}>{u.label}</Text>
+            <Text style={u.label === 'Единица' ? styles.totalV : styles.sumV}>{fmtNum(u.value)}</Text>
+          </View>
+        ))}
+      </ItemCard>
+      <View style={[styles.gHead, styles.boxHead]}>
+        <Text style={styles.gTitle}>Коробки и фри</Text>
+        <Text style={styles.gSub}>порции</Text>
+      </View>
+      <ItemCard style={styles.sumCard}>
+        {boxes.map((b, i) => (
+          <View key={b.key} style={[styles.sumRow, b.gap && styles.boxGap, i === boxes.length - 1 && styles.boxLast]}>
+            <Text style={styles.sumL}>{b.label}</Text>
+            <Text style={styles.sumV}>{b.unit === 'kg' ? fmtKg(b.value) : fmtNum(b.value)}</Text>
+          </View>
+        ))}
+      </ItemCard>
+    </View>
   );
 }
 
@@ -2291,6 +2307,7 @@ const CalcView = memo(function CalcView({
   const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
   const entered = CALC_ITEMS.filter((it) => itemTotal(day.counts[it.id]) > 0).length;
   const usageN = res.usage.filter((u) => u.label !== 'Единица' && u.value > 0).length;
+  const friBoxes = itemTotal(day.counts?.fri);
 
   const saved = useMemo(
     () =>
@@ -2429,7 +2446,7 @@ const CalcView = memo(function CalcView({
           icon="🥫"
           title="Расход ингредиентов"
           big={fmtNum(usageN)}
-          sub={usageN ? 'ингредиентов израсходовано' : 'пока ничего'}
+          sub={usageN ? `ингр. · коробок фри ${fmtNum(friBoxes)}` : 'пока ничего'}
           onPress={() => onOpenSection('calcUse')}
         />
         <CalcTile
@@ -6127,6 +6144,9 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   sumTotal: { borderBottomWidth: 0, paddingTop: 10 },
+  boxHead: { marginTop: 18 },
+  boxGap: { marginTop: 14 },
+  boxLast: { borderBottomWidth: 0 },
   sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15 },
   sumDim: { color: 'rgba(235,235,245,0.4)' },
   sumV: { color: '#fff', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
