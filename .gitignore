@@ -7,3 +7,6 @@ expo.log
 
 expo-env.d.ts
 # @end expo-cli
+
+# EAS Update export output
+dist/

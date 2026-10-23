@@ -24,6 +24,7 @@
     "expo-status-bar": "~57.0.1",
     "expo-symbols": "~57.0.3",
     "expo-system-ui": "~57.0.4",
+    "expo-updates": "~57.0.26",
     "expo-web-browser": "~57.0.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -46,7 +47,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs"
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs",
+    "publish": "npm test && npx eas-cli@latest update --branch main --environment production --platform all --non-interactive"
   },
   "private": true
 }
