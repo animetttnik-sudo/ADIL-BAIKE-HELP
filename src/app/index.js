@@ -21,7 +21,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
     AppState,
@@ -179,11 +179,27 @@ const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 
 const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
 
+/**
+ * Стекло вкладки. Нативное стекло (GlassView / BlurView), созданное, пока вкладка скрыта
+ * (opacity 0 у TabPane — «Смены» монтируются заранее невидимыми), на iOS так и остаётся
+ * прозрачным. Поэтому: Glass, смонтированный в скрытой вкладке, помечает её dirty, и когда
+ * вкладка полностью проявилась, App поднимает epoch → нативный вид пересоздаётся уже видимым.
+ * Вне вкладок (док, шторки, меню) контекста нет — ничего не меняется.
+ */
+const PaneGlassCtx = createContext(null);
+
 /** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
 function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false }) {
+  const pane = useContext(PaneGlassCtx);
+  useEffect(() => {
+    if (pane && !pane.shown.current) pane.dirty.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pane && pane.epoch]);
+  const ep = pane ? pane.epoch : 0;
   if (LG && GlassView) {
     return (
       <GlassView
+        key={ep}
         glassEffectStyle="regular"
         colorScheme="dark"
         tintColor={tint}
@@ -198,7 +214,7 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
   const r = StyleSheet.flatten(style)?.borderRadius;
   return (
     <View style={[styles.glassBase, style]}>
-      <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+      <BlurView key={ep} intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
       <View style={styles.glassFill} pointerEvents="none" />
       {tint ? (
         <View style={[StyleSheet.absoluteFill, { backgroundColor: tintFallback || tint }]} pointerEvents="none" />
@@ -1143,7 +1159,7 @@ const TAB_FADE = { duration: 180, easing: Easing.inOut(Easing.quad) };
  * Yoga заново раскладывает всё дерево вкладки в кадре переключения, это и был «лаг»).
  * Видимость/сдвиг — только shared values на UI-потоке.
  */
-const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
+const TabPane = memo(function TabPane({ vis, x, active, reduce, glass, children }) {
   const st = useAnimatedStyle(() => {
     const v = vis.value;
     return {
@@ -1158,7 +1174,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      {children}
+      <PaneGlassCtx.Provider value={glass}>{children}</PaneGlassCtx.Provider>
     </Animated.View>
   );
 });
@@ -2420,6 +2436,27 @@ export default function App() {
   // Расчёт/Смены монтируем заранее (после загрузки, в простое), а если
   // вкладку открыли раньше — после анимации плашки, а не во время неё.
   const [mounted, setMounted] = useState({ 0: true });
+  // стекло вкладок: shown — вкладка полностью видна; dirty — стекло создано, пока была скрыта
+  const paneShown = useRef([{ current: true }, { current: false }, { current: false }]).current;
+  const paneDirty = useRef([{ current: false }, { current: false }, { current: false }]).current;
+  const [paneEpoch, setPaneEpoch] = useState([0, 0, 0]);
+  const paneGlass = useMemo(
+    () => [0, 1, 2].map((i) => ({ epoch: paneEpoch[i], shown: paneShown[i], dirty: paneDirty[i] })),
+    [paneEpoch, paneShown, paneDirty]
+  );
+  // скрытые вкладки сразу «не видны»; показанная — «видна», когда доиграло проявление (TAB_IN),
+  // и если пока она была скрыта в ней создалось стекло — пересоздать его (epoch + 1)
+  useEffect(() => {
+    for (let i = 0; i < 3; i++) if (i !== page) paneShown[i].current = false;
+    const t = setTimeout(() => {
+      paneShown[page].current = true;
+      if (paneDirty[page].current) {
+        paneDirty[page].current = false;
+        setPaneEpoch((e) => e.map((v, i) => (i === page ? v + 1 : v)));
+      }
+    }, TAB_IN.duration + 60);
+    return () => clearTimeout(t);
+  }, [page, paneShown, paneDirty]);
   const mountedRef = useRef(mounted);
   mountedRef.current = mounted;
   // Переход вкладок: у каждой своя видимость и сдвиг (shared values). Новая
@@ -4534,7 +4571,7 @@ export default function App() {
           mainScrollTop.current = e.nativeEvent.layout.y;
         }}
       >
-        <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion}>
+        <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion} glass={paneGlass[0]}>
           <PayPager
             pos={pagePos}
             cur={pageCur}
@@ -4548,7 +4585,7 @@ export default function App() {
         </TabPane>
 
         {mounted[1] && (
-          <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion}>
+          <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion} glass={paneGlass[1]}>
             <PayPager
               pos={shiftPos}
               cur={shiftCur}
@@ -4564,7 +4601,7 @@ export default function App() {
         )}
 
         {mounted[2] && (
-          <TabPane vis={tabSV[2][0]} x={tabSV[2][1]} active={page === 2} reduce={reduceMotion}>
+          <TabPane vis={tabSV[2][0]} x={tabSV[2][1]} active={page === 2} reduce={reduceMotion} glass={paneGlass[2]}>
           <ScrollView
             style={styles.pages}
             contentContainerStyle={styles.pagesContent}
