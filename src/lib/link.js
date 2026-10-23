@@ -13,11 +13,12 @@
  *  • пустая заготовка на эту дату перенимается (а не дублируется);
  *  • ручная смена С суммой не трогается никогда — остаются обе;
  *  • недостача (shortage) живёт на смене: пересчёт её не меняет, сброс расчёта не теряет
- *    (излишек — отрицательная недостача — так же);
+ *    (излишек — отрицательная недостача — так же; отметка наставника mentor — тоже);
  *  • в один день может быть две смены (день + ночь, напр. из импорта заметки): расчёт дня
  *    перенимает пустую смену С ТЕМ ЖЕ временем (день/ночь), и только если такой нет — любую пустую.
  */
 import { computeCalc, hasCounts, ownPay, shiftTitle } from './calc.js';
+import { adjOf, withShortage } from './shifts.js';
 
 export const CALC_TITLES = ['день ряд', 'ночь ряд', 'день касса', 'ночь касса'];
 export const isLinkedShift = (s) => !!s && s.source === 'calc';
@@ -70,7 +71,7 @@ export function syncCalcShifts(app, calc, paydayFor, makeId) {
       // была заготовкой → вернуть заготовку; с недостачей — остаётся днём без суммы
       // (недостача — реальный долг, расчёт её не отменяет); иначе смена просто уходит
       if (s.calcFrom) out.push({ ...unlink(s), title: s.calcFrom.title, amount: null });
-      else if (Number(s.shortage)) out.push({ ...unlink(s), amount: null });
+      else if (Number(s.shortage) || Number(s.mentor)) out.push({ ...unlink(s), amount: null });
       continue;
     }
     linked.add(d);
@@ -120,4 +121,60 @@ export function syncCalcShifts(app, calc, paydayFor, makeId) {
     changed = true;
   }
   return changed ? { ...app, shifts: out } : app;
+}
+
+const timeOfTitle = (s) =>
+  /^\s*день/i.test(s?.title || '') ? 'day' : /^\s*ночь/i.test(s?.title || '') ? 'night' : null;
+
+/**
+ * Смена, к которой относится день расчёта (date, time 'day'|'night') — тот же порядок, что
+ * перенимает syncCalcShifts: связанная смена этой даты → пустая смена этой даты того же
+ * времени → любая пустая смена этой даты. null — такой нет.
+ * Недостача/излишек дня в «Расчёте» — ЭТО поле shortage этой смены (одна копия, не в zp_calc_v1).
+ */
+export function shiftForCalcDay(shifts, date, time) {
+  const list = (shifts || []).filter(Boolean);
+  const t = time === 'day' ? 'day' : 'night';
+  return (
+    list.find((s) => isLinkedShift(s) && (s.calcDate || s.date) === date) ||
+    list.find((s) => !isLinkedShift(s) && s.date === date && noAmount(s.amount) && timeOfTitle(s) === t) ||
+    list.find((s) => !isLinkedShift(s) && s.date === date && noAmount(s.amount)) ||
+    null
+  );
+}
+
+/** Недостача дня расчёта со знаком (> 0 недостача, < 0 излишек) — читается со смены. */
+export const calcDayAdj = (shifts, date, time) => adjOf(shiftForCalcDay(shifts, date, time));
+
+/**
+ * Записать недостачу/излишек дня расчёта в смену (ту же, что читает calcDayAdj).
+ * Смены нет → создаётся пустая смена этой даты (роль/время дня, без суммы, adjFromCalc) —
+ * расчёт потом её перенимает (недостача остаётся на ней). Обнулили на такой созданной
+ * пустой смене → она убирается. Сумму смены не трогает никогда.
+ * @param day { role, time } дня расчёта
+ */
+export function withCalcDayAdj(app, date, day, value, paydayFor, makeId) {
+  if (!app || !Array.isArray(app.shifts)) return app;
+  const time = day && day.time === 'day' ? 'day' : 'night';
+  const s = shiftForCalcDay(app.shifts, date, time);
+  if (!s) {
+    const tmp = withShortage({}, value);
+    if (!tmp.shortage) return app;
+    const removed = Array.isArray(app.removed) ? app.removed.filter((d) => d !== date) : app.removed;
+    const ns = {
+      id: makeId(),
+      date,
+      title: shiftTitle(day && day.role === 'ryad' ? 'ryad' : 'kass', time),
+      amount: null,
+      payday: paydayFor(date),
+      shortage: tmp.shortage,
+      adjFromCalc: true,
+    };
+    return { ...app, removed, shifts: [...app.shifts, ns] };
+  }
+  const next = withShortage(s, value);
+  if (next === s) return app;
+  if (!next.shortage && next.adjFromCalc && !isLinkedShift(next) && noAmount(next.amount) && !next.place && !Number(next.mentor))
+    return { ...app, shifts: app.shifts.filter((x) => x !== s) };
+  return { ...app, shifts: app.shifts.map((x) => (x === s ? next : x)) };
 }

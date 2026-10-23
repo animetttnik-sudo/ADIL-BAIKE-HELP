@@ -47,7 +47,7 @@ test('недостача: сумма смены не меняется, вычи�
     { id: 'd', date: '2026-10-13', amount: 1000, source: 'calc' },
   ];
   const t = shiftTotals(list);
-  assert.deepEqual(t, { earned: 6500, short: 500, surplus: 0, carry: 0, net: 6000, count: 4, withSum: 3, fromCalc: 1, shortCount: 2, surplusCount: 0 });
+  assert.deepEqual(t, { earned: 6500, mentor: 0, short: 500, surplus: 0, carry: 0, net: 6000, count: 4, withSum: 3, fromCalc: 1, shortCount: 2, surplusCount: 0, mentorCount: 0 });
   assert.equal(list[1].amount, '2500'); // не мутируем
   assert.equal(shiftNet(list[1]), 2100);
   assert.equal(netForPayday(list, '2026-10-30'), 6000);
@@ -72,7 +72,7 @@ test('withShortage: пусто/0 убирает поле, тот же объек
 test('zp_app_v1: старые смены без поля shortage грузятся и считаются как 0', () => {
   const old = { settings: { mode: 'work' }, expenses: [], shifts: [{ id: 'o', date: '2026-10-11', title: 'ночь касса', amount: '3000', payday: '2026-10-30' }] };
   const app = normalizeApp(JSON.parse(JSON.stringify(old)));
-  assert.deepEqual(shiftTotals(shiftsInPeriod(app.shifts, '2026-10-30')), { earned: 3000, short: 0, surplus: 0, carry: 0, net: 3000, count: 1, withSum: 1, fromCalc: 0, shortCount: 0, surplusCount: 0 });
+  assert.deepEqual(shiftTotals(shiftsInPeriod(app.shifts, '2026-10-30')), { earned: 3000, mentor: 0, short: 0, surplus: 0, carry: 0, net: 3000, count: 1, withSum: 1, fromCalc: 0, shortCount: 0, surplusCount: 0, mentorCount: 0 });
   // и обратно: shortage — просто доп. поле, JSON его хранит
   const saved = JSON.parse(JSON.stringify({ ...app, shifts: [withShortage(app.shifts[0], 500)] }));
   assert.equal(normalizeApp(saved).shifts[0].shortage, 500);

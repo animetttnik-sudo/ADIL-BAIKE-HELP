@@ -5,7 +5,7 @@
  *   Первая половина                ← просто подпись
  *   21 - ночь касса 22 - ночь касса    ← смены, можно несколько в строке
  *   26 - день Аламедин рядовой     ← место — между временем и ролью
- *   27 - ночь касса - 2430         ← недостача 2430;  «+300» — излишек;  «касса -» — без суммы
+ *   27 - ночь касса - 2430         ← недостача 2430;  «+300» — наставник (доплата);  «касса -» — без суммы
  *   -3927 с прошлой зп             ← недостача с прошлой зарплаты → на зарплату этого блока
  *
  * Месяц диапазона — у последнего дня; первый день больше последнего → предыдущий месяц.
@@ -76,11 +76,12 @@ const num = (s) => Number(String(s).replace(/[ \u00a0]/g, ''));
 
 /**
  * @returns {{
- *   blocks: { header, payday, headerPayday, start, end, carry, shifts: {date,time,role,title,place,adj,text}[] }[],
+ *   blocks: { header, payday, headerPayday, start, end, carry, shifts: {date,time,role,title,place,adj,mentor,text}[] }[],
  *   unparsed: { text, why }[],
  *   warnings: string[],
  * }}
- *   adj — недостача со знаком (> 0 недостача, < 0 излишек, 0 — нет);
+ *   adj — недостача (> 0, «- 2430»; 0 — нет). Импорт излишек не создаёт никогда;
+ *   mentor — «+300» после смены: наставник, доплата (0 — нет);
  *   payday — зарплата приложения для смен блока (paydayForDate конца периода),
  *   headerPayday — как в заметке.
  */
@@ -179,13 +180,14 @@ export function parseShifts(text, { ref = new Date() } = {}) {
       }
       const t = /^д/i.test(time) ? 'day' : 'night';
       const r = /^р/i.test(role) ? 'ryad' : 'kass';
-      const adj = n ? (sign === '+' ? -1 : 1) * num(n) : 0;
+      const adj = n && sign !== '+' ? num(n) : 0;
+      const mentor = n && sign === '+' ? num(n) : 0;
       const pl = (place || '').trim();
       if (cur.shifts.some((s) => s.date === date && s.time === t)) {
         warnings.push(`${fmt(date)} ${time}: в заметке дважды — взята первая строка.`);
         return ' ';
       }
-      cur.shifts.push({ date, time: t, role: r, title: shiftTitle(r, t), place: pl, adj, text: all.trim() });
+      cur.shifts.push({ date, time: t, role: r, title: shiftTitle(r, t), place: pl, adj, mentor, text: all.trim() });
       return ' ';
     });
 

@@ -5,9 +5,14 @@
  * (то же правило, что paydayForDate и строка «заработано» в «Расходах»).
  *
  * Недостача — необязательное поле смены `shortage` (сом, со знаком): > 0 — недостача,
- * < 0 — излишек. Сумму самой смены не меняет: показывается отдельно и только
- * уменьшает (недостача) или увеличивает (излишек) итог зарплаты.
+ * < 0 — излишек. Сумму самой смены не меняет: недостача уменьшает итог зарплаты.
+ * Излишек — только для сведения (его забирает работодатель): к выплате НЕ прибавляется
+ * и недостачу не перекрывает. Цвет недостачи смены: < 500 — зелёная, ≥ 500 — красная.
  * Недостача «с прошлой зп» — на уровне зарплаты: state.carry = { [payday]: сом } (> 0 — минус к выплате).
+ * Наставник — поле смены `mentor` (сом > 0, из заметки «+300»): доплата за наставничество.
+ * Пока у смены нет суммы, она прибавляется к заработку зарплаты. Как только сумма есть
+ * (из «Расчёта», где наставник уже входит в оплату, или вписана вручную) — не считается
+ * отдельно, чтобы не было двойного счёта.
  * Старые сохранения без полей читаются как 0.
  */
 import { ANCHOR, PAYDAYS, paydayForDate, workPeriod } from './periods.js';
@@ -26,8 +31,19 @@ export const adjOf = (s) => signed(s?.shortage);
 export const shortageOf = (s) => Math.max(0, adjOf(s));
 /** Излишек смены (положительное число). */
 export const surplusOf = (s) => Math.max(0, -adjOf(s));
-/** Чистыми за смену: сумма − недостача + излишек (для месячных итогов «Анализа»). */
-export const shiftNet = (s) => shiftAmount(s) - adjOf(s);
+/** Наставник отмечен (из заметки): сумма доплаты, 0 — нет. */
+export const mentorMark = (s) => Math.max(0, signed(s?.mentor));
+/** Доплата наставника, которая считается сейчас: только пока у смены нет суммы. */
+export const mentorOf = (s) => (hasAmount(s) ? 0 : mentorMark(s));
+/** Чистыми за смену: сумма + наставник − недостача (излишек не считается) — для «Анализа». */
+export const shiftNet = (s) => shiftAmount(s) + mentorOf(s) - shortageOf(s);
+
+/** С какой суммы недостача смены красная (меньше — зелёная). */
+export const SHORT_RED_FROM = 500;
+/** Тон недостачи смены: 'good' (< 500) | 'bad' (≥ 500). */
+export const shortTone = (n) => (Math.abs(Number(n) || 0) >= SHORT_RED_FROM ? 'bad' : 'good');
+/** Перенос с прошлой зп, который вычитается: только недостача (> 0); «излишек» — для сведения. */
+export const carryDue = (c) => Math.max(0, signed(c));
 
 /** Недостача с прошлой зарплаты, перенесённая на зарплату p (> 0 — минус к выплате). */
 export const carryOf = (state, p) => signed(state?.carry?.[p]);
@@ -68,8 +84,9 @@ export function shiftsInPeriod(shifts, p) {
 /**
  * Итоги зарплаты по сменам:
  *  earned  — заработано (суммы смен, недостача их не трогает);
+ *  mentor  — наставник (доплаты смен без суммы); mentorCount — таких смен;
  *  short   — недостача по сменам; surplus — излишек по сменам; carry — недостача с прошлой зп;
- *  net     — к выплате = earned − short + surplus − carry;
+ *  net     — к выплате = earned + mentor − short − carry (carry только > 0; излишек не считается);
  *  count   — смен в периоде; withSum — с суммой; fromCalc — из «Расчёта»;
  *  shortCount / surplusCount — смен с недостачей / излишком.
  */
@@ -81,8 +98,15 @@ export function shiftTotals(list, carry = 0) {
   let fromCalc = 0;
   let shortCount = 0;
   let surplusCount = 0;
+  let mentor = 0;
+  let mentorCount = 0;
   for (const s of list || []) {
     earned += shiftAmount(s);
+    const m = mentorOf(s);
+    if (m) {
+      mentor += m;
+      mentorCount += 1;
+    }
     if (hasAmount(s)) withSum += 1;
     if (s.source === 'calc') fromCalc += 1;
     const a = adjOf(s);
@@ -97,15 +121,17 @@ export function shiftTotals(list, carry = 0) {
   const c = signed(carry);
   return {
     earned,
+    mentor,
     short,
     surplus,
     carry: c,
-    net: earned - short + surplus - c,
+    net: earned + mentor - short - carryDue(c),
     count: (list || []).length,
     withSum,
     fromCalc,
     shortCount,
     surplusCount,
+    mentorCount,
   };
 }
 

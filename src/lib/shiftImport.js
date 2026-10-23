@@ -3,29 +3,33 @@
  *
  * Для каждой смены заметки (дата + день/ночь):
  *  • в приложении есть смена той же даты и того же времени → «уже есть» или «обновить»:
- *    дописываются только пустые поля — недостача/излишек, место; роль (касса/ряд) — только
+ *    дописываются только пустые поля — недостача, наставник, место; роль (касса/ряд) — только
  *    у пустой заготовки. Сумму (тем более из «Расчёта») импорт не трогает никогда;
  *  • иначе на эту дату есть пустая заготовка (без суммы, не из расчёта) → она перенимается;
  *  • иначе → новая смена без суммы (сумма придёт из «Расчёта»).
+ * «+300» после смены — наставник (поле mentor), НЕ излишек: импорт излишек не создаёт никогда.
+ * Старый импорт (до этой правки) записывал «+300» как излишек (shortage −300, imp: 'notes') —
+ * такая смена переводится в наставника (излишек убирается).
  * Недостача «с прошлой зп» → state.carry[зарплата блока], если там пусто.
  * clear: пустые заготовки «ночь касса» в периодах блоков на днях, которых нет в заметке, убираются
  * (дата → removed, чтобы не досеялись снова).
  * Повторный импорт той же заметки ничего не меняет.
  */
 import { paydayForDate, workPeriod } from './periods.js';
-import { adjOf, carryOf, shiftRole, shiftTime } from './shifts.js';
+import { adjOf, carryOf, mentorMark, shiftRole, shiftTime } from './shifts.js';
 
 const noAmount = (s) => s.amount === null || s.amount === undefined || s.amount === '';
 const linked = (s) => s && s.source === 'calc';
 /** Пустая заготовка: без суммы, не из расчёта, без недостачи, не из импорта. */
-export const isPlaceholder = (s) => !linked(s) && noAmount(s) && !adjOf(s) && !s.place && !s.imp;
+export const isPlaceholder = (s) => !linked(s) && noAmount(s) && !adjOf(s) && !mentorMark(s) && !s.place && !s.imp;
 
 /**
  * @returns {{
  *   rows: { p, kind: 'add'|'shortage'|'update'|'same', existing, patch, conflict, sameDate }[],
+ *     (patch.shortage === null — убрать поле: старый «излишек» из импорта стал наставником)
  *   carry: { payday, value, kind: 'add'|'same', existing }[],
  *   clear: object[],
- *   paydays: { payday, count, short, surplus, carry, add, upd, same }[],
+ *   paydays: { payday, count, short, mentor, carry, add, upd, same }[],
  *   changes: number,
  * }}
  */
@@ -71,10 +75,19 @@ export function previewShiftImport(state, parsed, { clear = true } = {}) {
       }
       if (p.place && !e.place) patch.place = p.place;
       let conflict = null;
+      const pm = p.mentor || 0;
+      // старый импорт: «+N» записан как излишек −N → это наставник, излишек убрать
+      const legacy = pm && e.imp === 'notes' && adjOf(e) === -pm && !mentorMark(e);
+      if (legacy) patch.shortage = null;
       if (p.adj) {
         const a = adjOf(e);
         if (!a) patch.shortage = p.adj;
         else if (a !== p.adj) conflict = { app: a, note: p.adj };
+      }
+      if (pm) {
+        const m = mentorMark(e);
+        if (!m) patch.mentor = pm;
+        else if (m !== pm) conflict = conflict || { mentor: m, note: pm };
       }
       // роль не совпала у «настоящей» смены (с суммой / из расчёта / из импорта) — не трогаем, только показываем
       if (!isPlaceholder(e) && shiftRole(e) && shiftRole(e) !== p.role) conflict = conflict || { role: e.title };
@@ -82,7 +95,7 @@ export function previewShiftImport(state, parsed, { clear = true } = {}) {
       if (n && !e.imp) patch.imp = 'notes';
       rows.push({
         p,
-        kind: !n ? 'same' : 'shortage' in patch ? 'shortage' : 'update',
+        kind: !n ? 'same' : patch.shortage ? 'shortage' : 'update',
         existing: e,
         patch: n ? patch : null,
         conflict,
@@ -111,12 +124,12 @@ export function previewShiftImport(state, parsed, { clear = true } = {}) {
   }
 
   const P = {};
-  const get = (p) => P[p] || (P[p] = { payday: p, count: 0, short: 0, surplus: 0, carry: 0, add: 0, upd: 0, same: 0, clear: 0 });
+  const get = (p) => P[p] || (P[p] = { payday: p, count: 0, short: 0, mentor: 0, carry: 0, add: 0, upd: 0, same: 0, clear: 0 });
   for (const r of rows) {
     const g = get(paydayForDate(r.p.date));
     g.count += 1;
     if (r.p.adj > 0) g.short += r.p.adj;
-    if (r.p.adj < 0) g.surplus -= r.p.adj;
+    if (r.p.mentor) g.mentor += r.p.mentor;
     if (r.kind === 'add') g.add += 1;
     else if (r.kind === 'same') g.same += 1;
     else g.upd += 1;
@@ -140,14 +153,20 @@ export function applyShiftImport(state, parsed, makeId, opts = {}) {
   if (!pv.changes) return state;
   const patches = new Map(pv.rows.filter((r) => r.patch).map((r) => [r.existing.id, r.patch]));
   const drop = new Set(pv.clear.map((s) => s.id));
-  let shifts = state.shifts.filter((s) => !drop.has(s.id)).map((s) => (patches.has(s.id) ? { ...s, ...patches.get(s.id) } : s));
+  const applyPatch = (s, pt) => {
+    const o = { ...s, ...pt };
+    if (pt.shortage === null) delete o.shortage;
+    return o;
+  };
+  let shifts = state.shifts.filter((s) => !drop.has(s.id)).map((s) => (patches.has(s.id) ? applyPatch(s, patches.get(s.id)) : s));
   const added = new Set();
   for (const r of pv.rows) {
     if (r.kind !== 'add') continue;
     const p = r.p;
     const s = { id: makeId(), date: p.date, title: p.title, amount: null, payday: paydayForDate(p.date), imp: 'notes' };
     if (p.place) s.place = p.place;
-    if (p.adj) s.shortage = p.adj;
+    if (p.adj > 0) s.shortage = p.adj;
+    if (p.mentor) s.mentor = p.mentor;
     shifts.push(s);
     added.add(p.date);
   }
