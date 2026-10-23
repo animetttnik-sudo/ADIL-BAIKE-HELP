@@ -47,7 +47,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs",
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs",
     "publish": "npm test && npx eas-cli@latest update --branch main --message \"$(git log -1 --pretty=%s)\" --environment production --platform all --non-interactive"
   },
   "private": true

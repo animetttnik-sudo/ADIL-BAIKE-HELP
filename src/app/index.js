@@ -94,6 +94,7 @@ import {
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
+import { appKeys, fmtSummary, makeBackup, parseBackup, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
   ANCHOR,
@@ -2846,6 +2847,8 @@ export default function App() {
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
+  const calcRef = useRef(null);
+  calcRef.current = calc;
   const [calcDate, setCalcDate] = useState(todayIso);
   const [calcItem, setCalcItem] = useState(null);
   const calcDateRef = useRef(calcDate);
@@ -3048,8 +3051,9 @@ export default function App() {
   );
 
 
-  useEffect(() => {
-    (async () => {
+  // загрузка всех данных из AsyncStorage в память (при старте и после «Вставить данные»)
+  const loadAll = useCallback(async () => {
+    {
       let loaded;
       try {
         const raw = await AsyncStorage.getItem(KEY);
@@ -3088,9 +3092,12 @@ export default function App() {
       setPi(p0);
       setSi(s0);
       setState(linked);
-    })();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
   const patch = useCallback((fn) => {
     setState((prev) => {
@@ -3358,6 +3365,83 @@ export default function App() {
     [patch]
   );
   const hideToast = useCallback(() => setToast(null), []);
+  // ── Перенос данных: все ключи zp_* одной JSON-строкой через буфер обмена
+  const [backupInfo, setBackupInfo] = useState(null); // { summary, size } последней копии
+  const copyBackup = useCallback(async () => {
+    try {
+      // несохранённые +/− расчёта — сначала на диск
+      if (calcTimer.current) clearTimeout(calcTimer.current);
+      calcTimer.current = null;
+      const pend = calcPending.current;
+      calcPending.current = null;
+      if (pend) await AsyncStorage.setItem(CALC_KEY, JSON.stringify(pend));
+      const keys = appKeys(await AsyncStorage.getAllKeys());
+      const entries = keys.length ? await AsyncStorage.multiGet(keys) : [];
+      const text = makeBackup(entries);
+      const parsed = parseBackup(text);
+      if (!parsed.ok) throw new Error('нечего копировать — данных на этом устройстве нет');
+      await Clipboard.setStringAsync(text);
+      const sum = parsed.summary;
+      setBackupInfo({ summary: sum, size: text.length });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      Alert.alert(
+        'Скопировано',
+        `${fmtSummary(sum)}\n\nОткройте другую версию приложения → ⚙ → «Перенос данных» → «Вставить данные».`
+      );
+    } catch (err) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      Alert.alert('Не получилось скопировать', String(err?.message || err));
+    }
+  }, []);
+  const pasteBackup = useCallback(async () => {
+    let text;
+    try {
+      text = await Clipboard.getStringAsync();
+    } catch {
+      text = '';
+    }
+    const r = parseBackup(text);
+    if (!r.ok) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      return Alert.alert('Не получилось вставить', r.error);
+    }
+    const cur = stateRef.current;
+    const curSum = summarize({
+      zp_app_v1: cur ? JSON.stringify(cur) : undefined,
+      zp_calc_v1: calcRef.current ? JSON.stringify(calcRef.current) : undefined,
+    });
+    const when = r.createdAt ? new Date(r.createdAt) : null;
+    const whenTxt =
+      when && !isNaN(when) ? `\nКопия от ${when.toLocaleDateString('ru-RU')} ${when.toTimeString().slice(0, 5)}` : '';
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+    Alert.alert(
+      'Заменить данные?',
+      `В копии: ${fmtSummary(r.summary)}.${whenTxt}\n\nСейчас на этом устройстве: ${fmtSummary(curSum)} — они будут ЗАМЕНЕНЫ копией.`,
+      [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Заменить',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // отложенная запись расчёта не должна перезаписать вставленное
+              if (calcTimer.current) clearTimeout(calcTimer.current);
+              calcTimer.current = null;
+              calcPending.current = null;
+              const { set, remove } = restorePlan(r.data, await AsyncStorage.getAllKeys());
+              await AsyncStorage.multiSet(set);
+              if (remove.length) await AsyncStorage.multiRemove(remove);
+              await loadAll(); // перечитать в память — без перезапуска
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+              closeThen(() => setToast({ k: Date.now(), text: `Данные перенесены · ${fmtSummary(r.summary)}` }));
+            } catch (err) {
+              Alert.alert('Не получилось вставить', String(err?.message || err));
+            }
+          },
+        },
+      ]
+    );
+  }, [loadAll, closeThen]);
   const undoToast = useCallback(() => {
     const prev = toast?.undo;
     setToast(null);
@@ -4563,6 +4647,7 @@ export default function App() {
       case 'settings': {
         const autoN = autoAddedRecurring(state).length;
         const nav = [
+          { key: 'backup', title: 'Перенос данных', sub: 'скопировать или вставить все данные' },
           { key: 'custom', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
           { key: 'analysis', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
           { key: 'stats', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
@@ -4624,6 +4709,43 @@ export default function App() {
                   </Pressable>
                 ))}
               </ItemCard>
+            </>
+          ),
+        };
+      }
+
+      case 'backup': {
+        const cur = summarize({
+          zp_app_v1: JSON.stringify(state),
+          zp_calc_v1: calc ? JSON.stringify(calc) : undefined,
+        });
+        return {
+          title: 'Перенос данных',
+          onClose: toSettings,
+          body: (
+            <>
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <Text style={styles.k}>На этом устройстве</Text>
+                <Text style={[styles.bigPay, { marginTop: 4, fontSize: 22, color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+                  {fmtSummary(cur)}
+                </Text>
+                <Text style={styles.calcMeta}>
+                  {backupInfo
+                    ? `скопировано в буфер · ${Math.max(1, Math.round(backupInfo.size / 1024))} КБ`
+                    : 'план расходов, смены, расчёты и настройки'}
+                </Text>
+              </ItemCard>
+              <ScaleButton style={[styles.actBtn, { backgroundColor: accent }]} onPress={copyBackup}>
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>Скопировать все данные</Text>
+              </ScaleButton>
+              <ScaleButton style={styles.actBtn} onPress={pasteBackup}>
+                <Text style={styles.actBtnTxt}>Вставить данные</Text>
+              </ScaleButton>
+              <Text style={styles.hint}>
+                Версии приложения (через dev-сервер и опубликованная) хранят данные отдельно. Чтобы перенести: в версии с
+                данными нажмите «Скопировать все данные», затем откройте другую версию → ⚙ → «Перенос данных» →
+                «Вставить данные». Данные в той версии будут заменены копией.
+              </Text>
             </>
           ),
         };
