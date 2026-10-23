@@ -4,24 +4,58 @@
  * Смена даты d относится к зарплате p, если d ∈ workPeriod(p) = [p − 20, p − 7]
  * (то же правило, что paydayForDate и строка «заработано» в «Расходах»).
  *
- * Недостача — необязательное поле смены `shortage` (сом, > 0). Сумму самой смены
- * она не уменьшает: показывается отдельно и вычитается только из итога зарплаты.
- * Старые сохранения без поля читаются как недостача 0.
+ * Недостача — необязательное поле смены `shortage` (сом, со знаком): > 0 — недостача,
+ * < 0 — излишек. Сумму самой смены не меняет: показывается отдельно и только
+ * уменьшает (недостача) или увеличивает (излишек) итог зарплаты.
+ * Недостача «с прошлой зп» — на уровне зарплаты: state.carry = { [payday]: сом } (> 0 — минус к выплате).
+ * Старые сохранения без полей читаются как 0.
  */
 import { ANCHOR, PAYDAYS, paydayForDate, workPeriod } from './periods.js';
 
-const num = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-};
 const hasAmount = (s) => s && s.amount !== null && s.amount !== undefined && s.amount !== '';
 
 /** Сумма смены (пусто → 0). */
 export const shiftAmount = (s) => (hasAmount(s) ? Number(s.amount) || 0 : 0);
-/** Недостача смены (нет поля / мусор → 0). */
-export const shortageOf = (s) => num(s?.shortage);
-/** Чистыми за смену: сумма − недостача (для месячных итогов «Анализа»). */
-export const shiftNet = (s) => shiftAmount(s) - shortageOf(s);
+const signed = (v) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? n : 0;
+};
+/** Поправка смены со знаком: > 0 недостача, < 0 излишек (нет поля / мусор → 0). */
+export const adjOf = (s) => signed(s?.shortage);
+/** Недостача смены (только > 0). */
+export const shortageOf = (s) => Math.max(0, adjOf(s));
+/** Излишек смены (положительное число). */
+export const surplusOf = (s) => Math.max(0, -adjOf(s));
+/** Чистыми за смену: сумма − недостача + излишек (для месячных итогов «Анализа»). */
+export const shiftNet = (s) => shiftAmount(s) - adjOf(s);
+
+/** Недостача с прошлой зарплаты, перенесённая на зарплату p (> 0 — минус к выплате). */
+export const carryOf = (state, p) => signed(state?.carry?.[p]);
+/** Записать перенос на зарплату p (0 / пусто — убрать). */
+export function withCarry(state, p, v) {
+  const n = signed(v);
+  const cur = state.carry && typeof state.carry === 'object' ? state.carry : {};
+  if ((cur[p] || 0) === n) return state;
+  const next = { ...cur };
+  if (n) next[p] = n;
+  else delete next[p];
+  return { ...state, carry: next };
+}
+
+/** День/ночь смены по названию («день касса», «ночь ряд») → 'day' | 'night' | null. */
+export function shiftTime(s) {
+  const t = String(s?.title || '').trim().toLowerCase();
+  if (t.startsWith('день')) return 'day';
+  if (t.startsWith('ночь')) return 'night';
+  return null;
+}
+/** Роль по названию → 'kass' | 'ryad' | null. */
+export function shiftRole(s) {
+  const t = String(s?.title || '').toLowerCase();
+  if (/касс/.test(t)) return 'kass';
+  if (/ряд/.test(t)) return 'ryad';
+  return null;
+}
 
 /** Смены зарплаты p, по дате. */
 export function shiftsInPeriod(shifts, p) {
@@ -33,35 +67,57 @@ export function shiftsInPeriod(shifts, p) {
 
 /**
  * Итоги зарплаты по сменам:
- *  earned — заработано (суммы смен, недостача их не трогает);
- *  short  — недостача за зарплату; net — к выплате = earned − short;
- *  count  — смен в периоде; withSum — с суммой; fromCalc — из «Расчёта»; shortCount — с недостачей.
+ *  earned  — заработано (суммы смен, недостача их не трогает);
+ *  short   — недостача по сменам; surplus — излишек по сменам; carry — недостача с прошлой зп;
+ *  net     — к выплате = earned − short + surplus − carry;
+ *  count   — смен в периоде; withSum — с суммой; fromCalc — из «Расчёта»;
+ *  shortCount / surplusCount — смен с недостачей / излишком.
  */
-export function shiftTotals(list) {
+export function shiftTotals(list, carry = 0) {
   let earned = 0;
   let short = 0;
+  let surplus = 0;
   let withSum = 0;
   let fromCalc = 0;
   let shortCount = 0;
+  let surplusCount = 0;
   for (const s of list || []) {
     earned += shiftAmount(s);
     if (hasAmount(s)) withSum += 1;
     if (s.source === 'calc') fromCalc += 1;
-    const sh = shortageOf(s);
-    if (sh) {
-      short += sh;
+    const a = adjOf(s);
+    if (a > 0) {
+      short += a;
       shortCount += 1;
+    } else if (a < 0) {
+      surplus -= a;
+      surplusCount += 1;
     }
   }
-  return { earned, short, net: earned - short, count: (list || []).length, withSum, fromCalc, shortCount };
+  const c = signed(carry);
+  return {
+    earned,
+    short,
+    surplus,
+    carry: c,
+    net: earned - short + surplus - c,
+    count: (list || []).length,
+    withSum,
+    fromCalc,
+    shortCount,
+    surplusCount,
+  };
 }
 
-/** Чистый заработок зарплаты p (earned − недостача) — его же показывают «Расходы». */
-export const netForPayday = (shifts, p) => shiftTotals(shiftsInPeriod(shifts, p)).net;
+/** Итоги зарплаты p целиком (смены периода + перенос с прошлой зп). */
+export const payTotals = (state, p) => shiftTotals(shiftsInPeriod(state?.shifts, p), carryOf(state, p));
 
-/** Записать недостачу (0 / пусто — поле убирается). */
+/** Чистый заработок зарплаты p — его же показывают «Расходы». carry — перенос с прошлой зп. */
+export const netForPayday = (shifts, p, carry = 0) => shiftTotals(shiftsInPeriod(shifts, p), carry).net;
+
+/** Записать недостачу со знаком (< 0 — излишек; 0 / пусто — поле убирается). */
 export function withShortage(s, v) {
-  const n = Math.round(num(v));
+  const n = v === '' || v == null ? 0 : signed(v);
   if (n) return s.shortage === n ? s : { ...s, shortage: n };
   if (!('shortage' in s)) return s;
   const { shortage: _drop, ...rest } = s;

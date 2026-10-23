@@ -76,6 +76,9 @@ import {
 } from '../lib/totals';
 import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
 import { parsePlan } from '../lib/planParse';
+import { parseShifts } from '../lib/shiftParse';
+import { applyShiftImport, previewShiftImport } from '../lib/shiftImport';
+import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../lib/shiftsNote';
 import {
     CALC_ITEMS,
     CALC_KEY,
@@ -118,8 +121,13 @@ import {
 } from '../lib/periods';
 import { CALC_TITLES, isLinkedShift, syncCalcShifts } from '../lib/link';
 import {
+  adjOf,
+  carryOf,
   netForPayday,
+  payTotals,
   shiftNet,
+  surplusOf,
+  withCarry,
   shiftPagerRange,
   shiftPayday,
   shiftsInPeriod,
@@ -876,7 +884,7 @@ const IslandMenu = memo(function IslandMenu({ arc }) {
 });
 
 /**
- * Маленькое стеклянное меню у кнопки «+» (вкладка «Расходы»). Анимация — на UI-потоке
+ * Маленькое стеклянное меню у кнопки «+» (вкладки «Расходы» и «Смены»). Анимация — на UI-потоке
  * (withTiming без перелёта), стекло видно ступенькой, растёт из угла кнопки. Тап мимо — закрыть.
  */
 const ADD_MENU_W = 248;
@@ -1022,6 +1030,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
   const noSum = item.amount == null || item.amount === '';
   const short = shortageOf(item);
+  const plus = surplusOf(item);
   const linked = item.source === 'calc';
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
@@ -1035,6 +1044,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
           <View style={styles.mid}>
             <Text style={styles.itemTitle} numberOfLines={1}>
               {item.title || 'Смена'}
+              {item.place ? <Text style={styles.placeTxt}> · {item.place}</Text> : null}
             </Text>
             {linked ? (
               <Pressable hitSlop={8} style={styles.calcBadge} onPress={() => onCalc(item.calcDate || item.date)}>
@@ -1048,6 +1058,11 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
             {short ? (
               <Text style={styles.metaShort} numberOfLines={1}>
                 недостача −{money(short)}
+              </Text>
+            ) : null}
+            {plus ? (
+              <Text style={styles.metaPlus} numberOfLines={1}>
+                излишек +{money(plus)}
               </Text>
             ) : null}
           </View>
@@ -1294,6 +1309,10 @@ function AnalysisView({ state, accent }) {
   // заработано за месяц — чистыми, после недостачи
   state.shifts.forEach((x) => {
     get(x.date.slice(0, 7)).e += shiftNet(x);
+  });
+  // недостача с прошлой зп — в месяц последнего дня смен этой зарплаты
+  Object.keys(state.carry || {}).forEach((p) => {
+    get(workPeriod(p).end.slice(0, 7)).e -= carryOf(state, p);
   });
   state.expenses.forEach((x) => {
     if (displayStatus(x) === 'paid') get(x.date.slice(0, 7)).s += Number(x.amount) || 0;
@@ -1967,7 +1986,7 @@ const PayCard = memo(function PayCard({ payday, t, short, accent }) {
       {sv.earned || short ? (
         <Text style={styles.calcMeta}>
           заработано за смены · {sv.earned || '0'}
-          {short ? ` (с учётом недостачи −${money(short)})` : ''}
+          {short > 0 ? ` (с учётом недостачи −${money(short)})` : short < 0 ? ` (с учётом излишка +${money(-short)})` : ''}
         </Text>
       ) : null}
     </Glass>
@@ -2007,9 +2026,14 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, acc
   );
 });
 
-/** Большая карточка зарплаты в «Сменах»: к выплате = заработано − недостача. */
-const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent }) {
+/**
+ * Большая карточка зарплаты в «Сменах»: к выплате = заработано − недостача + излишек − недостача с прошлой зп.
+ * Тап по «Недостаче» — вписать недостачу с прошлой зарплаты.
+ */
+const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) {
   const per = workPeriod(payday);
+  const minus = t.short + t.carry; // всего минусом (смены + с прошлой зп); излишек — отдельно
+  const bad = minus > 0;
   return (
     <Glass style={styles.balance} intensity={42}>
       <View>
@@ -2020,8 +2044,8 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent }) {
           <Text style={styles.paySubL} numberOfLines={1}>
             смены {fmtRange(per.start, per.end)}
           </Text>
-          <View style={[styles.tag, t.short ? styles.tagBad : styles.tagGood]}>
-            <Text style={[styles.tagTxt, t.short ? styles.bad : styles.good]} numberOfLines={1}>
+          <View style={[styles.tag, bad ? styles.tagBad : styles.tagGood]}>
+            <Text style={[styles.tagTxt, bad ? styles.bad : styles.good]} numberOfLines={1}>
               {t.count} {plural(t.count, 'смена', 'смены', 'смен')}
             </Text>
           </View>
@@ -2037,18 +2061,35 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent }) {
       </View>
       <View style={styles.statRow}>
         <Stat k="Заработано" v={money(t.earned)} />
-        <Stat k="Недостача" v={t.short ? `−${money(t.short)}` : '0'} tone={t.short ? 'bad' : undefined} />
+        <Pressable
+          style={({ pressed }) => [styles.stat3, pressed && styles.rowPressed]}
+          hitSlop={6}
+          onPress={() => onCarry && onCarry(payday)}
+        >
+          <Stat k="Недостача ›" v={minus > 0 ? `−${money(minus)}` : minus < 0 ? `+${money(-minus)}` : '0'} tone={minus > 0 ? 'bad' : minus < 0 ? 'good' : undefined} />
+        </Pressable>
         <Stat k="Смен" v={String(t.count)} />
       </View>
       <Text style={styles.calcMeta}>
         с суммой {t.withSum} · из расчёта {t.fromCalc}
         {t.shortCount ? ` · с недостачей ${t.shortCount}` : ''}
       </Text>
+      {t.carry || t.surplus ? (
+        <Text style={styles.calcMeta}>
+          {t.carry ? (
+            <Text style={t.carry > 0 ? styles.bad : styles.good}>
+              {t.carry > 0 ? `с прошлой зп −${money(t.carry)}` : `с прошлой зп +${money(-t.carry)}`}
+            </Text>
+          ) : null}
+          {t.carry && t.surplus ? ' · ' : ''}
+          {t.surplus ? <Text style={styles.good}>излишек +{money(t.surplus)}</Text> : null}
+        </Text>
+      ) : null}
     </Glass>
   );
 });
 
-const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, accent, onEdit, onCalc }) {
+const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2056,13 +2097,13 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, accent, onEdit
       transform: [{ translateX: d * (PAGE_W + PAGE_GAP) }, { scale: 1 - 0.07 * a }],
     };
   });
-  const t = useMemo(() => shiftTotals(list), [list]);
+  const t = useMemo(() => shiftTotals(list, carry), [list, carry]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
-            <ShiftSumCard payday={payday} t={t} accent={accent} />
+            <ShiftSumCard payday={payday} t={t} accent={accent} onCarry={onCarry} />
             {list.length === 0 ? (
               <ItemCard>
                 <Text style={styles.empty}>Смен к этой зарплате нет — «+» вверху</Text>
@@ -2071,8 +2112,8 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, accent, onEdit
               list.map((s) => <ShiftCard key={s.id} item={s} onEdit={onEdit} onCalc={onCalc} accent={accent} />)
             )}
             <Text style={[styles.hint, styles.pageHint]}>
-              Листайте вбок — другие зарплаты. Тап по смене — сумма, недостача или «убрать день». Смены «из расчёта»
-              считаются сами.
+              Листайте вбок — другие зарплаты. Тап по смене — сумма, недостача/излишек или «убрать день». Тап по
+              «Недостаче» в карточке — недостача с прошлой зп. Смены «из расчёта» считаются сами.
             </Text>
           </View>
         </LayoutAnimationConfig>
@@ -2206,6 +2247,20 @@ function newExpenseDate(k) {
   return today >= p && today < nextP ? today : p;
 }
 
+/** Недостача из формы со знаком: «излишек» — минус. */
+function adjFromForm(f, key = 'shortage') {
+  const n = Number(f?.[key]) || 0;
+  return f?.surplus ? -n : n;
+}
+/** Место смены (пусто — поле убирается). */
+function withPlace(s, v) {
+  const t = String(v || '').trim();
+  if (t) return s.place === t ? s : { ...s, place: t };
+  if (!('place' in s)) return s;
+  const { place: _drop, ...rest } = s;
+  return rest;
+}
+
 /** Дата новой смены: сегодня, если сегодня в рабочем периоде показанной зарплаты, иначе его первый день. */
 function newShiftDate(k) {
   const today = todayIso();
@@ -2224,11 +2279,14 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
   const [addMenu, setAddMenu] = useState(null); // { x, y, w, h } кнопки «+» — меню открыто
+  const [menuPage, setMenuPage] = useState(0); // для какой вкладки меню (пункты не меняются, пока закрывается)
   const addBtnRef = useRef(null);
   // импорт из заметок: текст, разобранный результат, замена похожих старых, «все строки»
   const [notes, setNotes] = useState({ text: '', parsed: null });
   const [impReplace, setImpReplace] = useState(true);
   const [impAll, setImpAll] = useState(false);
+  const [shNotes, setShNotes] = useState({ text: '', parsed: null }); // импорт смен: текст и разбор
+  const [impClear, setImpClear] = useState(true); // импорт смен: убрать пустые заготовки
   const [toast, setToast] = useState(null); // { k, text, undo }
   // Расходы: показанная зарплата (индекс в PAYDAYS) + shared values пейджера
   const [pi, setPi] = useState(null);
@@ -2559,22 +2617,22 @@ export default function App() {
     for (let k = si - 1; k <= si + 1; k++) {
       if (k < (shiftRange?.lo ?? 0) || k > (shiftRange?.hi ?? PAYDAYS.length - 1)) continue;
       const p = PAYDAYS[k];
-      out.push({ k, payday: p, list: shiftsInPeriod(state.shifts, p) });
+      out.push({ k, payday: p, list: shiftsInPeriod(state.shifts, p), carry: carryOf(state, p) });
     }
     return out;
-  }, [state?.shifts, si, shiftRange]);
+  }, [state?.shifts, state?.carry, si, shiftRange]);
   const pages = useMemo(() => {
     if (!state || pi == null) return [];
     const out = [];
     for (let k = pi - 1; k <= pi + 1; k++) {
       if (k < (range?.lo ?? 0) || k > (range?.hi ?? PAYDAYS.length - 1)) continue;
       const p = PAYDAYS[k];
-      // заработано за смены — чистыми, после недостачи (как «К выплате» в «Сменах»)
-      const st = shiftTotals(shiftsInPeriod(state.shifts, p));
-      out.push({ k, payday: p, list: expensesInPeriod(state.expenses, p), earned: st.net, short: st.short });
+      // заработано за смены — чистыми (как «К выплате» в «Сменах»): − недостача + излишек − с прошлой зп
+      const st = payTotals(state, p);
+      out.push({ k, payday: p, list: expensesInPeriod(state.expenses, p), earned: st.net, short: st.earned - st.net });
     }
     return out;
-  }, [state?.expenses, state?.shifts, pi, range]);
+  }, [state?.expenses, state?.shifts, state?.carry, pi, range]);
   // Автопереход: отметили последний расход показанной зарплаты → через ~0.9 с следующая.
   // Снятие ✓ в паузе / листание отменяют таймер (смена зависимостей → cleanup).
   const shownMode = useMemo(
@@ -2657,7 +2715,7 @@ export default function App() {
   const earnedForPayday = useCallback(
     (p) => {
       if (!state) return 0;
-      return netForPayday(state.shifts, p);
+      return netForPayday(state.shifts, p, carryOf(state, p));
     },
     [state]
   );
@@ -2692,9 +2750,19 @@ export default function App() {
       amount: s && s.amount != null ? String(s.amount) : '',
       title: s ? s.title : 'ночь касса',
       linked: isLinkedShift(s),
-      shortage: s && shortageOf(s) ? String(shortageOf(s)) : '',
+      shortage: s && adjOf(s) ? String(Math.abs(adjOf(s))) : '',
+      surplus: !!s && adjOf(s) < 0,
+      place: (s && s.place) || '',
     });
     setSheet('shift');
+  }, []);
+  /** Недостача с прошлой зарплаты — на уровне зарплаты p (тап по «Недостаче» в большой карточке). */
+  const openCarry = useCallback((p) => {
+    const v = carryOf(stateRef.current, p);
+    Haptics.selectionAsync();
+    setEditId(null);
+    setForm({ carryP: p, carry: v ? String(Math.abs(v)) : '', surplus: v < 0 });
+    setSheet('carry');
   }, []);
 
   const setStatusDirect = useCallback(
@@ -2822,8 +2890,8 @@ export default function App() {
     [accent, openExpense, toggleStatus, arc]
   );
   const shiftPageProps = useMemo(
-    () => ({ accent, onEdit: openShift, onCalc: openCalcOn }),
-    [accent, openShift, openCalcOn]
+    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry }),
+    [accent, openShift, openCalcOn, openCarry]
   );
 
   if (!state) {
@@ -2912,28 +2980,34 @@ export default function App() {
       if (editId) {
         const i = shifts.findIndex((x) => x.id === editId);
         if (i >= 0)
-          shifts[i] = withShortage(
-            {
-              ...shifts[i],
-              date,
-              amount,
-              title: title || 'ночь касса',
-              payday: p.payday,
-            },
-            form.shortage
+          shifts[i] = withPlace(
+            withShortage(
+              {
+                ...shifts[i],
+                date,
+                amount,
+                title: title || 'ночь касса',
+                payday: p.payday,
+              },
+              adjFromForm(form)
+            ),
+            form.place
           );
       } else {
         removed = removed.filter((x) => x !== date);
         shifts.push(
-          withShortage(
-            {
-              id: uid(),
-              date,
-              amount,
-              title: title || 'ночь касса',
-              payday: p.payday,
-            },
-            form.shortage
+          withPlace(
+            withShortage(
+              {
+                id: uid(),
+                date,
+                amount,
+                title: title || 'ночь касса',
+                payday: p.payday,
+              },
+              adjFromForm(form)
+            ),
+            form.place
           )
         );
       }
@@ -2949,7 +3023,17 @@ export default function App() {
   /** Недостача смены из «Расчёта»: сумма считается там, недостача — своя, здесь. */
   const saveShortage = () => {
     const id = editId;
-    patch((prev) => ({ ...prev, shifts: prev.shifts.map((x) => (x.id === id ? withShortage(x, form.shortage) : x)) }));
+    const v = adjFromForm(form);
+    patch((prev) => ({ ...prev, shifts: prev.shifts.map((x) => (x.id === id ? withShortage(x, v) : x)) }));
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSheet(null);
+  };
+
+  const saveCarry = () => {
+    const p = form.carryP;
+    const v = adjFromForm(form, 'carry');
+    if (!p) return setSheet(null);
+    patch((prev) => withCarry(prev, p, v));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSheet(null);
   };
@@ -2968,8 +3052,11 @@ export default function App() {
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const spent = paid.reduce((a, e) => a + Number(e.amount || 0), 0);
   // заработано за всё время — чистыми, после недостачи (как «К выплате» в «Сменах»)
-  const earnedAll = state.shifts.reduce((a, s) => a + shiftNet(s), 0);
-  const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0);
+  // − недостача по сменам − недостача с прошлой зп + излишек
+  const carryAll = Object.values(state.carry || {}).reduce((a, v) => a + (Math.round(Number(v)) || 0), 0);
+  const earnedAll = state.shifts.reduce((a, s) => a + shiftNet(s), 0) - carryAll;
+  const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0) + Math.max(0, carryAll);
+  const surplusAll = state.shifts.reduce((a, s) => a + surplusOf(s), 0) + Math.max(0, -carryAll);
 
   /**
    * Поле шторки в цепочке «Далее ›»: ref, return-клавиша и своя панель над
@@ -3024,12 +3111,15 @@ export default function App() {
   // ── «+»: на «Расходах» — меню у кнопки, на других вкладках — прежняя шторка
   const closeAddMenu = () => setAddMenu(null);
   const onPlus = () => {
-    if (page !== 0) return setSheet('add');
+    if (page !== 0 && page !== 1) return setSheet('add');
     const v = addBtnRef.current;
     if (!v || typeof v.measureInWindow !== 'function') return setSheet('add');
     try {
       v.measureInWindow((x, y, w, h) => {
-        if ([x, y, w, h].every(Number.isFinite)) setAddMenu({ x, y, w, h });
+        if ([x, y, w, h].every(Number.isFinite)) {
+          setMenuPage(page);
+          setAddMenu({ x, y, w, h });
+        }
         else setSheet('add');
       });
     } catch (err) {
@@ -3043,6 +3133,31 @@ export default function App() {
     setImpAll(false);
     setSheet('notes');
   };
+  const openShiftNotes = () => {
+    setShNotes({ text: '', parsed: null });
+    setImpClear(true);
+    setSheet('shiftNotes');
+  };
+  const shiftAddItems = [
+    {
+      icon: '+',
+      title: 'Новая смена',
+      sub: 'в показанную зарплату',
+      onPress: () => {
+        setAddMenu(null);
+        openShift(null);
+      },
+    },
+    {
+      icon: '≡',
+      title: 'Импорт из заметок',
+      sub: 'вставить текст или «Мои смены»',
+      onPress: () => {
+        setAddMenu(null);
+        openShiftNotes();
+      },
+    },
+  ];
   const addItems = [
     {
       icon: '+',
@@ -3288,9 +3403,342 @@ export default function App() {
     );
   };
 
+  /**
+   * Поле «Недостача / Излишек» с переключателем −/+ (смена и «с прошлой зп»).
+   * Сумму смены не меняет: недостача минусуется из итога зарплаты, излишек — плюсуется.
+   */
+  const adjField = (kb, { key = 'shortage', note } = {}) => {
+    const plus = !!form.surplus;
+    const v = form[key] || '';
+    return (
+      <View style={styles.field}>
+        <View style={styles.adjHead}>
+          <Text style={styles.label}>{plus ? 'Излишек' : 'Недостача'}</Text>
+          <View style={styles.adjSeg}>
+            {[
+              [false, '− недостача'],
+              [true, '+ излишек'],
+            ].map(([on, lab]) => (
+              <Pressable
+                key={lab}
+                hitSlop={6}
+                style={[styles.adjBtn, plus === on && (on ? styles.adjBtnPlus : styles.adjBtnMinus)]}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  setForm((f) => ({ ...f, surplus: on }));
+                }}
+              >
+                <Text style={[styles.adjBtnTxt, plus === on && (on ? styles.good : styles.bad)]}>{lab}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+        <View style={styles.bigField}>
+          <Text style={[styles.adjSign, v ? (plus ? styles.good : styles.bad) : styles.amtDim]}>{plus ? '+' : '−'}</Text>
+          <TextInput
+            {...kb.props}
+            style={[styles.bigInput, { fontSize: 26 }, !!v && (plus ? styles.good : styles.bad)]}
+            keyboardType="number-pad"
+            value={v}
+            onChangeText={(t) => setForm((f) => ({ ...f, [key]: t.replace(/[^0-9]/g, '') }))}
+            placeholder="0"
+            placeholderTextColor="rgba(235,235,245,0.25)"
+          />
+          <Text style={styles.bigUnit}>сом</Text>
+        </View>
+        {kb.bar}
+        <Text style={styles.fieldNote}>
+          {note ||
+            (plus
+              ? 'Сумма смены не меняется — излишек прибавляется к итогу зарплаты («К выплате»).'
+              : 'Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).')}
+        </Text>
+      </View>
+    );
+  };
+
+  const SH_KIND = { add: 'добавить', shortage: 'обновить недостачу', update: 'обновить', same: 'уже есть' };
+  const adjTxt = (a) => (a > 0 ? `недостача −${money(a)}` : a < 0 ? `излишек +${money(-a)}` : '');
+  /** Превью импорта смен: по зарплатам, каждая строка с действием, «Не распознано», кнопка. */
+  const shiftImportBody = (P) => {
+    const pv = previewShiftImport(state, P, { clear: impClear });
+    const n = pv.changes;
+    const adds = pv.rows.filter((r) => r.kind === 'add').length;
+    const upds = pv.rows.filter((r) => r.kind === 'shortage' || r.kind === 'update').length;
+    const same = pv.rows.filter((r) => r.kind === 'same').length;
+    const carryAdd = pv.carry.filter((c) => c.kind === 'add').length;
+    const confirm = () => {
+      if (!n) return;
+      const parts = [
+        adds ? `добавить ${adds}` : null,
+        upds ? `обновить ${upds}` : null,
+        carryAdd ? `недостача с прошлой зп ${carryAdd}` : null,
+        pv.clear.length ? `убрать пустых ${pv.clear.length}` : null,
+      ].filter(Boolean);
+      Alert.alert('Импорт смен', `${parts.join(', ')}?`, [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: `Применить ${n}`,
+          onPress: () => {
+            const clear = impClear;
+            patch((p) => applyShiftImport(p, P, uid, { clear }));
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            // к зарплате с изменениями: ближайшая с сегодняшней, иначе последняя
+            const up = upcomingPayday(todayIso());
+            const ps = pv.paydays.filter((g) => g.add || g.upd || g.clear || pv.carry.some((c) => c.payday === g.payday && c.kind === 'add')).map((g) => g.payday);
+            const target = ps.find((x) => x >= up) || ps[ps.length - 1];
+            closeThen(() => {
+              goPage(1);
+              const k = PAYDAYS.indexOf(target);
+              if (k >= 0) requestAnimationFrame(() => jumpShiftIdx(k));
+            });
+          },
+        },
+      ]);
+    };
+    return (
+      <>
+        <ItemCard style={[styles.listCard, styles.padCard]}>
+          <Text style={styles.k}>{n ? 'Будет изменено' : 'Всё уже в приложении'}</Text>
+          <Text style={[styles.bigPay, { marginTop: 4, color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
+            {pv.rows.length} {plural(pv.rows.length, 'смена', 'смены', 'смен')}
+          </Text>
+          <Text style={styles.calcMeta}>
+            добавить {adds} · обновить {upds} · уже есть {same}
+            {pv.carry.length ? ` · с прошлой зп ${pv.carry.length}` : ''}
+          </Text>
+        </ItemCard>
+        <Text style={styles.hint}>
+          Смены без суммы — сумма придёт из «Расчёта». Уже введённые не дублируются: дописываются только пустые поля
+          (недостача, место), сумма не меняется никогда.
+        </Text>
+        {(P.warnings || []).length > 0 && (
+          <View style={styles.warnCard}>
+            {P.warnings.map((w, i) => (
+              <Text key={i} style={styles.warnTxt}>
+                {w}
+              </Text>
+            ))}
+          </View>
+        )}
+        {(P.unparsed || []).length > 0 && (
+          <>
+            <Text style={styles.sectionLabel}>Не распознано · {P.unparsed.length}</Text>
+            <ItemCard style={styles.listCard}>
+              {P.unparsed.map((u, i) => (
+                <View key={i} style={[styles.lRow, i < P.unparsed.length - 1 && styles.lRowSep]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.lSub, styles.unparsedTxt]}>{u.text}</Text>
+                    {u.why ? <Text style={styles.lSub}>{u.why}</Text> : null}
+                  </View>
+                </View>
+              ))}
+            </ItemCard>
+          </>
+        )}
+        {pv.clear.length > 0 && (
+          <ItemCard style={styles.listCard}>
+            <Pressable
+              style={styles.lRow}
+              onPress={() => {
+                Haptics.selectionAsync();
+                setImpClear((v) => !v);
+              }}
+            >
+              <View style={[styles.checkBox, impClear && { backgroundColor: accent, borderColor: accent }]}>
+                {impClear && <Text style={styles.checkMark}>✓</Text>}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.lTitle}>Убрать пустые заготовки · {pv.clear.length}</Text>
+                <Text style={styles.lSub}>
+                  дни без суммы, которых нет в заметке: {pv.clear.map((x) => fmtShort(x.date)).join(', ')}
+                </Text>
+              </View>
+            </Pressable>
+          </ItemCard>
+        )}
+        {!impClear && (
+          <Pressable onPress={() => setImpClear(true)} hitSlop={8}>
+            <Text style={[styles.link, styles.showAll, { color: accent }]}>Убирать пустые дни, которых нет в заметке</Text>
+          </Pressable>
+        )}
+        {pv.paydays.map((g) => {
+          const rows = pv.rows.filter((r) => paydayForDate(r.p.date) === g.payday);
+          const c = pv.carry.find((x) => x.payday === g.payday);
+          return (
+            <View key={g.payday}>
+              <Text style={styles.sectionLabel}>
+                Зп {fmtShort(g.payday)} · {g.count} {plural(g.count, 'смена', 'смены', 'смен')}
+                {g.short ? ` · −${money(g.short)}` : ''}
+                {g.surplus ? ` · +${money(g.surplus)}` : ''}
+              </Text>
+              <ItemCard style={styles.listCard}>
+                {rows.map((r, i) => (
+                  <View key={i} style={[styles.lRow, (i < rows.length - 1 || c) && styles.lRowSep]}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.lTitle} numberOfLines={1}>
+                        {fmtShort(r.p.date)} · {r.p.title}
+                        {r.p.place ? ` · ${r.p.place}` : ''}
+                      </Text>
+                      {r.p.adj || r.conflict || (r.kind === 'add' && r.sameDate.length) || (r.existing && r.existing.title !== r.p.title) ? (
+                        <Text style={styles.lSub} numberOfLines={2}>
+                          {r.p.adj ? <Text style={r.p.adj > 0 ? styles.bad : styles.good}>{adjTxt(r.p.adj)}</Text> : null}
+                          {r.patch && r.patch.title ? `${r.p.adj ? ' · ' : ''}было «${r.existing.title}»` : ''}
+                          {r.conflict && r.conflict.app ? ` · в приложении ${adjTxt(r.conflict.app)} — не меняю` : ''}
+                          {r.conflict && r.conflict.role ? ` · в приложении «${r.conflict.role}» — не меняю` : ''}
+                          {r.kind === 'add' && r.sameDate.length ? ` · в этот день уже есть «${r.sameDate[0].title}»` : ''}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={[styles.impTag, r.kind === 'same' && { opacity: 0.5 }]}>{SH_KIND[r.kind]}</Text>
+                  </View>
+                ))}
+                {c ? (
+                  <View style={styles.lRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.lTitle}>Недостача с прошлой зп</Text>
+                      <Text style={[styles.lSub, c.value > 0 ? styles.bad : styles.good]}>
+                        {c.value > 0 ? `−${money(c.value)}` : `+${money(-c.value)}`}
+                        {c.kind === 'same' && c.existing !== c.value ? ` (в приложении ${money(c.existing)} — не меняю)` : ''}
+                      </Text>
+                    </View>
+                    <Text style={[styles.impTag, c.kind === 'same' && { opacity: 0.5 }]}>
+                      {c.kind === 'add' ? 'добавить' : 'уже есть'}
+                    </Text>
+                  </View>
+                ) : null}
+              </ItemCard>
+            </View>
+          );
+        })}
+        <ScaleButton style={[styles.actBtn, { backgroundColor: accent }, !n && { opacity: 0.45 }]} onPress={confirm}>
+          <Text style={[styles.actBtnTxt, styles.onAccent]}>{n ? `Применить ${n}` : 'Всё уже добавлено'}</Text>
+        </ScaleButton>
+      </>
+    );
+  };
+
   /** Содержимое шторки — строится только для открытой. */
   const renderSheet = (key) => {
     switch (key) {
+      case 'carry': {
+        const kC = fieldKb('carry', ['carry'], form.surplus ? 'Излишек' : 'Недостача');
+        return {
+          title: 'С прошлой зарплаты',
+          onClose: closeSheet,
+          right: (
+            <Pressable onPress={saveCarry} hitSlop={10}>
+              <Text style={[styles.link, { color: accent }]}>Готово</Text>
+            </Pressable>
+          ),
+          body: (
+            <>
+              <Text style={styles.hint}>
+                Зарплата {form.carryP ? fmtShort(form.carryP) : ''}: недостача, перенесённая с прошлой зарплаты. Не
+                привязана к смене — вычитается из «К выплате» этой зарплаты. Пусто или 0 — убрать.
+              </Text>
+              {adjField(kC, {
+                key: 'carry',
+                note: form.surplus
+                  ? 'Излишек с прошлой зп прибавится к «К выплате».'
+                  : 'Вычитается из «К выплате» этой зарплаты.',
+              })}
+            </>
+          ),
+        };
+      }
+
+      case 'shiftNotes': {
+        const P = shNotes.parsed;
+        if (P) {
+          return {
+            title: 'Импорт смен',
+            onClose: closeSheet,
+            body: (
+              <>
+                <Pressable hitSlop={8} onPress={() => setShNotes((x) => ({ ...x, parsed: null }))}>
+                  <Text style={[styles.link, styles.notesBack, { color: accent }]}>‹ Изменить текст</Text>
+                </Pressable>
+                {shiftImportBody(P)}
+              </>
+            ),
+          };
+        }
+        const kN = fieldKb('shNotes', ['shNotes'], 'Заметка');
+        const canParse = !!shNotes.text.trim();
+        const doParse = (text, ref) => {
+          try {
+            const r = parseShifts(text, { ref: ref || new Date() });
+            Keyboard.dismiss();
+            setShNotes((x) => ({ ...x, text, parsed: r }));
+          } catch (err) {
+            console.warn('parse shifts failed', err);
+            Alert.alert('Не получилось разобрать', String(err?.message || err));
+          }
+        };
+        return {
+          title: 'Импорт смен',
+          onClose: closeSheet,
+          body: (
+            <>
+              <View style={styles.field}>
+                <TextInput
+                  {...kN.props}
+                  multiline
+                  returnKeyType="default"
+                  submitBehavior="newline"
+                  onSubmitEditing={undefined}
+                  style={[styles.input, styles.notesInput]}
+                  value={shNotes.text}
+                  onChangeText={(t) => setShNotes((x) => ({ ...x, text: t }))}
+                  placeholder={'10-23 окт. Зп 30 октябрь\n10 - день касса -2406\n17 - день рядовой +300\n-3927 с прошлой зп'}
+                  placeholderTextColor="rgba(235,235,245,0.3)"
+                  textAlignVertical="top"
+                  scrollEnabled={false}
+                />
+              </View>
+              <View style={styles.notesBtns}>
+                <ScaleButton
+                  style={[styles.actBtn, styles.notesBtn]}
+                  onPress={async () => {
+                    try {
+                      const t = await Clipboard.getStringAsync();
+                      if (!t) return Alert.alert('Буфер пуст', 'Скопируйте текст заметки и нажмите «Вставить».');
+                      Haptics.selectionAsync();
+                      setShNotes((x) => ({ ...x, text: x.text.trim() ? `${x.text.trimEnd()}\n${t}` : t }));
+                    } catch (err) {
+                      console.warn('clipboard failed', err);
+                    }
+                  }}
+                >
+                  <Text style={styles.actBtnTxt}>Вставить</Text>
+                </ScaleButton>
+                <ScaleButton
+                  style={[styles.actBtn, styles.notesBtn]}
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    doParse(SHIFTS_NOTE, SHIFTS_NOTE_REF);
+                  }}
+                >
+                  <Text style={styles.actBtnTxt}>Мои смены</Text>
+                </ScaleButton>
+              </View>
+              <ScaleButton
+                style={[styles.actBtn, { backgroundColor: accent }, !canParse && { opacity: 0.45 }]}
+                onPress={() => canParse && doParse(shNotes.text)}
+              >
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
+              </ScaleButton>
+              <Text style={styles.hint}>
+                Заголовок «21-4 дек. Зп 11 декабрь», затем смены «21 - ночь касса», можно несколько в строке. «- 2430» после
+                смены — недостача, «+300» — излишек, «-3927 с прошлой зп» — недостача с прошлой зарплаты. Место пишите между
+                временем и ролью: «26 - день Аламедин рядовой».
+              </Text>
+            </>
+          ),
+        };
+      }
+
       case 'add':
         return {
           title: 'Добавить',
@@ -3388,7 +3836,7 @@ export default function App() {
         if (form.linked) {
           const sh = state.shifts.find((x) => x.id === editId);
           const d = sh ? sh.calcDate || sh.date : form.date;
-          const kShort = fieldKb('shortage', ['shortage'], 'Недостача');
+          const kShort = fieldKb('shortage', ['shortage'], form.surplus ? 'Излишек' : 'Недостача');
           return {
             title: 'Смена из расчёта',
             onClose: closeSheet,
@@ -3408,7 +3856,10 @@ export default function App() {
                   </View>
                   <View style={[styles.lRow, styles.lRowSep]}>
                     <Text style={styles.lKey}>Смена</Text>
-                    <Text style={styles.lVal}>{sh ? sh.title : form.title}</Text>
+                    <Text style={styles.lVal}>
+                      {sh ? sh.title : form.title}
+                      {sh && sh.place ? ` · ${sh.place}` : ''}
+                    </Text>
                   </View>
                   <View style={styles.lRow}>
                     <Text style={styles.lKey}>Сумма</Text>
@@ -3421,25 +3872,7 @@ export default function App() {
                   Сумма считается в «Расчёте» и обновляется сама. Чтобы изменить — поправьте количества,
                   роль или ставки там.
                 </Text>
-                <View style={styles.field}>
-                  <Text style={styles.label}>Недостача</Text>
-                  <View style={styles.bigField}>
-                    <TextInput
-                      {...kShort.props}
-                      style={[styles.bigInput, { fontSize: 26 }, !!form.shortage && styles.bad]}
-                      keyboardType="number-pad"
-                      value={form.shortage || ''}
-                      onChangeText={(t) => setForm((f) => ({ ...f, shortage: t.replace(/[^0-9]/g, '') }))}
-                      placeholder="0"
-                      placeholderTextColor="rgba(235,235,245,0.25)"
-                    />
-                    <Text style={styles.bigUnit}>сом</Text>
-                  </View>
-                  {kShort.bar}
-                  <Text style={styles.fieldNote}>
-                    Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).
-                  </Text>
-                </View>
+                {adjField(kShort)}
 
                 <ScaleButton
                   style={[styles.actBtn, { backgroundColor: accent }]}
@@ -3451,9 +3884,11 @@ export default function App() {
             ),
           };
         }
-        const kAmt = fieldKb('amount', ['amount', 'title', 'shortage'], 'Сумма');
-        const kTitle = fieldKb('title', ['amount', 'title', 'shortage'], 'Тип смены');
-        const kShort = fieldKb('shortage', ['amount', 'title', 'shortage'], 'Недостача');
+        const SK = ['amount', 'title', 'shortage', 'place'];
+        const kAmt = fieldKb('amount', SK, 'Сумма');
+        const kTitle = fieldKb('title', SK, 'Тип смены');
+        const kShort = fieldKb('shortage', SK, form.surplus ? 'Излишек' : 'Недостача');
+        const kPlace = fieldKb('place', SK, 'Место');
         return {
           title: editId ? 'Смена' : 'Новая смена',
           onClose: closeSheet,
@@ -3508,24 +3943,18 @@ export default function App() {
                   ))}
                 </View>
               </View>
+              {adjField(kShort)}
               <View style={styles.field}>
-                <Text style={styles.label}>Недостача</Text>
-                <View style={styles.bigField}>
-                  <TextInput
-                    {...kShort.props}
-                    style={[styles.bigInput, { fontSize: 26 }, !!form.shortage && styles.bad]}
-                    keyboardType="number-pad"
-                    value={form.shortage || ''}
-                    onChangeText={(t) => setForm((f) => ({ ...f, shortage: t.replace(/[^0-9]/g, '') }))}
-                    placeholder="0"
-                    placeholderTextColor="rgba(235,235,245,0.25)"
-                  />
-                  <Text style={styles.bigUnit}>сом</Text>
-                </View>
-                {kShort.bar}
-                <Text style={styles.fieldNote}>
-                  Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).
-                </Text>
+                <Text style={styles.label}>Место (необязательно)</Text>
+                <TextInput
+                  {...kPlace.props}
+                  style={styles.input}
+                  value={form.place || ''}
+                  onChangeText={(t) => setForm((f) => ({ ...f, place: t }))}
+                  placeholder="напр. Аламедин"
+                  placeholderTextColor="rgba(235,235,245,0.3)"
+                />
+                {kPlace.bar}
               </View>
               {editId && (
                 <ScaleButton
@@ -3891,7 +4320,7 @@ export default function App() {
               </ItemCard>
               <ItemCard style={styles.listCard}>
                 <View style={[styles.lRow, styles.lRowSep]}>
-                  <Text style={styles.lKey}>Заработано{shortAll ? ' (после недостачи)' : ''}</Text>
+                  <Text style={styles.lKey}>Заработано{shortAll || surplusAll ? ' (после недостачи)' : ''}</Text>
                   <Text style={[styles.lVal, styles.good]}>{money(earnedAll)}</Text>
                 </View>
                 {shortAll ? (
@@ -3900,13 +4329,19 @@ export default function App() {
                     <Text style={[styles.lVal, styles.bad]}>−{money(shortAll)}</Text>
                   </View>
                 ) : null}
+                {surplusAll ? (
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>· излишек</Text>
+                    <Text style={[styles.lVal, styles.good]}>+{money(surplusAll)}</Text>
+                  </View>
+                ) : null}
                 <View style={styles.lRow}>
                   <Text style={styles.lKey}>Оплачено всего</Text>
                   <Text style={styles.lVal}>{money(spent)}</Text>
                 </View>
               </ItemCard>
               <Text style={styles.hint}>
-                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи.
+                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи (и с прошлой зп), плюс излишек.
               </Text>
             </>
           ),
@@ -4189,7 +4624,13 @@ export default function App() {
 
       <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
       <IslandMenu arc={arc} />
-      <AddMenu visible={!!addMenu && page === 0} anchor={addMenu} items={addItems} accent={accent} onClose={closeAddMenu} />
+      <AddMenu
+        visible={!!addMenu && page === menuPage}
+        anchor={addMenu}
+        items={menuPage === 1 ? shiftAddItems : addItems}
+        accent={accent}
+        onClose={closeAddMenu}
+      />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
     </View>
@@ -4457,6 +4898,20 @@ const styles = StyleSheet.create({
   notesBtn: { flex: 1, backgroundColor: 'rgba(255,255,255,0.1)' },
   notesBack: { marginBottom: 10 },
   metaShort: { color: '#ff453a', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  metaPlus: { color: '#30d158', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  placeTxt: { color: 'rgba(235,235,245,0.55)', fontWeight: '500' },
+  adjHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  adjSeg: { flexDirection: 'row', gap: 6, marginBottom: 6 },
+  adjBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: 'rgba(118,118,128,0.18)',
+  },
+  adjBtnMinus: { backgroundColor: 'rgba(255,69,58,0.18)' },
+  adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
+  adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
+  adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
   islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {

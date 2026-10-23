@@ -12,7 +12,10 @@
  *    название «день/ночь ряд/касса», сумма = расчёту) становится связанной;
  *  • пустая заготовка на эту дату перенимается (а не дублируется);
  *  • ручная смена С суммой не трогается никогда — остаются обе;
- *  • недостача (shortage) живёт на смене: пересчёт её не меняет, сброс расчёта не теряет.
+ *  • недостача (shortage) живёт на смене: пересчёт её не меняет, сброс расчёта не теряет
+ *    (излишек — отрицательная недостача — так же);
+ *  • в один день может быть две смены (день + ночь, напр. из импорта заметки): расчёт дня
+ *    перенимает пустую смену С ТЕМ ЖЕ временем (день/ночь), и только если такой нет — любую пустую.
  */
 import { computeCalc, hasCounts, ownPay, shiftTitle } from './calc.js';
 
@@ -44,7 +47,11 @@ export function syncCalcShifts(app, calc, paydayFor, makeId) {
   for (const d of Object.keys(days)) {
     const day = days[d];
     if (day && hasCounts(day.counts)) {
-      want[d] = { amount: calcPayForDay(day, calc.rates), title: shiftTitle(day.role, day.time) };
+      want[d] = {
+        amount: calcPayForDay(day, calc.rates),
+        title: shiftTitle(day.role, day.time),
+        time: day.time === 'day' ? 'day' : 'night',
+      };
     }
   }
 
@@ -63,7 +70,7 @@ export function syncCalcShifts(app, calc, paydayFor, makeId) {
       // была заготовкой → вернуть заготовку; с недостачей — остаётся днём без суммы
       // (недостача — реальный долг, расчёт её не отменяет); иначе смена просто уходит
       if (s.calcFrom) out.push({ ...unlink(s), title: s.calcFrom.title, amount: null });
-      else if (Number(s.shortage) > 0) out.push({ ...unlink(s), amount: null });
+      else if (Number(s.shortage)) out.push({ ...unlink(s), amount: null });
       continue;
     }
     linked.add(d);
@@ -84,8 +91,10 @@ export function syncCalcShifts(app, calc, paydayFor, makeId) {
     if (i >= 0) {
       out[i] = { ...out[i], source: 'calc', calcDate: d, amount: w.amount, title: w.title };
     } else {
-      // 2) пустая заготовка на эту дату
-      i = out.findIndex((s) => free(s) && noAmount(s.amount));
+      // 2) пустая смена на эту дату: сначала того же времени (день/ночь), потом любая
+      const timeOf = (s) => (/^\s*день/i.test(s.title || '') ? 'day' : /^\s*ночь/i.test(s.title || '') ? 'night' : null);
+      i = out.findIndex((s) => free(s) && noAmount(s.amount) && timeOf(s) === w.time);
+      if (i < 0) i = out.findIndex((s) => free(s) && noAmount(s.amount));
       if (i >= 0) {
         out[i] = {
           ...out[i],
