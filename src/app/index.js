@@ -1480,6 +1480,7 @@ const ROLE_LABELS = ['Рядовой', 'Кассир'];
 const TIME_LABELS = ['День', 'Ночь'];
 const EMPTY_COUNTS = {};
 const CALC_ORDER = CALC_ITEMS.map((it) => it.id);
+const CALC_MAIN_ORDER = ['adj'];
 const roleLabel = (role, time) =>
   `${role === 'ryad' ? 'Рядовой' : 'Кассир'} · ${time === 'day' ? 'день' : 'ночь'}`;
 
@@ -1555,6 +1556,7 @@ function NumInput({ value, onChange, style, inputRef, onFocused, onBlurred, onSu
  */
 const CountRow = memo(function CountRow({
   item, tallies, last, isLastField, pos, count, accent, onStep, onSet, onOpen, register, onFocusItem, onNext,
+  scope = 'main',
 }) {
   const t = Array.isArray(tallies) ? tallies : [itemTotal(tallies)];
   const total = itemTotal(t);
@@ -1590,7 +1592,7 @@ const CountRow = memo(function CountRow({
           onFocusItem(id);
           kbShow({
             key: `calc-${id}`,
-            scope: 'main',
+            scope,
             label: `${item.name}  ·  ${pos + 1}/${count}`,
             hasPrev: pos > 0,
             isLast: isLastField,
@@ -1823,17 +1825,191 @@ const CalcAdjRow = memo(function CalcAdjRow({ value, date, onChange, accent, reg
   );
 });
 
+/** Плитка раздела «Расчёта»: квадратная карточка (то же стекло, что у Расходов/Смен), тап — шторка раздела. */
+const CALC_TILE_W = Math.floor((SCREEN_W - 32 - 10) / 2);
+const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
+  return (
+    <ScaleButton style={styles.tileHit} onPress={onPress}>
+      <Glass style={styles.tile} intensity={34}>
+        <View style={styles.tileTop}>
+          <View style={styles.tileIcon}>
+            <Text style={styles.tileIconTxt}>{icon}</Text>
+          </View>
+          <Text style={styles.chevMini}>›</Text>
+        </View>
+        <View>
+          <Text style={styles.tileBig} numberOfLines={1} adjustsFontSizeToFit>
+            {big}
+          </Text>
+          <Text style={styles.tileTitle} numberOfLines={2}>
+            {title}
+          </Text>
+          <Text style={styles.tileSub} numberOfLines={1}>
+            {sub}
+          </Text>
+        </View>
+      </Glass>
+    </ScaleButton>
+  );
+});
+
+/**
+ * Позиции в шторке — плоский список в порядке таблицы. Ввод подряд: «Далее ›» на панели
+ * шторки идёт по позициям сверху вниз, поле в фокусе докручивается над клавиатурой.
+ */
+const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen }) {
+  const inputs = useRef(new Map());
+  const focusRef = useRef(null);
+  const register = useCallback((id, r) => {
+    if (r) inputs.current.set(id, r);
+    else inputs.current.delete(id);
+  }, []);
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (focusRef.current) ensureSheetVisible(inputs.current.get(focusRef.current));
+    });
+    return () => sub.remove();
+  }, []);
+  const onFocusItem = useCallback((id) => {
+    focusRef.current = id;
+    if (Keyboard.isVisible()) requestAnimationFrame(() => ensureSheetVisible(inputs.current.get(id)));
+  }, []);
+  const onNext = useCallback((id, dir) => {
+    const i = CALC_ORDER.indexOf(id);
+    const nextId = i < 0 ? null : CALC_ORDER[i + dir];
+    if (nextId && inputs.current.get(nextId)) {
+      Haptics.selectionAsync();
+      inputs.current.get(nextId).focus();
+    } else if (dir > 0) {
+      Keyboard.dismiss();
+    }
+  }, []);
+  const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
+  return (
+    <View>
+      <View style={styles.gHead}>
+        <Text style={styles.gTitle}>Как в таблице</Text>
+        <Text style={styles.gSub}>{fmtNum(units)}</Text>
+      </View>
+      <ItemCard>
+        {CALC_ITEMS.map((it, i) => (
+          <CountRow
+            key={it.id}
+            item={it}
+            tallies={day.counts[it.id]}
+            last={i === CALC_ITEMS.length - 1}
+            isLastField={i === CALC_ITEMS.length - 1}
+            pos={i}
+            count={CALC_ITEMS.length}
+            accent={accent}
+            onStep={onStep}
+            onSet={onSet}
+            onOpen={onOpen}
+            register={register}
+            onFocusItem={onFocusItem}
+            onNext={onNext}
+            scope="sheet"
+          />
+        ))}
+      </ItemCard>
+      <Text style={[styles.hint, { paddingHorizontal: 6 }]}>Тап по названию — несколько подсчётов (59 + 98)</Text>
+    </View>
+  );
+});
+
+/** «Итог по позициям» — в шторке. */
+function CalcSummaryList({ day, rates }) {
+  const res = useMemo(() => computeCalc(day.counts, rates, day.staff), [day.counts, rates, day.staff]);
+  return (
+    <View>
+      <View style={styles.gHead}>
+        <Text style={styles.gTitle}>По позициям</Text>
+        <Text style={styles.gSub}>единица {fmtNum(res.unit)}</Text>
+      </View>
+      <ItemCard style={styles.sumCard}>
+        {res.summary
+          .filter((x) => x.inTotal || x.value > 0)
+          .map((x) => (
+            <View key={x.label} style={styles.sumRow}>
+              <Text style={[styles.sumL, !x.inTotal && styles.sumDim]}>
+                {x.label}
+                {!x.inTotal ? ' · не в общем' : ''}
+              </Text>
+              <Text style={styles.sumV}>{fmtNum(x.value)}</Text>
+            </View>
+          ))}
+        <View style={[styles.sumRow, styles.sumTotal]}>
+          <Text style={styles.totalL}>Общее</Text>
+          <Text style={styles.totalV}>{fmtNum(res.total)}</Text>
+        </View>
+      </ItemCard>
+    </View>
+  );
+}
+
+/** «Расход ингредиентов» — в шторке. */
+function CalcUsageList({ day, rates }) {
+  const res = useMemo(() => computeCalc(day.counts, rates, day.staff), [day.counts, rates, day.staff]);
+  return (
+    <ItemCard style={styles.sumCard}>
+      {res.usage.map((u) => (
+        <View key={u.label} style={[styles.sumRow, u.label === 'Единица' && styles.sumTotal]}>
+          <Text style={u.label === 'Единица' ? styles.totalL : styles.sumL}>{u.label}</Text>
+          <Text style={u.label === 'Единица' ? styles.totalV : styles.sumV}>{fmtNum(u.value)}</Text>
+        </View>
+      ))}
+    </ItemCard>
+  );
+}
+
+/** «Сохранённые расчёты» — в шторке; тап по дню — открыть его. */
+function CalcSavedList({ calc, date, accent, onPick }) {
+  const saved = useMemo(
+    () =>
+      Object.keys(calc.days)
+        .filter((d) => hasCounts(calc.days[d].counts))
+        .sort((a, b) => b.localeCompare(a))
+        .map((d) => {
+          const x = calc.days[d];
+          const r = computeCalc(x.counts, calc.rates, x.staff);
+          return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
+        }),
+    [calc.days, calc.rates]
+  );
+  if (!saved.length) return <Text style={styles.hint}>Пока нет сохранённых расчётов — они появятся, когда впишете позиции.</Text>;
+  return (
+    <View>
+      {saved.map((x) => (
+        <ScaleButton
+          key={x.date}
+          style={[styles.setItem, x.date === date && { borderColor: accent }]}
+          onPress={() => onPick(x.date)}
+        >
+          <View>
+            <Text style={styles.setL}>
+              {fmtShort(x.date)} {x.date.slice(0, 4)}
+            </Text>
+            <Text style={styles.setS}>
+              {roleLabel(x.role, x.time)} · {x.positions} поз.
+            </Text>
+          </View>
+          <Text style={[styles.itemTitle, x.date === date && { color: accent }]}>{money(x.pay)}</Text>
+        </ScaleButton>
+      ))}
+      <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
+    </View>
+  );
+}
+
 const CalcView = memo(function CalcView({
   calc, date, day, accent, linkedShift, manualOnDate, adj, onAdj, scrollRef, scrollY, scrollTop,
-  onDate, onPatchDay, onRole, onTime, onStep, onSet, onOpenItem, onOpenRates, onReset, onShowShift,
+  onPatchDay, onRole, onTime, onOpenRates, onReset, onShowShift, onOpenSection,
 }) {
-  const [showUsage, setShowUsage] = useState(false);
-  const [showAll, setShowAll] = useState(false);
 
   // ── ввод с клавиатуры: Далее / ↑ идут по списку сверху вниз, как строки в Excel
   const inputs = useRef(new Map());
   const focusRef = useRef(null);
-  const order = CALC_ORDER;
+  const order = CALC_MAIN_ORDER; // на главном экране из полей ввода — только недостача
   const orderRef = useRef(order);
   orderRef.current = order;
   const register = useCallback((id, r) => {
@@ -1896,6 +2072,9 @@ const CalcView = memo(function CalcView({
   const own = ownPay(res, calc.rates, day);
   const ownR = Math.round(own);
   const filled = hasCounts(day.counts);
+  const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
+  const entered = CALC_ITEMS.filter((it) => itemTotal(day.counts[it.id]) > 0).length;
+  const usageN = res.usage.filter((u) => u.label !== 'Единица' && u.value > 0).length;
 
   const saved = useMemo(
     () =>
@@ -2001,121 +2180,37 @@ const CalcView = memo(function CalcView({
         </ScaleButton>
       </Animated.View>
 
-      <Animated.View layout={ROW_LAYOUT}>
-        <Text style={[styles.hint, { paddingHorizontal: 6 }]}>Тап по названию — несколько подсчётов (59 + 98)</Text>
+      <Animated.View style={styles.tileGrid} layout={ROW_LAYOUT}>
+        <CalcTile
+          icon="🧾"
+          title="Позиции"
+          big={fmtNum(units)}
+          sub={`заполнено ${entered} из ${CALC_ITEMS.length}`}
+          onPress={() => onOpenSection('calcPos')}
+        />
+        <CalcTile
+          icon="📊"
+          title="Итог по позициям"
+          big={fmtNum(res.total)}
+          sub={`единица ${fmtNum(res.unit)}`}
+          onPress={() => onOpenSection('calcSum')}
+        />
+        <CalcTile
+          icon="🥫"
+          title="Расход ингредиентов"
+          big={fmtNum(usageN)}
+          sub={usageN ? 'ингредиентов израсходовано' : 'пока ничего'}
+          onPress={() => onOpenSection('calcUse')}
+        />
+        <CalcTile
+          icon="🗂"
+          title="Сохранённые расчёты"
+          big={fmtNum(saved.length)}
+          sub={saved.length ? `последний ${fmtShort(saved[0].date)}` : 'пока нет'}
+          onPress={() => onOpenSection('calcSaved')}
+        />
       </Animated.View>
 
-      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
-        <View style={styles.gHead}>
-          <Text style={styles.gTitle}>Позиции · как в таблице</Text>
-          <Text style={styles.gSub}>
-            {fmtNum(CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0))}
-          </Text>
-        </View>
-        <ItemCard>
-          {CALC_ITEMS.map((it, i) => (
-            <CountRow
-              key={it.id}
-              item={it}
-              tallies={day.counts[it.id]}
-              last={i === CALC_ITEMS.length - 1}
-              isLastField={i === CALC_ITEMS.length - 1}
-              pos={i}
-              count={CALC_ITEMS.length}
-              accent={accent}
-              onStep={onStep}
-              onSet={onSet}
-              onOpen={onOpenItem}
-              register={register}
-              onFocusItem={onFocusItem}
-              onNext={onNext}
-            />
-          ))}
-        </ItemCard>
-      </Animated.View>
-
-      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
-        <View style={styles.gHead}>
-          <Text style={styles.gTitle}>Итог по позициям</Text>
-          <Text style={styles.gSub}>единица {fmtNum(res.unit)}</Text>
-        </View>
-        <ItemCard style={styles.sumCard}>
-          {res.summary
-            .filter((s) => s.inTotal || s.value > 0)
-            .map((s) => (
-              <View key={s.label} style={styles.sumRow}>
-                <Text style={[styles.sumL, !s.inTotal && styles.sumDim]}>
-                  {s.label}
-                  {!s.inTotal ? ' · не в общем' : ''}
-                </Text>
-                <Text style={styles.sumV}>{fmtNum(s.value)}</Text>
-              </View>
-            ))}
-          <View style={[styles.sumRow, styles.sumTotal]}>
-            <Text style={styles.totalL}>Общее</Text>
-            <Text style={styles.totalV}>{fmtNum(res.total)}</Text>
-          </View>
-        </ItemCard>
-      </Animated.View>
-
-      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
-        <Pressable
-          style={styles.gHead}
-          onPress={() => {
-            Haptics.selectionAsync();
-            setShowUsage((v) => !v);
-          }}
-        >
-          <Text style={styles.gTitle}>Расход ингредиентов</Text>
-          <Text style={styles.gSub}>{showUsage ? 'скрыть' : 'показать'}</Text>
-          <Text style={[styles.chevMini, showUsage && styles.chevOpen]}>›</Text>
-        </Pressable>
-        {showUsage && (
-          <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT}>
-            <ItemCard style={styles.sumCard}>
-              {res.usage.map((u) => (
-                <View key={u.label} style={[styles.sumRow, u.label === 'Единица' && styles.sumTotal]}>
-                  <Text style={u.label === 'Единица' ? styles.totalL : styles.sumL}>{u.label}</Text>
-                  <Text style={u.label === 'Единица' ? styles.totalV : styles.sumV}>{fmtNum(u.value)}</Text>
-                </View>
-              ))}
-            </ItemCard>
-          </Animated.View>
-        )}
-      </Animated.View>
-
-      {saved.length > 0 && (
-        <Animated.View style={styles.group} layout={ROW_LAYOUT}>
-          <View style={styles.gHead}>
-            <Text style={styles.gTitle}>Сохранённые расчёты</Text>
-            <Text style={styles.gSub}>{saved.length}</Text>
-          </View>
-          {(showAll ? saved : saved.slice(0, 7)).map((s) => (
-            <ScaleButton
-              key={s.date}
-              style={[styles.setItem, s.date === date && { borderColor: accent }]}
-              onPress={() => onDate(s.date)}
-            >
-              <View>
-                <Text style={styles.setL}>
-                  {fmtShort(s.date)} {s.date.slice(0, 4)}
-                </Text>
-                <Text style={styles.setS}>
-                  {roleLabel(s.role, s.time)} · {s.positions} поз.
-                </Text>
-              </View>
-              <Text style={[styles.itemTitle, s.date === date && { color: accent }]}>{money(s.pay)}</Text>
-            </ScaleButton>
-          ))}
-          {saved.length > 7 && (
-            <Pressable onPress={() => setShowAll((v) => !v)} hitSlop={8}>
-              <Text style={[styles.link, styles.showAll, { color: accent }]}>
-                {showAll ? 'Свернуть' : 'Показать все'}
-              </Text>
-            </Pressable>
-          )}
-        </Animated.View>
-      )}
       <Animated.View layout={ROW_LAYOUT}>
         <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
       </Animated.View>
@@ -2589,10 +2684,25 @@ export default function App() {
   );
   const onCalcStep = useCallback((id, d) => stepTally(id, d, 0), [stepTally]);
   const onCalcSet = useCallback((id, n) => setTally(id, n, 0), [setTally]);
+  // разделы «Расчёта» в шторках; подсчёты позиции, открытые из списка позиций, закрываются назад в список
+  const sheetNow = useRef(null);
+  sheetNow.current = sheet;
+  const calcBack = useRef(null);
   const openCalcItem = useCallback((id) => {
     Haptics.selectionAsync();
+    calcBack.current = sheetNow.current === 'calcPos' ? 'calcPos' : null;
     setCalcItem(id);
     setSheet('calcItem');
+  }, []);
+  const openCalcSection = useCallback((key) => {
+    Haptics.selectionAsync();
+    calcBack.current = null;
+    setSheet(key);
+  }, []);
+  const closeCalcItem = useCallback(() => {
+    const back = calcBack.current;
+    calcBack.current = null;
+    setSheet(back);
   }, []);
   const onCalcRole = useCallback(
     (i) => {
@@ -4577,14 +4687,57 @@ export default function App() {
         };
       }
 
+      case 'calcPos':
+        return {
+          title: 'Позиции',
+          onClose: closeSheet,
+          right: (
+            <Pressable onPress={closeSheet}>
+              <Text style={[styles.link, { color: accent }]}>Готово</Text>
+            </Pressable>
+          ),
+          body: calcDay ? (
+            <CalcPositionsList day={calcDay} accent={accent} onStep={onCalcStep} onSet={onCalcSet} onOpen={openCalcItem} />
+          ) : null,
+        };
+      case 'calcSum':
+        return {
+          title: 'Итог по позициям',
+          onClose: closeSheet,
+          body: calcDay ? <CalcSummaryList day={calcDay} rates={calc.rates} /> : null,
+        };
+      case 'calcUse':
+        return {
+          title: 'Расход ингредиентов',
+          onClose: closeSheet,
+          body: calcDay ? <CalcUsageList day={calcDay} rates={calc.rates} /> : null,
+        };
+      case 'calcSaved':
+        return {
+          title: 'Сохранённые расчёты',
+          onClose: closeSheet,
+          body: (
+            <CalcSavedList
+              calc={calc}
+              date={calcDate}
+              accent={accent}
+              onPick={(d) => {
+                Haptics.selectionAsync();
+                setCalcDate(d);
+                setSheet(null);
+              }}
+            />
+          ),
+        };
+
       case 'calcItem': {
         const it = CALC_ITEMS.find((x) => x.id === calcItem);
         const t = calcDay ? talliesOf(calcDay.counts[calcItem]) : [0];
         return {
           title: it ? it.name : '',
-          onClose: closeSheet,
+          onClose: closeCalcItem,
           right: (
-            <Pressable onPress={closeSheet}>
+            <Pressable onPress={closeCalcItem}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
@@ -4807,13 +4960,10 @@ export default function App() {
                     scrollRef={mainScroll}
                     scrollY={mainScrollY}
                     scrollTop={mainScrollTop}
-                    onDate={setCalcDate}
                     onPatchDay={patchDay}
                     onRole={onCalcRole}
                     onTime={onCalcTime}
-                    onStep={onCalcStep}
-                    onSet={onCalcSet}
-                    onOpenItem={openCalcItem}
+                    onOpenSection={openCalcSection}
                     onOpenRates={calcStable.openRates}
                     onReset={calcStable.reset}
                     onShowShift={calcStable.showShift}
@@ -5138,6 +5288,28 @@ const styles = StyleSheet.create({
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
+  tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16, marginBottom: 6 },
+  tileHit: { width: CALC_TILE_W },
+  tile: {
+    width: CALC_TILE_W,
+    height: CALC_TILE_W,
+    borderRadius: 24,
+    padding: 14,
+    justifyContent: 'space-between',
+  },
+  tileTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  tileIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tileIconTxt: { fontSize: 19 },
+  tileBig: { color: '#fff', fontSize: 30, fontWeight: '700', letterSpacing: -0.6, fontVariant: ['tabular-nums'] },
+  tileTitle: { color: '#fff', fontSize: 15, fontWeight: '600', marginTop: 2 },
+  tileSub: { color: 'rgba(235,235,245,0.5)', fontSize: 12, marginTop: 2 },
   adjLine: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   adjMini: { flexDirection: 'row', gap: 4 },
   adjMiniBtn: {
