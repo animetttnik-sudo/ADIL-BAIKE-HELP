@@ -186,41 +186,31 @@ const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
 
 /**
- * Стекло карточек внутри вкладок (Расходы / Смены / Расчёт).
- * С Liquid Glass карточка была ГОЛЫМ GlassView — без своей подложки и кромки: вся видимость —
- * от нативного эффекта. «Смены» монтируются заранее в скрытой вкладке (opacity 0 у TabPane),
- * и нативное стекло там не появлялось — карточки становились полностью пустыми.
- * Теперь в вкладке карточка — обычный View с постоянной подложкой и кромкой (видна всегда),
- * а GlassView/BlurView — фоновый слой под содержимым, который создаётся только когда вкладка
- * активна и уже полностью проявилась (live), с новым key на каждую активацию.
- * Содержимое при этом не перемонтируется. Вне вкладок (док, шторки, меню) — как раньше.
+ * Карточки внутри вкладок (Расходы / Смены / Расчёт) — ОДИН путь для всех.
+ * Подложка (заливка) и кромка стоят прямо на том же View, у которого borderRadius и реальный
+ * размер, — видны всегда, даже если нативное стекло не нарисовалось. Стекло (GlassView, без
+ * Liquid Glass — BlurView) — фоновый слой под содержимым. Вкладки «Смены»/«Расчёт» монтируются
+ * при первом заходе, когда вкладка уже полностью видна (как «Расходы» при старте).
  */
-const PaneGlassCtx = createContext(null);
+const PaneGlassCtx = createContext(false);
 
 /** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
 function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false }) {
-  const pane = useContext(PaneGlassCtx);
-  if (pane && !interactive) {
-    const r = StyleSheet.flatten(style)?.borderRadius;
+  const inPane = useContext(PaneGlassCtx);
+  if (inPane && !interactive) {
     return (
-      <View style={[styles.glassBase, style]}>
-        {pane.live ? (
-          LG && GlassView ? (
-            <GlassView
-              key={pane.epoch}
-              pointerEvents="none"
-              glassEffectStyle="regular"
-              colorScheme="dark"
-              tintColor={tint}
-              style={StyleSheet.absoluteFill}
-            />
-          ) : (
-            <BlurView key={pane.epoch} pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
-          )
-        ) : null}
-        <View style={LG ? styles.cardBaseFill : styles.glassFill} pointerEvents="none" />
-        <View style={styles.glassTopEdge} pointerEvents="none" />
-        <View style={[styles.glassBorder, r != null && { borderRadius: r }]} pointerEvents="none" />
+      <View style={[styles.glassBase, styles.cardBase, style]}>
+        {LG && GlassView ? (
+          <GlassView
+            pointerEvents="none"
+            glassEffectStyle="regular"
+            colorScheme="dark"
+            tintColor={tint}
+            style={StyleSheet.absoluteFill}
+          />
+        ) : (
+          <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+        )}
         {children}
       </View>
     );
@@ -1186,6 +1176,8 @@ function SegLabel({ label, index, pos, fontSize }) {
 /** Смещение и время перехода между вкладками дока. */
 const TAB_SHIFT = 28;
 const TAB_IN = { duration: 260, easing: Easing.out(Easing.cubic) };
+// первый заход во вкладку: содержимое монтируется, когда она уже проявилась целиком
+const TAB_MOUNT_MS = TAB_IN.duration + 40;
 const TAB_OUT = { duration: 200, easing: Easing.out(Easing.quad) };
 const TAB_FADE = { duration: 180, easing: Easing.inOut(Easing.quad) };
 
@@ -1194,7 +1186,7 @@ const TAB_FADE = { duration: 180, easing: Easing.inOut(Easing.quad) };
  * Yoga заново раскладывает всё дерево вкладки в кадре переключения, это и был «лаг»).
  * Видимость/сдвиг — только shared values на UI-потоке.
  */
-const TabPane = memo(function TabPane({ vis, x, active, reduce, glass, children }) {
+const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   const st = useAnimatedStyle(() => {
     const v = vis.value;
     return {
@@ -1209,7 +1201,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, glass, children 
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      <PaneGlassCtx.Provider value={glass}>{children}</PaneGlassCtx.Provider>
+      <PaneGlassCtx.Provider value>{children}</PaneGlassCtx.Provider>
     </Animated.View>
   );
 });
@@ -2578,37 +2570,9 @@ export default function App() {
   const mainScrollTop = useRef(0);
 
   // ── Вкладки: плашка дока едет на UI-потоке; JS лишь переключает display.
-  // Расчёт/Смены монтируем заранее (после загрузки, в простое), а если
-  // вкладку открыли раньше — после анимации плашки, а не во время неё.
+  // Расчёт/Смены монтируем при ПЕРВОМ заходе — когда вкладка уже полностью проявилась
+  // (стекло карточек создаётся видимым, как у «Расходов» при старте), дальше держим.
   const [mounted, setMounted] = useState({ 0: true });
-  // стекло вкладок: live — вкладка активна и полностью проявилась (только тогда создаётся
-  // нативное стекло карточек); epoch — новый key стекла на каждую активацию
-  const liveRef = useRef([true, false, false]);
-  const [paneLive, setPaneLive] = useState([true, false, false]);
-  const [paneEpoch, setPaneEpoch] = useState([0, 0, 0]);
-  const paneGlass = useMemo(
-    () => [0, 1, 2].map((i) => ({ live: paneLive[i], epoch: paneEpoch[i] })),
-    [paneLive, paneEpoch]
-  );
-  useEffect(() => {
-    // ушедшие вкладки — без нативного стекла, когда доиграло исчезновение (подложка остаётся)
-    const off = setTimeout(() => {
-      if (!liveRef.current.some((v, i) => v && i !== page)) return;
-      liveRef.current = liveRef.current.map((v, i) => (i === page ? v : false));
-      setPaneLive(liveRef.current);
-    }, TAB_OUT.duration + 40);
-    // показанная — стекло создаётся заново, уже видимым
-    const on = setTimeout(() => {
-      if (liveRef.current[page]) return;
-      liveRef.current = liveRef.current.map((v, i) => (i === page ? true : v));
-      setPaneEpoch((e) => e.map((v, i) => (i === page ? v + 1 : v)));
-      setPaneLive(liveRef.current);
-    }, TAB_IN.duration + 60);
-    return () => {
-      clearTimeout(off);
-      clearTimeout(on);
-    };
-  }, [page]);
   const mountedRef = useRef(mounted);
   mountedRef.current = mounted;
   // Переход вкладок: у каждой своя видимость и сдвиг (shared values). Новая
@@ -2657,10 +2621,10 @@ export default function App() {
     // анимация уже идёт (стартовала на UI-потоке из жеста дока); здесь — только состояние
     Keyboard.dismiss();
     setPage(i);
-    if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => ({ ...m, [i]: true })), 280);
+    if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => ({ ...m, [i]: true })), TAB_MOUNT_MS);
   }, []);
   const goPage = useCallback((i) => {
-    setMounted((m) => (m[i] ? m : { ...m, [i]: true }));
+    if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => (m[i] ? m : { ...m, [i]: true })), TAB_MOUNT_MS);
     scheduleOnUI(tabAnim, i); // переход не из дока (бейдж, «Открыть в Расчёте») — та же анимация
     setPage(i);
   }, [tabAnim]);
@@ -2866,16 +2830,6 @@ export default function App() {
 
   // ── Расчёт → Смены: связанная смена обновляется сама (с задержкой, пока вводят)
   const loadedOnce = !!state;
-  // предзагрузка вкладок «Смены» и «Расчёт», пока пользователь смотрит первую
-  useEffect(() => {
-    if (!loadedOnce) return;
-    const t1 = setTimeout(() => setMounted((m) => (m[1] ? m : { ...m, 1: true })), 500);
-    const t2 = setTimeout(() => setMounted((m) => (m[2] ? m : { ...m, 2: true })), 1100);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
-  }, [loadedOnce]);
   useEffect(() => {
     if (!calc || !loadedOnce) return;
     const t = setTimeout(() => patch((p) => syncCalcShifts(p, calc, paydayForDate, uid)), 400);
@@ -4766,7 +4720,7 @@ export default function App() {
           mainScrollTop.current = e.nativeEvent.layout.y;
         }}
       >
-        <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion} glass={paneGlass[0]}>
+        <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion}>
           <PayPager
             pos={pagePos}
             cur={pageCur}
@@ -4780,7 +4734,7 @@ export default function App() {
         </TabPane>
 
         {mounted[1] && (
-          <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion} glass={paneGlass[1]}>
+          <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion}>
             <PayPager
               pos={shiftPos}
               cur={shiftCur}
@@ -4796,7 +4750,7 @@ export default function App() {
         )}
 
         {mounted[2] && (
-          <TabPane vis={tabSV[2][0]} x={tabSV[2][1]} active={page === 2} reduce={reduceMotion} glass={paneGlass[2]}>
+          <TabPane vis={tabSV[2][0]} x={tabSV[2][1]} active={page === 2} reduce={reduceMotion}>
           <ScrollView
             style={styles.pages}
             contentContainerStyle={styles.pagesContent}
@@ -4934,10 +4888,11 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(22,22,28,0.42)',
   },
-  // постоянная подложка карточки во вкладке поверх Liquid Glass: видна, даже если стекла нет
-  cardBaseFill: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(120,120,128,0.14)',
+  // карточка во вкладке: заливка и кромка на САМОМ виде с радиусом — видны на чёрном всегда
+  cardBase: {
+    backgroundColor: 'rgba(118,118,128,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.16)',
   },
   glassTopEdge: {
     position: 'absolute',
