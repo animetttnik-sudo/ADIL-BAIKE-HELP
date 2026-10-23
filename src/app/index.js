@@ -25,7 +25,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRe
 import {
     Alert,
     AppState,
-    Dimensions, ImageBackground,
+    Dimensions, Image, ImageBackground,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -76,6 +76,7 @@ import {
 } from '../lib/totals';
 import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
 import { parsePlan } from '../lib/planParse';
+import { ALIAS_KEY, ITEM_NAME, buildImport, normName, summarize } from '../lib/receiptImport';
 import { parseShifts } from '../lib/shiftParse';
 import { applyShiftImport, previewShiftImport } from '../lib/shiftImport';
 import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../lib/shiftsNote';
@@ -1857,7 +1858,7 @@ const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
  * Позиции в шторке — плоский список в порядке таблицы. Ввод подряд: «Далее ›» на панели
  * шторки идёт по позициям сверху вниз, поле в фокусе докручивается над клавиатурой.
  */
-const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen }) {
+const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen, onImport }) {
   const inputs = useRef(new Map());
   const focusRef = useRef(null);
   const register = useCallback((id, r) => {
@@ -1887,6 +1888,9 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
   const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
   return (
     <View>
+      <ScaleButton style={[styles.actBtn, styles.impOpen]} onPress={onImport}>
+        <Text style={styles.actBtnTxt}>🧾  Импорт из чека</Text>
+      </ScaleButton>
       <View style={styles.gHead}>
         <Text style={styles.gTitle}>Как в таблице</Text>
         <Text style={styles.gSub}>{fmtNum(units)}</Text>
@@ -1916,6 +1920,338 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
     </View>
   );
 });
+
+
+const hm = (x) => (x && x.h != null ? `${String(x.h).padStart(2, '0')}:${String(x.min).padStart(2, '0')}` : '');
+
+/**
+ * Импорт позиций из «Отчёта по продажам». Текст — из Live Text iOS (в Expo Go нет распознавания на устройстве):
+ * фото в «Фото» → «Выбрать все» → «Скопировать» → здесь «Вставить» → «Разобрать» → проверка → «Применить».
+ * Сомнительные строки без подтверждения не применяются; выбор запоминается (zp_alias_v1).
+ */
+function ReceiptImport({ day, date, accent, onApply }) {
+  const [text, setText] = useState('');
+  const [photo, setPhoto] = useState(null);
+  const [photoBig, setPhotoBig] = useState(false);
+  const [learned, setLearned] = useState({});
+  const [res, setRes] = useState(null);
+  const [choice, setChoice] = useState({}); // rowKey → id | 'skip'
+  const [qtyFix, setQtyFix] = useState({}); // rowKey → число
+  const [picking, setPicking] = useState(null);
+  const [mode, setMode] = useState(0); // 0 заменить, 1 прибавить
+  const [useRcptDate, setUseRcptDate] = useState(true);
+  const [showSkip, setShowSkip] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem(ALIAS_KEY)
+      .then((raw) => raw && setLearned(JSON.parse(raw) || {}))
+      .catch(() => {});
+  }, []);
+
+  const paste = async () => {
+    try {
+      const t = await Clipboard.getStringAsync();
+      if (!t || !t.trim()) return Alert.alert('Буфер пуст', 'Скопируйте текст чека в «Фото» (Выбрать все → Скопировать) и нажмите «Вставить».');
+      Haptics.selectionAsync();
+      setText(t);
+      setRes(null);
+    } catch (err) {
+      console.warn('clipboard failed', err);
+    }
+  };
+  const pickPhoto = async () => {
+    try {
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+      if (!r.canceled && r.assets?.[0]?.uri) setPhoto(r.assets[0].uri);
+    } catch (err) {
+      console.warn('photo pick failed', err);
+    }
+  };
+  const parse = () => {
+    Haptics.selectionAsync();
+    const r = buildImport(text, learned);
+    setRes(r);
+    setChoice({});
+    setQtyFix({});
+    setPicking(null);
+    setUseRcptDate(!!r.period);
+  };
+
+  const rows = useMemo(
+    () => (res ? res.rows.map((r) => (qtyFix[r.key] != null ? { ...r, qty: qtyFix[r.key] } : r)) : []),
+    [res, qtyFix]
+  );
+  // нужно решение: «проверьте», без предложения, без количества — пока пользователь не выбрал
+  const pending = rows.filter((r) => !choice[r.key] && (r.status === 'check' || r.status === 'unknown' || (r.status === 'auto' && !r.qty)));
+  const decided = rows.filter((r) => choice[r.key] && (r.status !== 'auto' || choice[r.key] !== r.id));
+  const skipped = rows.filter((r) => (choice[r.key] ? choice[r.key] === 'skip' : r.status === 'skip'));
+  const effective = useMemo(
+    () => rows.map((r) => (choice[r.key] || r.status === 'auto' ? r : { ...r, status: 'unknown' })),
+    [rows, choice]
+  );
+  const sum = useMemo(() => summarize(effective, choice), [effective, choice]);
+  const targetDate = useRcptDate && res?.period ? res.period.date : date;
+  const timeLabel = res?.period?.time === 'night' ? 'ночь' : res?.period?.time === 'day' ? 'день' : null;
+
+  const decide = (key, v) => {
+    Haptics.selectionAsync();
+    setChoice((c) => ({ ...c, [key]: v }));
+    setPicking(null);
+  };
+  const acceptAll = () => {
+    Haptics.selectionAsync();
+    setChoice((c) => {
+      const n = { ...c };
+      for (const r of pending) if (r.id && r.qty) n[r.key] = r.id;
+      return n;
+    });
+  };
+  const apply = async () => {
+    if (pending.length || !sum.length) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    // запомнить решения пользователя
+    const nextL = { ...learned };
+    for (const r of rows) if (choice[r.key]) nextL[normName(r.name)] = choice[r.key];
+    AsyncStorage.setItem(ALIAS_KEY, JSON.stringify(nextL)).catch(() => {});
+    setLearned(nextL);
+    onApply({
+      date: targetDate,
+      time: res.period?.time || null,
+      mode: mode === 1 ? 'add' : 'replace',
+      items: sum.map((x) => ({ id: x.id, tallies: x.lines.map((l) => l.qty) })),
+    });
+  };
+
+  const Picker = ({ rowKey }) => (
+    <View style={styles.impPick}>
+      {CALC_ITEMS.map((it) => (
+        <Pressable key={it.id} style={styles.impChip} onPress={() => decide(rowKey, it.id)}>
+          <Text style={styles.impChipTxt}>{it.name}</Text>
+        </Pressable>
+      ))}
+      <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(rowKey, 'skip')}>
+        <Text style={styles.impChipTxt}>Не учитывать</Text>
+      </Pressable>
+    </View>
+  );
+
+  if (!res) {
+    const nLines = text ? text.split('\n').filter((l) => l.trim()).length : 0;
+    return (
+      <View>
+        <ItemCard style={[styles.listCard, styles.padCard]}>
+          {[
+            ['1', 'Откройте фото чека в «Фото».'],
+            ['2', 'Удерживайте палец на тексте (или значок текста справа внизу) → «Выбрать все» → «Скопировать».'],
+            ['3', 'Вернитесь сюда и нажмите «Вставить», затем «Разобрать».'],
+          ].map(([n, t]) => (
+            <View key={n} style={styles.impStep}>
+              <View style={[styles.impStepN, { backgroundColor: accent }]}>
+                <Text style={[styles.impStepNTxt, styles.onAccent]}>{n}</Text>
+              </View>
+              <Text style={styles.impStepTxt}>{t}</Text>
+            </View>
+          ))}
+        </ItemCard>
+        <View style={styles.notesBtns}>
+          <ScaleButton style={[styles.actBtn, styles.notesBtn]} onPress={paste}>
+            <Text style={styles.actBtnTxt}>Вставить</Text>
+          </ScaleButton>
+          <ScaleButton style={[styles.actBtn, styles.notesBtn]} onPress={pickPhoto}>
+            <Text style={styles.actBtnTxt}>{photo ? 'Другое фото' : 'Фото для сверки'}</Text>
+          </ScaleButton>
+        </View>
+        {photo ? (
+          <Pressable onPress={() => setPhotoBig((v) => !v)}>
+            <Image source={{ uri: photo }} style={photoBig ? styles.impPhotoBig : styles.impPhoto} resizeMode="contain" />
+          </Pressable>
+        ) : null}
+        {nLines ? (
+          <ItemCard style={[styles.listCard, styles.padCard]}>
+            <Text style={styles.k}>Вставлено строк: {nLines}</Text>
+            <Text style={styles.impRaw} numberOfLines={6}>
+              {text.trim()}
+            </Text>
+          </ItemCard>
+        ) : null}
+        <ScaleButton style={[styles.actBtn, { backgroundColor: accent }, !nLines && { opacity: 0.45 }]} onPress={() => nLines && parse()}>
+          <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
+        </ScaleButton>
+        <Text style={styles.hint}>
+          Фото здесь — только для сверки: распознаёт текст сам iPhone (Live Text). Названия и количества могут вставиться
+          одной колонкой или двумя — приложение разберёт оба варианта.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View>
+      {photo ? (
+        <Pressable onPress={() => setPhotoBig((v) => !v)}>
+          <Image source={{ uri: photo }} style={photoBig ? styles.impPhotoBig : styles.impPhoto} resizeMode="contain" />
+        </Pressable>
+      ) : null}
+      {res.period ? (
+        <ItemCard style={[styles.listCard, styles.padCard]}>
+          <Text style={styles.k}>
+            Чек: {fmtShort(res.period.from.date)} {hm(res.period.from)}
+            {res.period.to ? ` → ${fmtShort(res.period.to.date)} ${hm(res.period.to)}` : ''}
+            {timeLabel ? ` · ${timeLabel}` : ''}
+          </Text>
+          <View style={[styles.notesBtns, { marginTop: 10, marginBottom: 0 }]}>
+            <Pressable
+              style={[styles.impChip, styles.impSeg, useRcptDate && { borderColor: accent }]}
+              onPress={() => setUseRcptDate(true)}
+            >
+              <Text style={[styles.impChipTxt, useRcptDate && { color: accent }]}>На {fmtShort(res.period.date)}</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.impChip, styles.impSeg, !useRcptDate && { borderColor: accent }]}
+              onPress={() => setUseRcptDate(false)}
+            >
+              <Text style={[styles.impChipTxt, !useRcptDate && { color: accent }]}>На {fmtShort(date)} (открыта)</Text>
+            </Pressable>
+          </View>
+        </ItemCard>
+      ) : null}
+      {res.warnings.map((w) => (
+        <Text key={w} style={[styles.hint, styles.bad]}>
+          ⚠︎ {w}
+        </Text>
+      ))}
+
+      {pending.length ? (
+        <>
+          <View style={styles.gHead}>
+            <Text style={styles.gTitle}>Проверьте</Text>
+            <Text style={styles.gSub}>{pending.length}</Text>
+          </View>
+          <ItemCard style={styles.listCard}>
+            {pending.map((r, i) => (
+              <View key={r.key} style={[styles.impRow, i < pending.length - 1 && styles.lRowSep]}>
+                <View style={styles.impRowTop}>
+                  <Text style={styles.impName} numberOfLines={2}>
+                    {r.name}
+                  </Text>
+                  <View style={styles.adjMini}>
+                    <Pressable
+                      style={styles.adjMiniBtn}
+                      onPress={() => setQtyFix((q) => ({ ...q, [r.key]: Math.max(0, (r.qty || 0) - 1) }))}
+                    >
+                      <Text style={styles.adjMiniTxt}>−</Text>
+                    </Pressable>
+                    <Text style={[styles.impQty, !r.qty && styles.bad]}>{r.qty == null ? '?' : r.qty}</Text>
+                    <Pressable style={styles.adjMiniBtn} onPress={() => setQtyFix((q) => ({ ...q, [r.key]: (r.qty || 0) + 1 }))}>
+                      <Text style={styles.adjMiniTxt}>+</Text>
+                    </Pressable>
+                  </View>
+                </View>
+                <View style={styles.impPick}>
+                  {r.id && r.qty ? (
+                    <Pressable style={[styles.impChip, { borderColor: accent }]} onPress={() => decide(r.key, r.id)}>
+                      <Text style={[styles.impChipTxt, { color: accent }]}>✓ {ITEM_NAME[r.id]}</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable style={styles.impChip} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
+                    <Text style={styles.impChipTxt}>{r.id ? 'Другая…' : 'Выбрать позицию…'}</Text>
+                  </Pressable>
+                  <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(r.key, 'skip')}>
+                    <Text style={styles.impChipTxt}>Не учитывать</Text>
+                  </Pressable>
+                </View>
+                {picking === r.key ? <Picker rowKey={r.key} /> : null}
+              </View>
+            ))}
+          </ItemCard>
+          {pending.some((r) => r.id && r.qty) ? (
+            <Pressable onPress={acceptAll}>
+              <Text style={[styles.link, styles.showAll, { color: accent }]}>Согласиться со всеми предложениями</Text>
+            </Pressable>
+          ) : null}
+        </>
+      ) : null}
+
+      <View style={styles.gHead}>
+        <Text style={styles.gTitle}>Позиции</Text>
+        <Text style={styles.gSub}>{sum.reduce((a, x) => a + x.qty, 0)}</Text>
+      </View>
+      <ItemCard style={styles.listCard}>
+        {sum.length ? (
+          sum.map((x, i) => {
+            const cur = itemTotal(day?.counts?.[x.id]);
+            const next = mode === 1 ? cur + x.qty : x.qty;
+            return (
+              <View key={x.id} style={[styles.impRow, i < sum.length - 1 && styles.lRowSep]}>
+                <View style={styles.impRowTop}>
+                  <Text style={styles.impPos}>{x.name}</Text>
+                  <Text style={styles.impVal}>
+                    {targetDate === date && cur !== next ? <Text style={styles.impOld}>{cur} → </Text> : null}
+                    {next}
+                  </Text>
+                </View>
+                <Text style={styles.impFrom} numberOfLines={3}>
+                  {x.lines.map((l) => `${l.name} ${l.qty}`).join(' + ')}
+                </Text>
+              </View>
+            );
+          })
+        ) : (
+          <Text style={[styles.hint, { padding: 14 }]}>Пока ни одной позиции.</Text>
+        )}
+      </ItemCard>
+
+      {decided.length ? (
+        <Text style={styles.hint}>
+          Запомню ваш выбор для {decided.length} назв. — в следующий раз сопоставлю сам.
+        </Text>
+      ) : null}
+
+      {skipped.length ? (
+        <>
+          <Pressable style={styles.gHead} onPress={() => setShowSkip((v) => !v)}>
+            <Text style={styles.gTitle}>Не учитывается {showSkip ? '▾' : '▸'}</Text>
+            <Text style={styles.gSub}>{skipped.length}</Text>
+          </Pressable>
+          {showSkip ? (
+            <ItemCard style={styles.listCard}>
+              {skipped.map((r, i) => (
+                <View key={r.key} style={[styles.impRow, i < skipped.length - 1 && styles.lRowSep]}>
+                  <Pressable style={styles.impRowTop} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
+                    <Text style={styles.impName}>{r.name}</Text>
+                    <Text style={styles.impVal}>{r.qty ?? '?'}</Text>
+                  </Pressable>
+                  {picking === r.key ? <Picker rowKey={r.key} /> : null}
+                </View>
+              ))}
+            </ItemCard>
+          ) : null}
+        </>
+      ) : null}
+
+      <View style={{ marginTop: 14 }}>
+        <SegmentCapsule value={mode} labels={['Заменить', 'Прибавить']} onChange={setMode} height={44} />
+      </View>
+      <Text style={styles.hint}>
+        {mode === 1
+          ? 'Прибавить — количества из чека добавятся к уже вписанным.'
+          : 'Заменить — позиции из чека перезапишутся, остальные останутся как есть.'}
+        {timeLabel ? ` Смена: ${timeLabel}.` : ''}
+      </Text>
+      <ScaleButton
+        style={[styles.actBtn, { backgroundColor: accent }, (pending.length || !sum.length) && { opacity: 0.45 }]}
+        onPress={apply}
+      >
+        <Text style={[styles.actBtnTxt, styles.onAccent]}>
+          {pending.length ? `Осталось проверить: ${pending.length}` : `Применить на ${fmtShort(targetDate)}`}
+        </Text>
+      </ScaleButton>
+      <Pressable onPress={() => setRes(null)}>
+        <Text style={[styles.link, styles.showAll, { color: accent }]}>Вставить другой текст</Text>
+      </Pressable>
+    </View>
+  );
+}
 
 /** «Итог по позициям» — в шторке. */
 function CalcSummaryList({ day, rates }) {
@@ -2681,6 +3017,23 @@ export default function App() {
         return t;
       }),
     [editTallies]
+  );
+  /** Импорт из чека: позиции на дату (несколько строк чека → несколько подсчётов), смена день/ночь из чека. */
+  const applyCalcImport = useCallback(
+    ({ date, time, mode, items }) => {
+      patchCalc((p) => {
+        const d = p.days[date] || seedDay(p.prefs, stateRef.current?.shifts, date);
+        const counts = { ...d.counts };
+        for (const x of items) {
+          const prev = talliesOf(counts[x.id]).filter((v) => v > 0);
+          counts[x.id] = mode === 'add' ? [...prev, ...x.tallies] : x.tallies;
+        }
+        return { ...p, days: { ...p.days, [date]: { ...d, counts, ...(time ? { time } : {}), updated: Date.now() } } };
+      });
+      setCalcDate(date);
+      setSheet('calcPos');
+    },
+    [patchCalc]
   );
   const onCalcStep = useCallback((id, d) => stepTally(id, d, 0), [stepTally]);
   const onCalcSet = useCallback((id, n) => setTally(id, n, 0), [setTally]);
@@ -4697,8 +5050,21 @@ export default function App() {
             </Pressable>
           ),
           body: calcDay ? (
-            <CalcPositionsList day={calcDay} accent={accent} onStep={onCalcStep} onSet={onCalcSet} onOpen={openCalcItem} />
+            <CalcPositionsList
+              day={calcDay}
+              accent={accent}
+              onStep={onCalcStep}
+              onSet={onCalcSet}
+              onOpen={openCalcItem}
+              onImport={() => setSheet('calcImport')}
+            />
           ) : null,
+        };
+      case 'calcImport':
+        return {
+          title: 'Импорт из чека',
+          onClose: () => setSheet('calcPos'),
+          body: <ReceiptImport day={calcDay} date={calcDate} accent={accent} onApply={applyCalcImport} />,
         };
       case 'calcSum':
         return {
@@ -5288,6 +5654,34 @@ const styles = StyleSheet.create({
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
+  impOpen: { marginBottom: 4 },
+  impStep: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 6 },
+  impStepN: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
+  impStepNTxt: { fontSize: 13, fontWeight: '700' },
+  impStepTxt: { flex: 1, color: '#fff', fontSize: 15, lineHeight: 20 },
+  impPhoto: { height: 120, borderRadius: 16, marginBottom: 12, backgroundColor: 'rgba(255,255,255,0.06)' },
+  impPhotoBig: { height: SCREEN_H * 0.6, borderRadius: 16, marginBottom: 12, backgroundColor: 'rgba(255,255,255,0.06)' },
+  impRaw: { color: 'rgba(235,235,245,0.6)', fontSize: 12, marginTop: 6, lineHeight: 16 },
+  impRow: { paddingHorizontal: 14, paddingVertical: 11 },
+  impRowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  impName: { flex: 1, color: '#fff', fontSize: 15 },
+  impPos: { flex: 1, color: '#fff', fontSize: 16, fontWeight: '600' },
+  impVal: { color: '#fff', fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  impOld: { color: 'rgba(235,235,245,0.45)', fontWeight: '500' },
+  impQty: { minWidth: 30, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  impFrom: { color: 'rgba(235,235,245,0.5)', fontSize: 12, marginTop: 3 },
+  impPick: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  impChip: {
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  impChipSkip: { backgroundColor: 'rgba(255,69,58,0.12)' },
+  impChipTxt: { color: '#fff', fontSize: 13, fontWeight: '500' },
+  impSeg: { flex: 1, alignItems: 'center' },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16, marginBottom: 6 },
   tileHit: { width: CALC_TILE_W },
   tile: {
