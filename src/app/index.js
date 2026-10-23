@@ -25,7 +25,8 @@ import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRe
 import {
     Alert,
     AppState,
-    Dimensions, ImageBackground,
+    Dimensions,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -5126,9 +5127,10 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="light" />
       {state.custom?.bg ? (
-        <ImageBackground source={{ uri: state.custom.bg }} style={StyleSheet.absoluteFill} blurRadius={4}>
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          <Image source={{ uri: state.custom.bg }} style={StyleSheet.absoluteFill} resizeMode="cover" blurRadius={4} />
           <View style={styles.bgScrim} />
-        </ImageBackground>
+        </View>
       ) : (
         <>
           <View style={[styles.blob, styles.blobA, { backgroundColor: accent }]} />
