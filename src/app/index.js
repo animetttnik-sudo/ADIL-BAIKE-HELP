@@ -494,7 +494,7 @@ function SheetHost({ active, render, onClosed }) {
   );
 }
 
-function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158' }) {
+function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', variant, eyebrow }) {
   const [open, setOpen] = useState(false);
   const initial = useRef(value);
   const ty = useSharedValue(SCREEN_H);
@@ -526,16 +526,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158' }) 
   const card = useAnimatedStyle(() => ({ transform: [{ translateY: ty.value }] }));
   const dim = useAnimatedStyle(() => ({ opacity: back.value }));
 
-  return (
-    <View style={styles.field}>
-      <Text style={styles.label}>{label}</Text>
-      <Pressable style={({ pressed }) => [styles.input, styles.dateField, pressed && styles.rowPressed]} onPress={show}>
-        <Text style={styles.inputText}>
-          {fmtShort(value || iso(date))} {date.getFullYear()}
-          <Text style={styles.dateDow}>  ·  {DOW[date.getDay()]}</Text>
-        </Text>
-        <Text style={styles.chev}>›</Text>
-      </Pressable>
+  const sheet = (
       <Modal visible={open} transparent animationType="none" onRequestClose={hide}>
         <View style={styles.wheelBack}>
           <Animated.View style={[styles.wheelDim, dim]} pointerEvents="none" />
@@ -600,6 +591,42 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158' }) 
           </Animated.View>
         </View>
       </Modal>
+  );
+
+  if (variant === 'header') {
+    // шапка «Расчёта»: подпись сверху и дата крупно в стеклянной капсуле — по центру, как месяц у Расходов/Смен
+    return (
+      <View style={styles.hCenter}>
+        <View style={styles.hCenterIn}>
+          {eyebrow ? (
+            <Text style={styles.eyebrow} numberOfLines={1}>
+              {eyebrow}
+            </Text>
+          ) : null}
+          <ScaleButton style={styles.hDateHit} onPress={show}>
+            <Glass style={styles.hDatePill} intensity={40}>
+              <Text style={styles.hDateTxt} numberOfLines={1} adjustsFontSizeToFit>
+                {fmtShort(value || iso(date))}
+                <Text style={styles.hDateDow}> · {DOW[date.getDay()]}</Text>
+              </Text>
+            </Glass>
+          </ScaleButton>
+        </View>
+        {sheet}
+      </View>
+    );
+  }
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <Pressable style={({ pressed }) => [styles.input, styles.dateField, pressed && styles.rowPressed]} onPress={show}>
+        <Text style={styles.inputText}>
+          {fmtShort(value || iso(date))} {date.getFullYear()}
+          <Text style={styles.dateDow}>  ·  {DOW[date.getDay()]}</Text>
+        </Text>
+        <Text style={styles.chev}>›</Text>
+      </Pressable>
+      {sheet}
     </View>
   );
 }
@@ -1453,7 +1480,6 @@ const ROLE_LABELS = ['Рядовой', 'Кассир'];
 const TIME_LABELS = ['День', 'Ночь'];
 const EMPTY_COUNTS = {};
 const CALC_ORDER = CALC_ITEMS.map((it) => it.id);
-const CALC_ORDER_ADJ = [...CALC_ORDER, 'adj']; // «Далее» с последней позиции → недостача дня
 const roleLabel = (role, time) =>
   `${role === 'ryad' ? 'Рядовой' : 'Кассир'} · ${time === 'day' ? 'день' : 'ночь'}`;
 
@@ -1704,68 +1730,66 @@ function CheckRow({ checked, label, amount, accent, onToggle }) {
  * (withCalcDayAdj / calcDayAdj) — то же поле, что в шторке смены, копии нет.
  * Сумму смены не меняет; недостача вычитается из «К выплате», излишек — для сведения.
  */
-const CalcAdjField = memo(function CalcAdjField({ value, onChange, accent, register, onFocusItem, onNext }) {
+const CalcAdjRow = memo(function CalcAdjRow({ value, date, onChange, accent, register, onFocusItem, onNext }) {
   const [plusLocal, setPlusLocal] = useState(value < 0);
   const plus = value ? value < 0 : plusLocal;
   const n = Math.abs(Number(value) || 0);
   const tone = !n ? null : plus || shortTone(n) === 'bad' ? styles.bad : styles.good;
   const setRef = useCallback((r) => register('adj', r), [register]);
   return (
-    <ItemCard style={styles.calcAdjCard}>
-      <View style={styles.adjHead}>
-        <Text style={styles.setL}>{plus ? 'Излишек' : 'Недостача'}</Text>
-        <View style={styles.adjSeg}>
+    <View>
+      <View style={styles.adjLine}>
+        <Text style={[styles.setL, { flex: 1 }]}>{plus ? 'Излишек' : 'Недостача'}</Text>
+        <View style={styles.adjMini}>
           {[
-            [false, '− недостача'],
-            [true, '+ излишек'],
+            [false, '−'],
+            [true, '+'],
           ].map(([on, lab]) => (
             <Pressable
               key={lab}
-              hitSlop={6}
-              style={[styles.adjBtn, plus === on && styles.adjBtnMinus]}
+              hitSlop={4}
+              accessibilityLabel={on ? 'Излишек' : 'Недостача'}
+              style={[styles.adjMiniBtn, plus === on && styles.adjBtnMinus]}
               onPress={() => {
                 Haptics.selectionAsync();
                 setPlusLocal(on);
                 if (n) onChange(on ? -n : n);
               }}
             >
-              <Text style={[styles.adjBtnTxt, plus === on && styles.bad]}>{lab}</Text>
+              <Text style={[styles.adjMiniTxt, plus === on && styles.bad]}>{lab}</Text>
             </Pressable>
           ))}
         </View>
-      </View>
-      <View style={styles.calcAdjRow}>
-        <Text style={[styles.adjSign, { fontSize: 22 }, tone || styles.amtDim]}>{plus ? '+' : '−'}</Text>
         <NumInput
           inputRef={setRef}
           value={n}
           onChange={(k) => onChange(plus ? -k : k)}
           onFocused={() => {
             onFocusItem('adj');
+            // отдельное поле: без «Назад», «Готово» закрывает клавиатуру
             kbShow({
               key: 'calc-adj',
               scope: 'main',
               label: plus ? 'Излишек' : 'Недостача',
-              hasPrev: true,
+              hasPrev: false,
               isLast: true,
               accent,
-              onPrev: () => onNext('adj', -1),
+              onPrev: () => {},
               onNext: () => onNext('adj', 1),
             });
           }}
           onBlurred={() => kbHide('calc-adj')}
           onSubmit={() => onNext('adj', 1)}
           accessoryId={KB_NONE}
-          style={[styles.cCount, styles.cCountTxt, styles.calcAdjInput, tone]}
+          style={[styles.cCount, styles.cCountTxt, styles.adjNum, tone]}
         />
-        <Text style={styles.bigUnit}>сом</Text>
       </View>
-      <Text style={styles.fieldNote}>
-        {plus
-          ? 'Излишек — для сведения: его забирает работодатель, в зарплату не идёт.'
-          : 'Записывается в смену этого дня в «Сменах». Сумма смены не меняется — недостача вычитается из «К выплате».'}
-      </Text>
-    </ItemCard>
+      {n ? (
+        <Text style={[styles.adjLineNote, plus && styles.bad]} numberOfLines={1}>
+          {plus ? 'для сведения — в зарплату не идёт' : `в смену ${fmtShort(date)} · вычитается из «К выплате»`}
+        </Text>
+      ) : null}
+    </View>
   );
 });
 
@@ -1779,7 +1803,7 @@ const CalcView = memo(function CalcView({
   // ── ввод с клавиатуры: Далее / ↑ идут по списку сверху вниз, как строки в Excel
   const inputs = useRef(new Map());
   const focusRef = useRef(null);
-  const order = CALC_ORDER_ADJ;
+  const order = CALC_ORDER;
   const orderRef = useRef(order);
   orderRef.current = order;
   const register = useCallback((id, r) => {
@@ -1859,8 +1883,6 @@ const CalcView = memo(function CalcView({
 
   return (
     <>
-      <DateWheel value={date} onChange={onDate} label="Дата смены" accent={accent} />
-
       <Glass style={styles.balance} intensity={42}>
         <Text style={styles.period}>Моя зарплата</Text>
         <Text style={styles.paySub}>
@@ -1893,6 +1915,15 @@ const CalcView = memo(function CalcView({
           amount={calc.rates.stops}
           accent={accent}
           onToggle={() => onPatchDay((d) => ({ ...d, stops: !d.stops }))}
+        />
+        <CalcAdjRow
+          value={adj}
+          date={date}
+          onChange={onAdj}
+          accent={accent}
+          register={register}
+          onFocusItem={onFocusItem}
+          onNext={onNext}
         />
         <View style={styles.staffRow}>
           <Text style={[styles.setL, { flex: 1 }]}>Сотрудники</Text>
@@ -1941,10 +1972,7 @@ const CalcView = memo(function CalcView({
       </Animated.View>
 
       <Animated.View layout={ROW_LAYOUT}>
-        <Text style={[styles.hint, { paddingHorizontal: 6 }]}>
-          Тап по числу и вводите подряд — «Далее» над клавиатурой переходит к следующей позиции.
-          Тап по названию — несколько подсчётов (например, 59 + 98).
-        </Text>
+        <Text style={[styles.hint, { paddingHorizontal: 6 }]}>Тап по названию — несколько подсчётов (59 + 98)</Text>
       </Animated.View>
 
       <Animated.View style={styles.group} layout={ROW_LAYOUT}>
@@ -1961,7 +1989,7 @@ const CalcView = memo(function CalcView({
               item={it}
               tallies={day.counts[it.id]}
               last={i === CALC_ITEMS.length - 1}
-              isLastField={false}
+              isLastField={i === CALC_ITEMS.length - 1}
               pos={i}
               count={CALC_ITEMS.length}
               accent={accent}
@@ -1974,21 +2002,6 @@ const CalcView = memo(function CalcView({
             />
           ))}
         </ItemCard>
-      </Animated.View>
-
-      <Animated.View style={styles.group} layout={ROW_LAYOUT}>
-        <View style={styles.gHead}>
-          <Text style={styles.gTitle}>Недостача · излишек</Text>
-          <Text style={styles.gSub}>в смену {fmtShort(date)}</Text>
-        </View>
-        <CalcAdjField
-          value={adj}
-          onChange={onAdj}
-          accent={accent}
-          register={register}
-          onFocusItem={onFocusItem}
-          onNext={onNext}
-        />
       </Animated.View>
 
       <Animated.View style={styles.group} layout={ROW_LAYOUT}>
@@ -4677,32 +4690,17 @@ export default function App() {
             <PayHeader payday={page === 0 ? shownPay : shownShiftPay} label={DOCK_LABELS[page]} />
           </>
         ) : (
-          <View style={styles.monthWrap}>
-            <ScaleButton
-              style={styles.navHit}
-              onPress={() => setCalcDate((d) => addDays(d, -1))}
-            >
-              <Glass style={styles.navGlass} intensity={40}>
-                <Text style={styles.navTxt}>‹</Text>
-              </Glass>
-            </ScaleButton>
-            <View style={styles.monthBlock}>
-              <Text style={styles.eyebrow} numberOfLines={1}>
-                {DOCK_LABELS[page]} · {DOW_FULL[parse(calcDate).getDay()]}
-              </Text>
-              <Text style={styles.h1} numberOfLines={1} adjustsFontSizeToFit>
-                {fmtShort(calcDate)}
-              </Text>
-            </View>
-            <ScaleButton
-              style={styles.navHit}
-              onPress={() => setCalcDate((d) => addDays(d, 1))}
-            >
-              <Glass style={styles.navGlass} intensity={40}>
-                <Text style={styles.navTxt}>›</Text>
-              </Glass>
-            </ScaleButton>
-          </View>
+          <>
+            <View style={styles.hSide} />
+            <DateWheel
+              variant="header"
+              value={calcDate}
+              onChange={setCalcDate}
+              label="Дата смены"
+              eyebrow={`${DOCK_LABELS[2]} · ${parse(calcDate).getFullYear()}`}
+              accent={accent}
+            />
+          </>
         )}
         <View ref={addBtnRef} collapsable={false}>
           <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={onPlus}>
@@ -4829,7 +4827,6 @@ export default function App() {
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
 const ORDINALS = ['Первая', 'Вторая', 'Третья'];
-const DOW_FULL = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
 /** «12–25 сентября» или «29 сентября – 12 октября». */
 function fmtRange(a, b) {
   const da = parse(a);
@@ -4853,20 +4850,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  monthWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8, height: 58 },
   hSide: { width: 48, height: 48 },
   hCenter: { flex: 1, height: 58, marginHorizontal: 8 },
   hCenterIn: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
   h1C: { color: '#fff', fontSize: 27, lineHeight: 32, fontWeight: '700', letterSpacing: -0.5 },
+  hDateHit: { marginTop: 2 },
+  hDatePill: {
+    height: 40,
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hDateTxt: { color: '#fff', fontSize: 23, fontWeight: '700', letterSpacing: -0.4 },
+  hDateDow: { color: 'rgba(235,235,245,0.55)', fontSize: 18, fontWeight: '600' },
   hDots: { flexDirection: 'row', gap: 5, marginTop: 4, height: 6 },
   hDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(235,235,245,0.25)' },
   hDotOn: { width: 16, backgroundColor: 'rgba(235,235,245,0.9)' },
   pager: { flex: 1 },
-  navHit: { width: 48, height: 48 },
-  navTxt: { color: '#fff', fontSize: 28, fontWeight: '300', marginTop: -2 },
-  monthBlock: { paddingHorizontal: 4, flexShrink: 1, minWidth: 0 },
   eyebrow: { color: 'rgba(235,235,245,0.55)', fontSize: 13, fontWeight: '600' },
-  h1: { color: '#fff', fontSize: 30, fontWeight: '700', letterSpacing: -0.6 },
   round: {
     width: 48,
     height: 48,
@@ -4988,7 +4990,6 @@ const styles = StyleSheet.create({
   },
   stat3: { flex: 1, minWidth: 0 },
   statV: { color: '#fff', fontSize: 19, fontWeight: '700', letterSpacing: -0.3, marginTop: 4, fontVariant: ['tabular-nums'] },
-  navGlass: { flex: 1, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   itemCard: {
     borderRadius: 20,
     overflow: 'hidden',
@@ -5107,9 +5108,19 @@ const styles = StyleSheet.create({
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
-  calcAdjCard: { paddingHorizontal: 14, paddingVertical: 12 },
-  calcAdjRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
-  calcAdjInput: { flex: 1, textAlign: 'left', paddingHorizontal: 10, marginRight: 8 },
+  adjLine: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
+  adjMini: { flexDirection: 'row', gap: 4 },
+  adjMiniBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(118,118,128,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  adjMiniTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 18, fontWeight: '700', marginTop: -1 },
+  adjNum: { width: 84 },
+  adjLineNote: { color: 'rgba(235,235,245,0.45)', fontSize: 12, marginTop: -2, marginBottom: 2 },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
   islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {
