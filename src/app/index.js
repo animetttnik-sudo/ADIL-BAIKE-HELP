@@ -585,7 +585,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
               display="spinner"
               locale="ru-RU"
               themeVariant="dark"
-              onChange={(_, d) => d && onChange(iso(d))}
+              onValueChange={(_, d) => d && onChange(iso(d))}
               style={{ height: 200, width: SCREEN_W - 40 }}
             />
           </Animated.View>
@@ -1668,12 +1668,13 @@ function KeyBarHost({ scope }) {
   const shown = mine || lastRef.current; // пока клавиатура уезжает — держим последнюю подпись
   const anim = useAnimatedStyle(() => {
     const h = kb.height.value > 0 ? kb.height.value : jsH.value;
-    return { opacity: h > 40 ? 1 : 0, transform: [{ translateY: -h }] };
+    // без opacity: панель прячется сдвигом за нижний край экрана, пока клавиатуры нет
+    return { transform: [{ translateY: h > 40 ? -h : KB_BAR_H + 40 }] };
   });
   if (Platform.OS !== 'ios' || !shown) return null;
   return (
     <Animated.View style={[styles.keyBarWrap, anim]} pointerEvents={mine ? 'box-none' : 'none'}>
-      <Glass style={styles.keyBar} intensity={60}>
+      <View style={styles.keyBar}>
         <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
           <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
@@ -1699,7 +1700,7 @@ function KeyBarHost({ scope }) {
         >
           <Text style={styles.keyBarNextTxt}>{shown.isLast ? 'Готово' : 'Далее ›'}</Text>
         </Pressable>
-      </Glass>
+      </View>
     </Animated.View>
   );
 }
@@ -5644,21 +5645,22 @@ const styles = StyleSheet.create({
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
   keyBarWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50 },
+  // сплошная панель во всю ширину, прилегает к верху клавиатуры — не зависит от стекла
   keyBar: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    height: KB_BAR_H,
     paddingHorizontal: 10,
-    paddingVertical: 7,
-    marginHorizontal: 8,
-    marginBottom: 6,
-    borderRadius: 26,
+    backgroundColor: 'rgba(30,30,32,0.96)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.14)',
   },
   keyBarRound: {
     width: 48,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.16)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -5669,7 +5671,7 @@ const styles = StyleSheet.create({
     minWidth: 84,
     borderRadius: 22,
     paddingHorizontal: 14,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.16)',
     alignItems: 'center',
     justifyContent: 'center',
   },
