@@ -1661,6 +1661,22 @@ function KeyBarHost({ scope }) {
       b.remove();
     };
   }, [jsH]);
+  // стекло панели создаётся только когда клавиатура уже встала (панель на экране и видна),
+  // каждый показ — новый key; пока его нет, видна лёгкая подложка с кромкой
+  const [glassKey, setGlassKey] = useState(0);
+  const [glassOn, setGlassOn] = useState(false);
+  useEffect(() => {
+    const a = Keyboard.addListener('keyboardDidShow', () => {
+      setGlassKey((k) => k + 1);
+      setGlassOn(true);
+    });
+    const b = Keyboard.addListener('keyboardWillHide', () => setGlassOn(false));
+    if (Keyboard.isVisible()) setGlassOn(true);
+    return () => {
+      a.remove();
+      b.remove();
+    };
+  }, []);
   const lastRef = useRef(null);
   const mine = cfg && cfg.scope === scope ? cfg : null;
   if (mine) lastRef.current = mine;
@@ -1675,6 +1691,19 @@ function KeyBarHost({ scope }) {
   return (
     <Animated.View style={[styles.keyBarWrap, anim]} pointerEvents={mine ? 'box-none' : 'none'}>
       <View style={styles.keyBar}>
+        {glassOn ? (
+          LG && GlassView ? (
+            <GlassView
+              key={glassKey}
+              pointerEvents="none"
+              glassEffectStyle="regular"
+              colorScheme="dark"
+              style={StyleSheet.absoluteFill}
+            />
+          ) : (
+            <BlurView key={glassKey} pointerEvents="none" intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+          )
+        ) : null}
         <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
           <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
@@ -5645,16 +5674,21 @@ const styles = StyleSheet.create({
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
   keyBarWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50 },
-  // сплошная панель во всю ширину, прилегает к верху клавиатуры — не зависит от стекла
+  // стеклянная капсула над клавиатурой; лёгкая подложка + кромка на самом виде — панель видна,
+  // даже если стекло не нарисовалось
   keyBar: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    height: KB_BAR_H,
     paddingHorizontal: 10,
-    backgroundColor: 'rgba(30,30,32,0.96)',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255,255,255,0.14)',
+    paddingVertical: 7,
+    marginHorizontal: 8,
+    marginBottom: 6,
+    borderRadius: 26,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(44,44,50,0.5)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
   },
   keyBarRound: {
     width: 48,
