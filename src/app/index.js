@@ -68,6 +68,7 @@ import {
   pagerRange,
   paydayMode,
   paydayTotals,
+  plural,
   shouldAutoAdvance,
   summaryView,
   toggleInState,
@@ -111,10 +112,22 @@ import {
   defaultState,
   seedMonth,
   seedPaydays,
+  seedShiftPaydays,
   paydayForDate,
   normalizeApp,
 } from '../lib/periods';
 import { CALC_TITLES, isLinkedShift, syncCalcShifts } from '../lib/link';
+import {
+  netForPayday,
+  shiftNet,
+  shiftPagerRange,
+  shiftPayday,
+  shiftsInPeriod,
+  shiftTotals,
+  shortageOf,
+  upcomingPayday,
+  withShortage,
+} from '../lib/shifts';
 
 // expo-glass-effect — опционально
 let GlassView = null;
@@ -126,8 +139,6 @@ try {
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const SWIPE = 72;
-const SWIPE_TRIGGER = SWIPE * 0.8;
 const ACCENT_PRESETS = [{ h: 145 }, { h: 210 }, { h: 280 }, { h: 30 }, { h: 350 }, { h: 190 }];
 const INIT_Y = 2026;
 const INIT_M = 8;
@@ -157,48 +168,6 @@ function wErr(err) {
 }
 const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
-
-/** Резинка: до SWIPE — 1:1, дальше — нарастающее сопротивление (макс. +36px). */
-function rubber(t) {
-  'worklet';
-  const a = Math.abs(t);
-  if (a <= SWIPE) return t;
-  const over = a - SWIPE;
-  return Math.sign(t) * (SWIPE + 36 * (1 - Math.exp(-over / 90)));
-}
-
-/** Горизонтальный свайп строки: вправо — onEdit, влево — onDelete. */
-function useRowSwipe(x, id, onEdit, onDelete) {
-  return useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetX([-14, 14])
-        .failOffsetY([-12, 12])
-        .onUpdate((e) => {
-          try {
-            x.value = rubber(e.translationX);
-          } catch (err) {
-            wErr(err);
-          }
-        })
-        .onEnd((e, success) => {
-          try {
-            if (success && e.translationX > SWIPE_TRIGGER) {
-              x.value = withSpring(0, softSpring);
-              scheduleOnRN(onEdit, id);
-            } else if (success && e.translationX < -SWIPE_TRIGGER) {
-              x.value = withSpring(0, softSpring);
-              scheduleOnRN(onDelete, id);
-            } else {
-              x.value = withSpring(0, spring);
-            }
-          } catch (err) {
-            wErr(err);
-          }
-        }),
-    [x, id, onEdit, onDelete]
-  );
-}
 
 const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
 
@@ -1043,60 +1012,50 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
   );
 });
 
-const ShiftRow = memo(function ShiftRow({ item, last, onEdit, onDelete, onCalc, accent }) {
-  const x = useSharedValue(0);
+/**
+ * Стеклянная карточка смены — тот же язык, что у расходов. Тап — изменить (сумма, недостача,
+ * «Убрать день»); у смены из «Расчёта» бейдж «из расчёта ›» открывает расчёт этого дня.
+ * Недостача не уменьшает сумму смены — отдельная красная строка.
+ */
+const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
   const id = item.id;
-  const pan = useRowSwipe(x, id, onEdit, onDelete);
-  const rowStyle = useAnimatedStyle(() => ({ transform: [{ translateX: x.value }] }));
-  const leftStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(x.value, [0, SWIPE * 0.4], [0, 1], Extrapolation.CLAMP),
-  }));
-  const rightStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(x.value, [-SWIPE * 0.4, 0], [1, 0], Extrapolation.CLAMP),
-  }));
-
+  const edit = useCallback(() => onEdit(id), [id, onEdit]);
+  const noSum = item.amount == null || item.amount === '';
+  const short = shortageOf(item);
+  const linked = item.source === 'calc';
   return (
-    <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
-        <View style={[styles.rowWrap, !last && styles.rowSep]}>
-          <Animated.View style={[styles.revealLeft, leftStyle]}>
-            <Text style={styles.revealTxt}>{item.source === 'calc' ? 'Открыть' : 'Сумма'}</Text>
-          </Animated.View>
-          <Animated.View style={[styles.revealRight, rightStyle]}>
-            <Text style={styles.revealTxt}>Убрать</Text>
-          </Animated.View>
-          <GestureDetector gesture={pan}>
-            <Animated.View style={[styles.item, rowStyle]}>
-              <Pressable style={styles.itemPress} onPress={() => onEdit(id)}>
-                <View style={styles.whenCol}>
-                  <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
-                  <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
-                </View>
-                <View style={styles.mid}>
-                  <Text style={styles.itemTitle} numberOfLines={1}>
-                    {item.title}
-                  </Text>
-                  {item.source === 'calc' ? (
-                    <Pressable
-                      hitSlop={8}
-                      style={styles.calcBadge}
-                      onPress={() => onCalc(item.calcDate || item.date)}
-                    >
-                      <Text style={[styles.calcBadgeTxt, { color: accent }]}>из расчёта ›</Text>
-                    </Pressable>
-                  ) : (
-                    <Text style={styles.meta}>
-                      {item.amount == null || item.amount === '' ? 'без суммы — тап, чтобы вписать' : 'вручную'}
-                    </Text>
-                  )}
-                </View>
-                <Text style={[styles.amt, (item.amount == null || item.amount === '') && styles.amtDim]}>
-                  {item.amount == null || item.amount === '' ? '—' : money(item.amount)}
-                </Text>
-                <Text style={styles.chevMini}>›</Text>
+    <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
+      <View collapsable={false}>
+      <Glass style={styles.eCard} intensity={34}>
+        <Pressable style={({ pressed }) => [styles.itemPress, pressed && styles.rowPressed]} onPress={edit}>
+          <View style={styles.whenCol}>
+            <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
+            <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
+          </View>
+          <View style={styles.mid}>
+            <Text style={styles.itemTitle} numberOfLines={1}>
+              {item.title || 'Смена'}
+            </Text>
+            {linked ? (
+              <Pressable hitSlop={8} style={styles.calcBadge} onPress={() => onCalc(item.calcDate || item.date)}>
+                <Text style={[styles.calcBadgeTxt, { color: accent }]}>∑ из расчёта ›</Text>
               </Pressable>
-            </Animated.View>
-          </GestureDetector>
-        </View>
+            ) : (
+              <Text style={styles.meta} numberOfLines={1}>
+                {noSum ? 'без суммы — тап, чтобы вписать' : 'вручную'}
+              </Text>
+            )}
+            {short ? (
+              <Text style={styles.metaShort} numberOfLines={1}>
+                недостача −{money(short)}
+              </Text>
+            ) : null}
+          </View>
+          <Text style={[styles.amt, noSum && styles.amtDim]}>{noSum ? '—' : money(item.amount)}</Text>
+          <Text style={styles.chevMini}>›</Text>
+        </Pressable>
+      </Glass>
+      </View>
     </Animated.View>
   );
 });
@@ -1332,8 +1291,9 @@ function AnalysisView({ state, accent }) {
   const [range, setRange] = useState(6);
   const M = {};
   const get = (k) => M[k] || (M[k] = { e: 0, s: 0 });
+  // заработано за месяц — чистыми, после недостачи
   state.shifts.forEach((x) => {
-    get(x.date.slice(0, 7)).e += Number(x.amount) || 0;
+    get(x.date.slice(0, 7)).e += shiftNet(x);
   });
   state.expenses.forEach((x) => {
     if (displayStatus(x) === 'paid') get(x.date.slice(0, 7)).s += Number(x.amount) || 0;
@@ -1971,7 +1931,7 @@ const PAGE_SPRING = { damping: 34, stiffness: 300, mass: 0.9, overshootClamping:
 const AUTO_NEXT_MS = 900;
 
 /** Большая карточка зарплаты — часть страницы, уезжает и приезжает вместе с ней. */
-const PayCard = memo(function PayCard({ payday, t, accent }) {
+const PayCard = memo(function PayCard({ payday, t, short, accent }) {
   const sv = summaryView(t);
   const nextP = PAYDAYS[PAYDAYS.indexOf(payday) + 1] || addDays(payday, 14);
   return (
@@ -2004,12 +1964,17 @@ const PayCard = memo(function PayCard({ payday, t, accent }) {
         <Stat k="Расходы за зарплату" v={sv.total} />
         <Stat k="Оплачено" v={sv.paid} tone="good" />
       </View>
-      {sv.earned ? <Text style={styles.calcMeta}>заработано за смены · {sv.earned}</Text> : null}
+      {sv.earned || short ? (
+        <Text style={styles.calcMeta}>
+          заработано за смены · {sv.earned || '0'}
+          {short ? ` (с учётом недостачи −${money(short)})` : ''}
+        </Text>
+      ) : null}
     </Glass>
   );
 });
 
-const PayPage = memo(function PayPage({ k, pos, payday, list, earned, accent, onEdit, onToggle, arc }) {
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, accent, onEdit, onToggle, arc }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2023,7 +1988,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, accent, on
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
-            <PayCard payday={payday} t={t} accent={accent} />
+            <PayCard payday={payday} t={t} short={short} accent={accent} />
             {list.length === 0 ? (
               <ItemCard>
                 <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
@@ -2042,8 +2007,82 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, accent, on
   );
 });
 
+/** Большая карточка зарплаты в «Сменах»: к выплате = заработано − недостача. */
+const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent }) {
+  const per = workPeriod(payday);
+  return (
+    <Glass style={styles.balance} intensity={42}>
+      <View>
+        <Text style={styles.period} numberOfLines={1}>
+          Зарплата {fmtShort(payday)}
+        </Text>
+        <View style={styles.paySubRow}>
+          <Text style={styles.paySubL} numberOfLines={1}>
+            смены {fmtRange(per.start, per.end)}
+          </Text>
+          <View style={[styles.tag, t.short ? styles.tagBad : styles.tagGood]}>
+            <Text style={[styles.tagTxt, t.short ? styles.bad : styles.good]} numberOfLines={1}>
+              {t.count} {plural(t.count, 'смена', 'смены', 'смен')}
+            </Text>
+          </View>
+        </View>
+        <Text style={[styles.k, { marginTop: 12 }]}>К выплате</Text>
+        <Text
+          key={t.net}
+          style={[styles.bigPay, { color: t.net < 0 ? '#ff453a' : accent }]}
+          numberOfLines={1}
+        >
+          {t.net < 0 ? `−${money(-t.net)}` : money(t.net)}
+        </Text>
+      </View>
+      <View style={styles.statRow}>
+        <Stat k="Заработано" v={money(t.earned)} />
+        <Stat k="Недостача" v={t.short ? `−${money(t.short)}` : '0'} tone={t.short ? 'bad' : undefined} />
+        <Stat k="Смен" v={String(t.count)} />
+      </View>
+      <Text style={styles.calcMeta}>
+        с суммой {t.withSum} · из расчёта {t.fromCalc}
+        {t.shortCount ? ` · с недостачей ${t.shortCount}` : ''}
+      </Text>
+    </Glass>
+  );
+});
+
+const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, accent, onEdit, onCalc }) {
+  const st = useAnimatedStyle(() => {
+    const d = k - pos.value;
+    const a = Math.min(1, Math.abs(d));
+    return {
+      transform: [{ translateX: d * (PAGE_W + PAGE_GAP) }, { scale: 1 - 0.07 * a }],
+    };
+  });
+  const t = useMemo(() => shiftTotals(list), [list]);
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, st]}>
+      <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
+        <LayoutAnimationConfig skipEntering skipExiting>
+          <View>
+            <ShiftSumCard payday={payday} t={t} accent={accent} />
+            {list.length === 0 ? (
+              <ItemCard>
+                <Text style={styles.empty}>Смен к этой зарплате нет — «+» вверху</Text>
+              </ItemCard>
+            ) : (
+              list.map((s) => <ShiftCard key={s.id} item={s} onEdit={onEdit} onCalc={onCalc} accent={accent} />)
+            )}
+            <Text style={[styles.hint, styles.pageHint]}>
+              Листайте вбок — другие зарплаты. Тап по смене — сумма, недостача или «убрать день». Смены «из расчёта»
+              считаются сами.
+            </Text>
+          </View>
+        </LayoutAnimationConfig>
+      </ScrollView>
+    </Animated.View>
+  );
+});
+
 /** Пейджер: свой жест с ручной активацией — вбок только явным горизонтальным движением. */
-const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, onEdit, onToggle, arc, onPage }) {
+const PayPager = memo(function PayPager({ pos, cur, lo, hi, pages, arc, onPage, Page = PayPage, pageProps }) {
   const sx = useSharedValue(0);
   const sy = useSharedValue(0);
   const drag0 = useSharedValue(0);
@@ -2120,18 +2159,7 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
     <GestureDetector gesture={gesture}>
       <View style={styles.pager} collapsable={false}>
         {pages.map((pg) => (
-          <PayPage
-            key={pg.payday}
-            k={pg.k}
-            pos={pos}
-            payday={pg.payday}
-            list={pg.list}
-            earned={pg.earned}
-            accent={accent}
-            onEdit={onEdit}
-            onToggle={onToggle}
-            arc={arc}
-          />
+          <Page key={pg.payday} pos={pos} {...pg} {...pageProps} />
         ))}
       </View>
     </GestureDetector>
@@ -2139,7 +2167,7 @@ const PayPager = memo(function PayPager({ pi, pos, cur, lo, hi, pages, accent, o
 });
 
 /** Месяц в центре шапки: меняется с перекрёстным проявлением при листании через месяцы. */
-function PayHeader({ payday }) {
+function PayHeader({ payday, label = 'Расходы' }) {
   if (!payday) return <View style={styles.hCenter} />;
   const d = parse(payday);
   const y = d.getFullYear();
@@ -2154,7 +2182,7 @@ function PayHeader({ payday }) {
         style={styles.hCenterIn}
       >
         <Text style={styles.eyebrow} numberOfLines={1}>
-          Расходы · {y}
+          {label} · {y}
         </Text>
         <Text style={styles.h1C} numberOfLines={1}>
           {MONTHS[m]}
@@ -2176,6 +2204,15 @@ function newExpenseDate(k) {
   if (!p) return today;
   const nextP = PAYDAYS[k + 1] || addDays(p, 14);
   return today >= p && today < nextP ? today : p;
+}
+
+/** Дата новой смены: сегодня, если сегодня в рабочем периоде показанной зарплаты, иначе его первый день. */
+function newShiftDate(k) {
+  const today = todayIso();
+  const p = k != null ? PAYDAYS[k] : null;
+  if (!p) return today;
+  const per = workPeriod(p);
+  return today >= per.start && today <= per.end ? today : per.start;
 }
 
 export default function App() {
@@ -2201,6 +2238,14 @@ export default function App() {
   const pageHi = useSharedValue(PAYDAYS.length - 1);
   const piRef = useRef(null);
   piRef.current = pi;
+  // Смены: свой пейджер зарплат (свои shared values — с «Расходами» не пересекаются)
+  const [si, setSi] = useState(null);
+  const shiftPos = useSharedValue(0);
+  const shiftCur = useSharedValue(0);
+  const shiftLo = useSharedValue(0);
+  const shiftHi = useSharedValue(PAYDAYS.length - 1);
+  const siRef = useRef(null);
+  siRef.current = si;
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
@@ -2410,6 +2455,12 @@ export default function App() {
       seeded = seedPaydays(seeded, PAYDAYS.slice(Math.max(0, p0 - 1), p0 + 2));
       pagePos.value = p0;
       pageCur.value = p0;
+      // «Смены» — на ближайшей предстоящей зарплате
+      const { lo: sLo0 } = shiftPagerRange(seeded.shifts, ANCHOR);
+      const s0 = Math.max(sLo0, PAYDAYS.indexOf(upcomingPayday(today)));
+      seeded = seedShiftPaydays(seeded, PAYDAYS.slice(Math.max(0, s0 - 1), s0 + 2));
+      shiftPos.value = s0;
+      shiftCur.value = s0;
       let calcLoaded;
       try {
         const rawC = await AsyncStorage.getItem(CALC_KEY);
@@ -2422,6 +2473,7 @@ export default function App() {
       if (linked !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
       setCalc(calcLoaded);
       setPi(p0);
+      setSi(s0);
       setState(linked);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2469,17 +2521,57 @@ export default function App() {
     [onPage, pageCur, pagePos]
   );
   const shownPay = pi != null ? PAYDAYS[pi] : null;
+
+  // ── Пейджер «Смен»: те же правила, что у «Расходов», но смены зарплаты — по её рабочему периоду
+  const shiftRange = useMemo(() => (state ? shiftPagerRange(state.shifts, ANCHOR) : null), [state?.shifts]);
+  useEffect(() => {
+    if (!shiftRange) return;
+    shiftLo.value = shiftRange.lo;
+    shiftHi.value = shiftRange.hi;
+  }, [shiftRange, shiftLo, shiftHi]);
+  const onShiftPage = useCallback(
+    (k) => {
+      try {
+        if (!Number.isInteger(k) || k < 0 || k >= PAYDAYS.length) return;
+        Haptics.selectionAsync().catch(() => {});
+        patch((p) => (p ? seedShiftPaydays(p, PAYDAYS.slice(Math.max(0, k - 1), k + 2)) : p));
+        setSi(k);
+      } catch (err) {
+        console.warn('shift page change failed', err);
+      }
+    },
+    [patch]
+  );
+  /** Сразу на зарплату k в «Сменах» (переход из «Расчёта», после сохранения смены). */
+  const jumpShiftIdx = useCallback(
+    (k) => {
+      if (!Number.isInteger(k) || k < 0 || k >= PAYDAYS.length) return;
+      shiftCur.value = k;
+      shiftPos.value = k;
+      onShiftPage(k);
+    },
+    [onShiftPage, shiftCur, shiftPos]
+  );
+  const shownShiftPay = si != null ? PAYDAYS[si] : null;
+  const shiftPages = useMemo(() => {
+    if (!state || si == null) return [];
+    const out = [];
+    for (let k = si - 1; k <= si + 1; k++) {
+      if (k < (shiftRange?.lo ?? 0) || k > (shiftRange?.hi ?? PAYDAYS.length - 1)) continue;
+      const p = PAYDAYS[k];
+      out.push({ k, payday: p, list: shiftsInPeriod(state.shifts, p) });
+    }
+    return out;
+  }, [state?.shifts, si, shiftRange]);
   const pages = useMemo(() => {
     if (!state || pi == null) return [];
     const out = [];
     for (let k = pi - 1; k <= pi + 1; k++) {
       if (k < (range?.lo ?? 0) || k > (range?.hi ?? PAYDAYS.length - 1)) continue;
       const p = PAYDAYS[k];
-      const per = workPeriod(p);
-      const earned = state.shifts
-        .filter((x) => x.date >= per.start && x.date <= per.end)
-        .reduce((a, x) => a + (Number(x.amount) || 0), 0);
-      out.push({ k, payday: p, list: expensesInPeriod(state.expenses, p), earned });
+      // заработано за смены — чистыми, после недостачи (как «К выплате» в «Сменах»)
+      const st = shiftTotals(shiftsInPeriod(state.shifts, p));
+      out.push({ k, payday: p, list: expensesInPeriod(state.expenses, p), earned: st.net, short: st.short });
     }
     return out;
   }, [state?.expenses, state?.shifts, pi, range]);
@@ -2565,10 +2657,7 @@ export default function App() {
   const earnedForPayday = useCallback(
     (p) => {
       if (!state) return 0;
-      const per = workPeriod(p);
-      return state.shifts
-        .filter((s) => s.date >= per.start && s.date <= per.end)
-        .reduce((a, s) => a + (Number(s.amount) || 0), 0);
+      return netForPayday(state.shifts, p);
     },
     [state]
   );
@@ -2599,10 +2688,11 @@ export default function App() {
     const s = id ? st.shifts.find((x) => x.id === id) : null;
     setEditId(id || null);
     setForm({
-      date: s ? s.date : todayIso(),
+      date: s ? s.date : newShiftDate(siRef.current),
       amount: s && s.amount != null ? String(s.amount) : '',
       title: s ? s.title : 'ночь касса',
       linked: isLinkedShift(s),
+      shortage: s && shortageOf(s) ? String(shortageOf(s)) : '',
     });
     setSheet('shift');
   }, []);
@@ -2726,6 +2816,16 @@ export default function App() {
     goPage(2);
   }, [goPage]);
 
+  // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
+  const payPageProps = useMemo(
+    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, arc }),
+    [accent, openExpense, toggleStatus, arc]
+  );
+  const shiftPageProps = useMemo(
+    () => ({ accent, onEdit: openShift, onCalc: openCalcOn }),
+    [accent, openShift, openCalcOn]
+  );
+
   if (!state) {
     return (
       <View style={[styles.root, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -2770,16 +2870,12 @@ export default function App() {
   const manualOnCalcDate = state.shifts.some(
     (s) => !isLinkedShift(s) && s.date === calcDate && s.amount != null && s.amount !== ''
   );
-  /** Перейти в «Смены» на месяц связанной смены. */
+  /** Перейти в «Смены» на страницу зарплаты связанной смены. */
   const showCalcShift = () => {
-    const d = parse(calcDate);
-    const y = d.getFullYear();
-    const m = d.getMonth();
     Haptics.selectionAsync();
-    patch((p) => seedMonth(p, y, m));
-    setViewY(y);
-    setViewM(m);
+    const k = PAYDAYS.indexOf(shiftPayday(calcDate));
     goPage(1);
+    if (k >= 0) requestAnimationFrame(() => jumpShiftIdx(k));
   };
 
   calcH.current = { openRates: openCalcRates, reset: resetCalc, showShift: showCalcShift };
@@ -2816,25 +2912,44 @@ export default function App() {
       if (editId) {
         const i = shifts.findIndex((x) => x.id === editId);
         if (i >= 0)
-          shifts[i] = {
-            ...shifts[i],
-            date,
-            amount,
-            title: title || 'ночь касса',
-            payday: p.payday,
-          };
+          shifts[i] = withShortage(
+            {
+              ...shifts[i],
+              date,
+              amount,
+              title: title || 'ночь касса',
+              payday: p.payday,
+            },
+            form.shortage
+          );
       } else {
         removed = removed.filter((x) => x !== date);
-        shifts.push({
-          id: uid(),
-          date,
-          amount,
-          title: title || 'ночь касса',
-          payday: p.payday,
-        });
+        shifts.push(
+          withShortage(
+            {
+              id: uid(),
+              date,
+              amount,
+              title: title || 'ночь касса',
+              payday: p.payday,
+            },
+            form.shortage
+          )
+        );
       }
       return { ...prev, shifts, removed };
     });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    // смена ушла в другую зарплату — показать её там
+    const k = PAYDAYS.indexOf(shiftPayday(date));
+    if (page === 1 && k >= 0 && k !== siRef.current) closeThen(() => jumpShiftIdx(k));
+    else setSheet(null);
+  };
+
+  /** Недостача смены из «Расчёта»: сумма считается там, недостача — своя, здесь. */
+  const saveShortage = () => {
+    const id = editId;
+    patch((prev) => ({ ...prev, shifts: prev.shifts.map((x) => (x.id === id ? withShortage(x, form.shortage) : x)) }));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSheet(null);
   };
@@ -2852,7 +2967,9 @@ export default function App() {
 
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
   const spent = paid.reduce((a, e) => a + Number(e.amount || 0), 0);
-  const earnedAll = state.shifts.reduce((a, s) => a + (Number(s.amount) || 0), 0);
+  // заработано за всё время — чистыми, после недостачи (как «К выплате» в «Сменах»)
+  const earnedAll = state.shifts.reduce((a, s) => a + shiftNet(s), 0);
+  const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0);
 
   /**
    * Поле шторки в цепочке «Далее ›»: ref, return-клавиша и своя панель над
@@ -3271,9 +3388,15 @@ export default function App() {
         if (form.linked) {
           const sh = state.shifts.find((x) => x.id === editId);
           const d = sh ? sh.calcDate || sh.date : form.date;
+          const kShort = fieldKb('shortage', ['shortage'], 'Недостача');
           return {
             title: 'Смена из расчёта',
             onClose: closeSheet,
+            right: (
+              <Pressable onPress={saveShortage} hitSlop={10}>
+                <Text style={[styles.link, { color: accent }]}>Готово</Text>
+              </Pressable>
+            ),
             body: (
               <>
                 <ItemCard style={styles.listCard}>
@@ -3298,6 +3421,26 @@ export default function App() {
                   Сумма считается в «Расчёте» и обновляется сама. Чтобы изменить — поправьте количества,
                   роль или ставки там.
                 </Text>
+                <View style={styles.field}>
+                  <Text style={styles.label}>Недостача</Text>
+                  <View style={styles.bigField}>
+                    <TextInput
+                      {...kShort.props}
+                      style={[styles.bigInput, { fontSize: 26 }, !!form.shortage && styles.bad]}
+                      keyboardType="number-pad"
+                      value={form.shortage || ''}
+                      onChangeText={(t) => setForm((f) => ({ ...f, shortage: t.replace(/[^0-9]/g, '') }))}
+                      placeholder="0"
+                      placeholderTextColor="rgba(235,235,245,0.25)"
+                    />
+                    <Text style={styles.bigUnit}>сом</Text>
+                  </View>
+                  {kShort.bar}
+                  <Text style={styles.fieldNote}>
+                    Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).
+                  </Text>
+                </View>
+
                 <ScaleButton
                   style={[styles.actBtn, { backgroundColor: accent }]}
                   onPress={() => closeThen(() => openCalcOn(d))}
@@ -3308,8 +3451,9 @@ export default function App() {
             ),
           };
         }
-        const kAmt = fieldKb('amount', ['amount', 'title'], 'Сумма');
-        const kTitle = fieldKb('title', ['amount', 'title'], 'Тип смены');
+        const kAmt = fieldKb('amount', ['amount', 'title', 'shortage'], 'Сумма');
+        const kTitle = fieldKb('title', ['amount', 'title', 'shortage'], 'Тип смены');
+        const kShort = fieldKb('shortage', ['amount', 'title', 'shortage'], 'Недостача');
         return {
           title: editId ? 'Смена' : 'Новая смена',
           onClose: closeSheet,
@@ -3363,6 +3507,25 @@ export default function App() {
                     </ScaleButton>
                   ))}
                 </View>
+              </View>
+              <View style={styles.field}>
+                <Text style={styles.label}>Недостача</Text>
+                <View style={styles.bigField}>
+                  <TextInput
+                    {...kShort.props}
+                    style={[styles.bigInput, { fontSize: 26 }, !!form.shortage && styles.bad]}
+                    keyboardType="number-pad"
+                    value={form.shortage || ''}
+                    onChangeText={(t) => setForm((f) => ({ ...f, shortage: t.replace(/[^0-9]/g, '') }))}
+                    placeholder="0"
+                    placeholderTextColor="rgba(235,235,245,0.25)"
+                  />
+                  <Text style={styles.bigUnit}>сом</Text>
+                </View>
+                {kShort.bar}
+                <Text style={styles.fieldNote}>
+                  Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).
+                </Text>
               </View>
               {editId && (
                 <ScaleButton
@@ -3728,15 +3891,23 @@ export default function App() {
               </ItemCard>
               <ItemCard style={styles.listCard}>
                 <View style={[styles.lRow, styles.lRowSep]}>
-                  <Text style={styles.lKey}>Заработано</Text>
+                  <Text style={styles.lKey}>Заработано{shortAll ? ' (после недостачи)' : ''}</Text>
                   <Text style={[styles.lVal, styles.good]}>{money(earnedAll)}</Text>
                 </View>
+                {shortAll ? (
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>· недостача</Text>
+                    <Text style={[styles.lVal, styles.bad]}>−{money(shortAll)}</Text>
+                  </View>
+                ) : null}
                 <View style={styles.lRow}>
                   <Text style={styles.lKey}>Оплачено всего</Text>
                   <Text style={styles.lVal}>{money(spent)}</Text>
                 </View>
               </ItemCard>
-              <Text style={styles.hint}>Учитываются расходы со статусом «✓ оплачено» и все смены с суммой.</Text>
+              <Text style={styles.hint}>
+                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи.
+              </Text>
             </>
           ),
         };
@@ -3879,16 +4050,16 @@ export default function App() {
       )}
 
       <View style={styles.header}>
-        {page === 0 ? (
+        {page !== 2 ? (
           <>
             <View style={styles.hSide} />
-            <PayHeader payday={shownPay} />
+            <PayHeader payday={page === 0 ? shownPay : shownShiftPay} label={DOCK_LABELS[page]} />
           </>
         ) : (
           <View style={styles.monthWrap}>
             <ScaleButton
               style={styles.navHit}
-              onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, -1)) : goMonth(-1))}
+              onPress={() => setCalcDate((d) => addDays(d, -1))}
             >
               <Glass style={styles.navGlass} intensity={40}>
                 <Text style={styles.navTxt}>‹</Text>
@@ -3896,15 +4067,15 @@ export default function App() {
             </ScaleButton>
             <View style={styles.monthBlock}>
               <Text style={styles.eyebrow} numberOfLines={1}>
-                {DOCK_LABELS[page]} · {page === 2 ? DOW_FULL[parse(calcDate).getDay()] : viewY}
+                {DOCK_LABELS[page]} · {DOW_FULL[parse(calcDate).getDay()]}
               </Text>
               <Text style={styles.h1} numberOfLines={1} adjustsFontSizeToFit>
-                {page === 2 ? fmtShort(calcDate) : MONTHS[viewM]}
+                {fmtShort(calcDate)}
               </Text>
             </View>
             <ScaleButton
               style={styles.navHit}
-              onPress={() => (page === 2 ? setCalcDate((d) => addDays(d, 1)) : goMonth(1))}
+              onPress={() => setCalcDate((d) => addDays(d, 1))}
             >
               <Glass style={styles.navGlass} intensity={40}>
                 <Text style={styles.navTxt}>›</Text>
@@ -3930,97 +4101,30 @@ export default function App() {
       >
         <TabPane vis={tabSV[0][0]} x={tabSV[0][1]} active={page === 0} reduce={reduceMotion}>
           <PayPager
-            pi={pi}
             pos={pagePos}
             cur={pageCur}
             lo={pageLo}
             hi={pageHi}
             pages={pages}
-            accent={accent}
-            onEdit={openExpense}
-            onToggle={toggleStatus}
             arc={arc}
             onPage={onPage}
+            pageProps={payPageProps}
           />
         </TabPane>
 
         {mounted[1] && (
           <TabPane vis={tabSV[1][0]} x={tabSV[1][1]} active={page === 1} reduce={reduceMotion}>
-          <ScrollView
-            style={styles.pages}
-            contentContainerStyle={styles.pagesContent}
-            showsVerticalScrollIndicator={false}
-          >
-            <LayoutAnimationConfig key={`s-${viewY}-${viewM}`} skipEntering skipExiting>
-              <View>
-                {periodsTouchingMonth(viewY, viewM).map((per) => {
-                  const list = state.shifts
-                    .filter((s) => s.date >= per.start && s.date <= per.end)
-                    .sort((a, b) => a.date.localeCompare(b.date));
-                  const sum = list.reduce((a, s) => a + (Number(s.amount) || 0), 0);
-                  const withSum = list.filter((s) => s.amount != null && s.amount !== '').length;
-                  const fromCalc = list.filter(isLinkedShift).length;
-                  const mid = addDays(per.start, 6);
-                  const halves = [
-                    { title: 'Первая неделя', items: list.filter((s) => s.date <= mid) },
-                    { title: 'Вторая неделя', items: list.filter((s) => s.date > mid) },
-                  ];
-                  return (
-                    <Animated.View key={per.payday} style={styles.periodBlock} layout={ROW_LAYOUT}>
-                      <Glass style={styles.balance} intensity={42}>
-                        <View style={styles.cardHead}>
-                          <Text style={styles.period}>{fmtRange(per.start, per.end)}</Text>
-                          <View style={styles.tag}>
-                            <Text style={styles.tagTxt}>зарплата {fmtShort(per.payday)}</Text>
-                          </View>
-                        </View>
-                        <Text style={styles.paySub}>набрано за период</Text>
-                        <Text style={[styles.bigPay, { color: accent }]} numberOfLines={1} adjustsFontSizeToFit>
-                          {money(sum)}
-                        </Text>
-                        <View style={styles.statRow}>
-                          <Stat k="Смен" v={String(list.length)} />
-                          <Stat k="С суммой" v={String(withSum)} />
-                          <Stat k="Из расчёта" v={String(fromCalc)} />
-                        </View>
-                      </Glass>
-                      {halves.map((h) => {
-                        const hs = h.items.reduce((a, s) => a + (Number(s.amount) || 0), 0);
-                        return (
-                          <Animated.View key={h.title} style={styles.group} layout={ROW_LAYOUT}>
-                            <View style={styles.gHead}>
-                              <Text style={styles.gTitle}>{h.title}</Text>
-                              {hs > 0 && <Text style={styles.gSub}>{money(hs)}</Text>}
-                            </View>
-                            <ItemCard>
-                              {h.items.length === 0 ? (
-                                <Text style={styles.empty}>Нет смен</Text>
-                              ) : (
-                                h.items.map((s, j) => (
-                                  <ShiftRow
-                                    key={s.id}
-                                    item={s}
-                                    last={j === h.items.length - 1}
-                                    onEdit={openShift}
-                                    onDelete={confirmDeleteShift}
-                                    onCalc={openCalcOn}
-                                    accent={accent}
-                                  />
-                                ))
-                              )}
-                            </ItemCard>
-                          </Animated.View>
-                        );
-                      })}
-                    </Animated.View>
-                  );
-                })}
-                <Text style={[styles.hint, styles.pageHint]}>
-                  Тап — сумма смены, свайп влево — убрать день. Смены «из расчёта» считаются сами.
-                </Text>
-              </View>
-            </LayoutAnimationConfig>
-          </ScrollView>
+            <PayPager
+              pos={shiftPos}
+              cur={shiftCur}
+              lo={shiftLo}
+              hi={shiftHi}
+              pages={shiftPages}
+              arc={arc}
+              onPage={onShiftPage}
+              Page={ShiftPage}
+              pageProps={shiftPageProps}
+            />
           </TabPane>
         )}
 
@@ -4352,6 +4456,7 @@ const styles = StyleSheet.create({
   notesBtns: { flexDirection: 'row', gap: 10 },
   notesBtn: { flex: 1, backgroundColor: 'rgba(255,255,255,0.1)' },
   notesBack: { marginBottom: 10 },
+  metaShort: { color: '#ff453a', fontSize: 12, fontWeight: '600', marginTop: 2 },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
   islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {

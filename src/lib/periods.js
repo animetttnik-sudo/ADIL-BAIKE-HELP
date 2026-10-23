@@ -123,6 +123,23 @@ export function seedMonth(state, viewY, viewM) {
   return changed ? next : state;
 }
 
+/** Досеять месяцы, которые задевают периоды СМЕН этих зарплат ([p−20, p−7]) — для страниц «Смен». */
+export function seedShiftPaydays(state, paydays) {
+  const seen = new Set();
+  let s = state;
+  for (const p of paydays || []) {
+    if (!p) continue;
+    const per = workPeriod(p);
+    for (const d of [per.start, per.end]) {
+      const k = d.slice(0, 7);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      s = seedMonth(s, Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1);
+    }
+  }
+  return s;
+}
+
 /** Зарплата, к которой относится смена этой даты. */
 export const paydayForDate = (date) => workPeriod(paydayOnOrBefore(addDays(date, 20))).payday;
 

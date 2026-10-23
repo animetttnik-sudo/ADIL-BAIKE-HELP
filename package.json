@@ -46,7 +46,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/totals.test.mjs"
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/totals.test.mjs"
   },
   "private": true
 }
