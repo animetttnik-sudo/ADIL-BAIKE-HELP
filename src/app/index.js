@@ -186,26 +186,48 @@ const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
 
 /**
- * Стекло вкладки. Нативное стекло (GlassView / BlurView), созданное, пока вкладка скрыта
- * (opacity 0 у TabPane — «Смены» монтируются заранее невидимыми), на iOS так и остаётся
- * прозрачным. Поэтому: Glass, смонтированный в скрытой вкладке, помечает её dirty, и когда
- * вкладка полностью проявилась, App поднимает epoch → нативный вид пересоздаётся уже видимым.
- * Вне вкладок (док, шторки, меню) контекста нет — ничего не меняется.
+ * Стекло карточек внутри вкладок (Расходы / Смены / Расчёт).
+ * С Liquid Glass карточка была ГОЛЫМ GlassView — без своей подложки и кромки: вся видимость —
+ * от нативного эффекта. «Смены» монтируются заранее в скрытой вкладке (opacity 0 у TabPane),
+ * и нативное стекло там не появлялось — карточки становились полностью пустыми.
+ * Теперь в вкладке карточка — обычный View с постоянной подложкой и кромкой (видна всегда),
+ * а GlassView/BlurView — фоновый слой под содержимым, который создаётся только когда вкладка
+ * активна и уже полностью проявилась (live), с новым key на каждую активацию.
+ * Содержимое при этом не перемонтируется. Вне вкладок (док, шторки, меню) — как раньше.
  */
 const PaneGlassCtx = createContext(null);
 
 /** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
 function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false }) {
   const pane = useContext(PaneGlassCtx);
-  useEffect(() => {
-    if (pane && !pane.shown.current) pane.dirty.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pane && pane.epoch]);
-  const ep = pane ? pane.epoch : 0;
+  if (pane && !interactive) {
+    const r = StyleSheet.flatten(style)?.borderRadius;
+    return (
+      <View style={[styles.glassBase, style]}>
+        {pane.live ? (
+          LG && GlassView ? (
+            <GlassView
+              key={pane.epoch}
+              pointerEvents="none"
+              glassEffectStyle="regular"
+              colorScheme="dark"
+              tintColor={tint}
+              style={StyleSheet.absoluteFill}
+            />
+          ) : (
+            <BlurView key={pane.epoch} pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+          )
+        ) : null}
+        <View style={LG ? styles.cardBaseFill : styles.glassFill} pointerEvents="none" />
+        <View style={styles.glassTopEdge} pointerEvents="none" />
+        <View style={[styles.glassBorder, r != null && { borderRadius: r }]} pointerEvents="none" />
+        {children}
+      </View>
+    );
+  }
   if (LG && GlassView) {
     return (
       <GlassView
-        key={ep}
         glassEffectStyle="regular"
         colorScheme="dark"
         tintColor={tint}
@@ -220,7 +242,7 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
   const r = StyleSheet.flatten(style)?.borderRadius;
   return (
     <View style={[styles.glassBase, style]}>
-      <BlurView key={ep} intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+      <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
       <View style={styles.glassFill} pointerEvents="none" />
       {tint ? (
         <View style={[StyleSheet.absoluteFill, { backgroundColor: tintFallback || tint }]} pointerEvents="none" />
@@ -2253,10 +2275,7 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
             ) : (
               list.map((s) => <ShiftCard key={s.id} item={s} onEdit={onEdit} onCalc={onCalc} accent={accent} />)
             )}
-            <Text style={[styles.hint, styles.pageHint]}>
-              Листайте вбок — другие зарплаты. Тап по смене — сумма, недостача/излишек или «убрать день». Тап по
-              «Недостаче» в карточке — недостача с прошлой зп. Смены «из расчёта» считаются сами.
-            </Text>
+            <Text style={[styles.hint, styles.pageHint]}>Листайте вбок — другие зарплаты</Text>
           </View>
         </LayoutAnimationConfig>
       </ScrollView>
@@ -2562,27 +2581,34 @@ export default function App() {
   // Расчёт/Смены монтируем заранее (после загрузки, в простое), а если
   // вкладку открыли раньше — после анимации плашки, а не во время неё.
   const [mounted, setMounted] = useState({ 0: true });
-  // стекло вкладок: shown — вкладка полностью видна; dirty — стекло создано, пока была скрыта
-  const paneShown = useRef([{ current: true }, { current: false }, { current: false }]).current;
-  const paneDirty = useRef([{ current: false }, { current: false }, { current: false }]).current;
+  // стекло вкладок: live — вкладка активна и полностью проявилась (только тогда создаётся
+  // нативное стекло карточек); epoch — новый key стекла на каждую активацию
+  const liveRef = useRef([true, false, false]);
+  const [paneLive, setPaneLive] = useState([true, false, false]);
   const [paneEpoch, setPaneEpoch] = useState([0, 0, 0]);
   const paneGlass = useMemo(
-    () => [0, 1, 2].map((i) => ({ epoch: paneEpoch[i], shown: paneShown[i], dirty: paneDirty[i] })),
-    [paneEpoch, paneShown, paneDirty]
+    () => [0, 1, 2].map((i) => ({ live: paneLive[i], epoch: paneEpoch[i] })),
+    [paneLive, paneEpoch]
   );
-  // скрытые вкладки сразу «не видны»; показанная — «видна», когда доиграло проявление (TAB_IN),
-  // и если пока она была скрыта в ней создалось стекло — пересоздать его (epoch + 1)
   useEffect(() => {
-    for (let i = 0; i < 3; i++) if (i !== page) paneShown[i].current = false;
-    const t = setTimeout(() => {
-      paneShown[page].current = true;
-      if (paneDirty[page].current) {
-        paneDirty[page].current = false;
-        setPaneEpoch((e) => e.map((v, i) => (i === page ? v + 1 : v)));
-      }
+    // ушедшие вкладки — без нативного стекла, когда доиграло исчезновение (подложка остаётся)
+    const off = setTimeout(() => {
+      if (!liveRef.current.some((v, i) => v && i !== page)) return;
+      liveRef.current = liveRef.current.map((v, i) => (i === page ? v : false));
+      setPaneLive(liveRef.current);
+    }, TAB_OUT.duration + 40);
+    // показанная — стекло создаётся заново, уже видимым
+    const on = setTimeout(() => {
+      if (liveRef.current[page]) return;
+      liveRef.current = liveRef.current.map((v, i) => (i === page ? true : v));
+      setPaneEpoch((e) => e.map((v, i) => (i === page ? v + 1 : v)));
+      setPaneLive(liveRef.current);
     }, TAB_IN.duration + 60);
-    return () => clearTimeout(t);
-  }, [page, paneShown, paneDirty]);
+    return () => {
+      clearTimeout(off);
+      clearTimeout(on);
+    };
+  }, [page]);
   const mountedRef = useRef(mounted);
   mountedRef.current = mounted;
   // Переход вкладок: у каждой своя видимость и сдвиг (shared values). Новая
@@ -4907,6 +4933,11 @@ const styles = StyleSheet.create({
   glassFill: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(22,22,28,0.42)',
+  },
+  // постоянная подложка карточки во вкладке поверх Liquid Glass: видна, даже если стекла нет
+  cardBaseFill: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(120,120,128,0.14)',
   },
   glassTopEdge: {
     position: 'absolute',
