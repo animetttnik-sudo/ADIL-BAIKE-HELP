@@ -26,7 +26,7 @@ const noAmount = (a) => a === null || a === undefined || a === '';
 
 /** Своя оплата за день расчёта, округлённая до сома (как money()). */
 export function calcPayForDay(day, rates) {
-  return Math.round(ownPay(computeCalc(day.counts, rates, day.staff), rates, day));
+  return Math.round(ownPay(computeCalc(day.counts, rates, day.staff, !!day.gap), rates, day));
 }
 
 function unlink(s) {

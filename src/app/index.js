@@ -1502,6 +1502,7 @@ function blankDay(prefs) {
     time: prefs.time,
     mentor: false,
     stops: false,
+    gap: false, // промежутка в эту смену
   };
 }
 /**
@@ -1514,6 +1515,19 @@ function seedDay(prefs, shifts, date) {
   if (!m) return d;
   return { ...d, mentor: true, role: shiftRole(m) || d.role, time: shiftTime(m) || d.time };
 }
+/** Часы с запятой: 4.5 → «4,5». */
+const fmtHours = (h) => String(Math.round((Number(h) || 0) * 100) / 100).replace('.', ',');
+/** Ввод часов: цифры и одна запятая (точка → запятая). */
+const hoursInput = (t) => {
+  const c = String(t).replace(/\./g, ',').replace(/[^0-9,]/g, '');
+  const i = c.indexOf(',');
+  return i < 0 ? c : c.slice(0, i + 1) + c.slice(i + 1).replace(/,/g, '');
+};
+/** Строка ставки из формы → число («4,5» → 4.5). */
+const rateNum = (t) => Number(String(t ?? '').replace(',', '.')) || 0;
+/** Число ставки → строка для формы (часы — с запятой). */
+const rateStr = (k, v) => (RATE_FIELDS.find(([x]) => x === k)?.[2] === 'h' ? fmtHours(v) : String(v ?? ''));
+
 const talliesOf = (v) => (Array.isArray(v) && v.length ? v.map((x) => Number(x) || 0) : [itemTotal(v)]);
 
 /** Числовое поле: тап — ввод с клавиатуры, пустое = 0; внешние ± сразу видны. */
@@ -1737,7 +1751,7 @@ function KeyBarHost({ scope }) {
   );
 }
 
-function CheckRow({ checked, label, amount, accent, onToggle }) {
+function CheckRow({ checked, label, amount, accent, onToggle, right }) {
   const s = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({ transform: [{ scale: s.value }] }));
   return (
@@ -1753,7 +1767,7 @@ function CheckRow({ checked, label, amount, accent, onToggle }) {
         {checked && <Text style={styles.checkMark}>✓</Text>}
       </Animated.View>
       <Text style={[styles.setL, { flex: 1 }]}>{label}</Text>
-      <Text style={[styles.checkSum, checked && { color: '#fff' }]}>+{money(amount)}</Text>
+      <Text style={[styles.checkSum, checked && { color: '#fff' }]}>{right ?? `+${money(amount)}`}</Text>
     </Pressable>
   );
 }
@@ -2118,7 +2132,7 @@ function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
 
 /** «Итог по позициям» — в шторке. */
 function CalcSummaryList({ day, rates }) {
-  const res = useMemo(() => computeCalc(day.counts, rates, day.staff), [day.counts, rates, day.staff]);
+  const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
   return (
     <View>
       <View style={styles.gHead}>
@@ -2148,7 +2162,7 @@ function CalcSummaryList({ day, rates }) {
 
 /** «Расход ингредиентов» — в шторке. */
 function CalcUsageList({ day, rates }) {
-  const res = useMemo(() => computeCalc(day.counts, rates, day.staff), [day.counts, rates, day.staff]);
+  const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
   return (
     <ItemCard style={styles.sumCard}>
       {res.usage.map((u) => (
@@ -2170,7 +2184,7 @@ function CalcSavedList({ calc, date, accent, onPick }) {
         .sort((a, b) => b.localeCompare(a))
         .map((d) => {
           const x = calc.days[d];
-          const r = computeCalc(x.counts, calc.rates, x.staff);
+          const r = computeCalc(x.counts, calc.rates, x.staff, !!x.gap);
           return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
         }),
     [calc.days, calc.rates]
@@ -2267,9 +2281,12 @@ const CalcView = memo(function CalcView({
     }
   }, []);
 
-  const res = useMemo(() => computeCalc(day.counts, calc.rates, day.staff), [day.counts, calc.rates, day.staff]);
+  const res = useMemo(() => computeCalc(day.counts, calc.rates, day.staff, !!day.gap), [day.counts, calc.rates, day.staff, day.gap]);
   const own = ownPay(res, calc.rates, day);
   const ownR = Math.round(own);
+  // промежутка этой смены: доля, сколько он забирает из выработки и насколько меньше у меня
+  const gapNow = res.gap ? res.gap[day.time === 'day' ? 'day' : 'night'] : null;
+  const gapH = day.time === 'day' ? calc.rates.gapDayH : calc.rates.gapNightH;
   const filled = hasCounts(day.counts);
   const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
   const entered = CALC_ITEMS.filter((it) => itemTotal(day.counts[it.id]) > 0).length;
@@ -2282,7 +2299,7 @@ const CalcView = memo(function CalcView({
         .sort((a, b) => b.localeCompare(a))
         .map((d) => {
           const x = calc.days[d];
-          const r = computeCalc(x.counts, calc.rates, x.staff);
+          const r = computeCalc(x.counts, calc.rates, x.staff, !!x.gap);
           return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
         }),
     [calc.days, calc.rates]
@@ -2301,6 +2318,7 @@ const CalcView = memo(function CalcView({
         </Text>
         <Text style={styles.calcMeta}>
           {res.positions} поз. × {money(calc.rates.perItem)} = {money(res.output)} · на {res.people} чел.
+          {gapNow ? ' + промежутка' : ''}
         </Text>
         <View style={styles.calcSegs}>
           <View style={{ flex: 1 }}>
@@ -2349,6 +2367,19 @@ const CalcView = memo(function CalcView({
             <Text style={styles.stepTxt}>+</Text>
           </ScaleButton>
         </View>
+        <CheckRow
+          checked={!!day.gap}
+          label="Промежутка"
+          accent={accent}
+          right={gapNow ? `−${money(Math.round(gapNow.loss))}` : `${fmtHours(gapH)} из ${fmtHours(calc.rates.shiftH)} ч`}
+          onToggle={() => onPatchDay((d) => ({ ...d, gap: !d.gap }))}
+        />
+        {gapNow ? (
+          <Text style={styles.gapNote}>
+            промежутка · {fmtHours(gapH)} из {fmtHours(calc.rates.shiftH)} ч · забирает {money(Math.round(gapNow.take))} из
+            выработки смены, у вас −{money(Math.round(gapNow.loss))}. Его оклад {money(calc.rates.nightBonus)} — не из ваших денег.
+          </Text>
+        ) : null}
       </Glass>
 
       {filled && (
@@ -3417,14 +3448,14 @@ export default function App() {
   }
 
   const openCalcRates = () => {
-    setForm({ rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, String(calc.rates[k] ?? '')])) });
+    setForm({ rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, rateStr(k, calc.rates[k])])) });
     setSheet('calcRates');
   };
   const saveCalcRates = () => {
     const fr = form.rates || {};
     patchCalc((p) => ({
       ...p,
-      rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, Number(fr[k]) || 0])),
+      rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, rateNum(fr[k])])),
     }));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSheet(null);
@@ -5026,10 +5057,10 @@ export default function App() {
             <>
               <Text style={styles.hint}>
                 Выработка = позиции × ставка, делится на сотрудников. Наставник и остановки добавляются,
-                только если отмечены галочкой.
+                только если отмечены галочкой. Промежутка забирает из выработки долю «его часы / длина смены».
               </Text>
               <ItemCard style={styles.listCard}>
-                {RATE_FIELDS.map(([k, label], i) => {
+                {RATE_FIELDS.map(([k, label, unit], i) => {
                   const kb = fieldKb(`rate_${k}`, RATE_FIELDS.map(([x]) => `rate_${x}`), label);
                   return (
                     <View key={k} style={[styles.lRow, i < RATE_FIELDS.length - 1 && styles.lRowSep]}>
@@ -5037,11 +5068,14 @@ export default function App() {
                       <TextInput
                         {...kb.props}
                         style={styles.rateInput}
-                        keyboardType="number-pad"
+                        keyboardType={unit === 'h' ? 'decimal-pad' : 'number-pad'}
                         selectTextOnFocus
                         value={form.rates?.[k] ?? ''}
                         onChangeText={(t) =>
-                          setForm((f) => ({ ...f, rates: { ...f.rates, [k]: t.replace(/[^0-9]/g, '') } }))
+                          setForm((f) => ({
+                            ...f,
+                            rates: { ...f.rates, [k]: unit === 'h' ? hoursInput(t) : t.replace(/[^0-9]/g, '') },
+                          }))
                         }
                         placeholder="0"
                         placeholderTextColor="rgba(235,235,245,0.3)"
@@ -5056,7 +5090,7 @@ export default function App() {
                 onPress={() =>
                   setForm((f) => ({
                     ...f,
-                    rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, String(DEFAULT_RATES[k])])),
+                    rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, rateStr(k, DEFAULT_RATES[k])])),
                   }))
                 }
               >
@@ -5509,6 +5543,7 @@ const styles = StyleSheet.create({
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
   quickOpen: { marginBottom: 4 },
+  gapNote: { color: 'rgba(235,235,245,0.55)', fontSize: 12.5, lineHeight: 17, marginTop: -2, marginBottom: 6 },
   qeProgress: { height: 3, borderRadius: 2, marginHorizontal: 4, marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
   qeProgressFill: { height: 3, borderRadius: 2 },
   qeStage: { minHeight: 236 },

@@ -65,6 +65,10 @@ export const DEFAULT_RATES = {
   lunch: 140, // обед
   dayBonus: 300, // П\ряд\день
   nightBonus: 200, // П\ряд\ночь
+  // «промежутка» — сотрудник между сменами: сколько часов из смены он берёт (доля в делёжке выработки)
+  gapNightH: 4.5, // часов ночной смены
+  gapDayH: 2.5, // часов дневной смены
+  shiftH: 12, // длина смены, ч
 };
 
 export const RATE_FIELDS = [
@@ -76,7 +80,21 @@ export const RATE_FIELDS = [
   ['nightBonus', 'Премия рядовая · ночь'],
   ['mentor', 'Наставник'],
   ['stops', 'Мал. остановки'],
+  ['gapNightH', 'Промежутка ночью, ч', 'h'],
+  ['gapDayH', 'Промежутка днём, ч', 'h'],
+  ['shiftH', 'Длина смены, ч', 'h'],
 ];
+
+/**
+ * Доля «промежутки» в делёжке выработки смены: часы промежутки / длина смены (0…1).
+ * Ночь 4,5 из 12 = 0,375; день 2,5 из 12 ≈ 0,208.
+ */
+export function gapWeight(rates, time) {
+  const R = { ...DEFAULT_RATES, ...(rates || {}) };
+  const h = time === 'day' ? R.gapDayH : R.gapNightH;
+  const len = num(R.shiftH) || 12;
+  return Math.min(1, num(h) / len);
+}
 
 export const DEFAULT_STAFF = 3;
 
@@ -98,7 +116,7 @@ const r3 = (x) => Math.round(x * 1000) / 1000;
  * counts — { [itemId]: number[] | number }
  * Возвращает расход ингредиентов, сводку, позиции, выработку и оплату по ролям.
  */
-export function computeCalc(counts = {}, rates = DEFAULT_RATES, staff = DEFAULT_STAFF) {
+export function computeCalc(counts = {}, rates = DEFAULT_RATES, staff = DEFAULT_STAFF, gap = false) {
   const R = { ...DEFAULT_RATES, ...(rates || {}) };
   const c = (id) => itemTotal(counts[id]);
 
@@ -193,15 +211,28 @@ export function computeCalc(counts = {}, rates = DEFAULT_RATES, staff = DEFAULT_
   const output = positions * num(R.perItem);
   const people = Math.max(1, Math.round(num(staff)) || 1);
   const share = output / people;
-  const base = share + num(R.lunch);
-  const pay = {
-    ryadDay: base + num(R.dayBonus),
-    ryadNight: base + num(R.nightBonus),
-    kassDay: num(R.salary) + num(R.cashBonus) + base + num(R.dayBonus),
-    kassNight: num(R.salary) + num(R.cashBonus) + base + num(R.nightBonus),
+  // Промежутка: в Excel делится только выработка (M115 / J2); оклад, премия кассира, обед и П\ряд —
+  // фиксированные суммы каждому, не из общих денег. Поэтому промежутка — дробный сотрудник
+  // только в делёжке выработки: выработка / (сотрудники + доля). Его оклад 200 платит работодатель.
+  const split = (time) => {
+    const w = gap ? gapWeight(R, time) : 0;
+    const sh = output / (people + w);
+    return { weight: w, share: sh, take: output - sh * people, loss: share - sh };
   };
+  const gDay = split('day');
+  const gNight = split('night');
+  const lunch = num(R.lunch);
+  const pay = {
+    ryadDay: gDay.share + lunch + num(R.dayBonus),
+    ryadNight: gNight.share + lunch + num(R.nightBonus),
+    kassDay: num(R.salary) + num(R.cashBonus) + gDay.share + lunch + num(R.dayBonus),
+    kassNight: num(R.salary) + num(R.cashBonus) + gNight.share + lunch + num(R.nightBonus),
+  };
+  // gap.day / gap.night: weight — доля, share — доля выработки каждого, take — сколько промежутка
+  // забирает из выработки смены всего, loss — насколько меньше выходит у каждого (и у меня)
+  const gapInfo = gap ? { day: gDay, night: gNight } : null;
 
-  return { usage, summary, total, unit, positions, output, people, share, pay };
+  return { usage, summary, total, unit, positions, output, people, share, pay, gap: gapInfo };
 }
 
 /** Зарплата для выбранной роли/смены + отмеченные бонусы. */
