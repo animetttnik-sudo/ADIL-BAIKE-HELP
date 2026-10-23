@@ -55,6 +55,7 @@ export function normTokens(s) {
     .toLowerCase()
     .replace(/ё/g, 'е')
     .replace(/э/g, 'е')
+    .replace(/([а-я])\/([а-я])/g, '$1у$2') // «Гамб/ргер»: OCR видит «у» как «/»
     .replace(/(\d)([a-zа-я])/g, '$1 $2') // «4шт» → «4 шт»
     .replace(/[^a-zа-я0-9]+/g, ' ')
     .trim();
@@ -92,7 +93,7 @@ function wordSim(a, b) {
   const d = lev(a, b);
   const len = Math.max(a.length, b.length);
   if (len >= 3 && d <= 1) return 0.8; // «ход» → «хот», «прим» → «прайм»
-  if (len >= 6 && d <= 2) return 0.7;
+  if (len >= 5 && d <= 2) return 0.7; // «санси» → «самсы», «чизбергур» → «чизбургер»
   return 0;
 }
 
@@ -221,48 +222,170 @@ function readDate(line) {
   return { date: `${m[8]}-${pad(m[7])}-${pad(m[6])}`, h: m[9] != null ? +m[9] : null, min: m[10] != null ? +m[10] : 0 };
 }
 
-/** Строка — одно число (с шумом OCR: «1.», «О», «l», «З»). */
-function asQty(line) {
+/** Строка — только цифры (с шумом OCR: «1.», «О», «l», «З») → строка цифр; иначе null. */
+function asDigits(line) {
   const t = line
     .replace(/[.,:;·'"`_\-–—|]+$/g, '')
     .replace(/^[.,:;·'"`_\-–—|]+/g, '')
+    .replace(/\s+/g, '')
     .trim();
-  if (!t || t.length > 4) return null;
+  if (!t || t.length > 60) return null;
   const fixed = t.replace(/[OoОо]/g, '0').replace(/[lIІі|]/g, '1').replace(/[Зз]/g, '3').replace(/[Бб]/g, '6');
-  return /^\d{1,4}$/.test(fixed) ? Number(fixed) : null;
+  return /^\d+$/.test(fixed) ? fixed : null;
 }
 
 /** «Название  число» в одной строке → {name, qty}; иначе null. */
 function splitPair(line) {
   // число через пробелы в конце («Кола 0,5   24»); не путать с «0,5» / «350 мл»
-  let m = line.match(/^(.*?\S)\s+(\d{1,4})[.,]?\s*$/);
+  let m = line.match(/^(.*?\S)\s+(\d{1,3})[.,]?\s*$/);
   if (m && !/\d[.,]$/.test(m[1]) && /[a-zа-яё)]/i.test(m[1])) return { name: m[1].trim(), qty: Number(m[2]) };
-  // приклеенное к букве: «…свеж овоща1»
+  // приклеенное к букве: «…свеж ов1»
   m = line.match(/^(.*[a-zа-яё.])(\d{1,3})\s*$/i);
   if (m && m[1].replace(/[^a-zа-яё]/gi, '').length >= 4) return { name: m[1].trim(), qty: Number(m[2]) };
   return null;
 }
 
+// ── выравнивание «столбец названий ↔ столбец чисел» ───────────────────────────
+// Live Text отдаёт колонку чисел кусками: отдельными строками («5», «33») или одной склеенной строкой
+// на весь кусок («123525323511721» = 1,2,3,5,2,5,3,23,5,11,7,2,1), а короткие цифры иногда теряет.
+// Подбираем разбиение по вероятностям: у каждой строки ожидаемое количество m (история смен или
+// типичное), q ~ лог-нормальное вокруг m. Сомнительное — помечаем, пропавшее — «?».
+const SIGMA = 1.1;
+const LEAD_MISS = 2.5; // у названий в начале куска цифры теряются чаще (числа идут после своего названия)
+const MID_MISS = 6;
+const EXTRA = 6; // лишнее число/цифра
+const MARGIN = 2; // разрыв с лучшей альтернативой, ниже которого значение «проверьте»
+const qCost = (q, m) => {
+  const d = Math.log(q) - Math.log(Math.max(1, m));
+  return (d * d) / (2 * SIGMA * SIGMA) + 0.15 * Math.log(q);
+};
+
+/**
+ * names: [{m}], tokens: ['22', '123525…'] → { cost, qty: [q|null], extra }.
+ * forbid: [i, q] — запретить строке i значение q (для оценки уверенности).
+ */
+function alignGroup(names, tokens, forbid, lenient = false) {
+  const n = names.length;
+  const T = tokens.length;
+  const memo = new Map();
+  // 1–2 одиночных числа после нескольких названий (как «22» у Live Text) — относятся к нижним названиям
+  const fewTok = T <= 2 && tokens.every((x) => x.length <= 2);
+  const go = (i, t, pp, st) => {
+    if (i === n && t === T) return { c: 0, a: null };
+    const key = ((i * 128 + t) * 64 + pp) * 2 + st;
+    if (memo.has(key)) return memo.get(key);
+    let best = { c: Infinity, a: null };
+    const tryIt = (c, a, ni, nt, np, ns) => {
+      if (c >= best.c) return;
+      const r = go(ni, nt, np, ns);
+      if (c + r.c < best.c) best = { c: c + r.c, a: { ...a, next: r.a } };
+    };
+    // строка без числа
+    if (i < n) tryIt(lenient || (!st && fewTok) ? LEAD_MISS : MID_MISS, { i, q: null }, i + 1, t, pp, st);
+    if (t < T) {
+      const tok = tokens[t];
+      const L = tok.length;
+      if (i < n) {
+        if (L <= 2) {
+          // короткая строка — одно число
+          const q = Number(tok);
+          if (q > 0 && !(forbid && forbid[0] === i && forbid[1] === q)) tryIt(qCost(q, names[i].m), { i, q }, i + 1, t + 1, 0, 1);
+        } else {
+          for (let l = 1; l <= 3 && pp + l <= L; l++) {
+            if (tok[pp] === '0') break;
+            const q = Number(tok.slice(pp, pp + l));
+            if (q < 1 || q > 199) continue;
+            if (forbid && forbid[0] === i && forbid[1] === q) continue;
+            const end = pp + l === L;
+            tryIt(qCost(q, names[i].m), { i, q }, i + 1, end ? t + 1 : t, end ? 0 : pp + l, 1);
+          }
+        }
+      }
+      // лишнее: целое число без строки или хвост цифр
+      if (pp === 0) tryIt(EXTRA, { x: 1 }, i, t + 1, 0, st);
+      else tryIt(EXTRA * 0.7 * (L - pp), { x: L - pp }, i, t + 1, 0, st);
+    }
+    memo.set(key, best);
+    return best;
+  };
+  const r = go(0, 0, 0, 0);
+  const qty = Array(n).fill(null);
+  let extra = 0;
+  for (let a = r.a; a; a = a.next) {
+    if (a.x) extra += a.x;
+    else if (a.q != null) qty[a.i] = a.q;
+  }
+  return { cost: r.c, qty, extra };
+}
+
+function resolveGroup(items, pend, tokens, warnings, chunks) {
+  if (!pend.length) {
+    if (tokens.length) warnings.push(`Лишние числа без названия: ${tokens.join(', ')}.`);
+    return;
+  }
+  const names = pend.map((k) => items[k]);
+  const best = alignGroup(names, tokens);
+  const long = tokens.some((t) => t.length > 2);
+  const missed = best.qty.filter((q) => q == null).length;
+  const digits = tokens.reduce((a, t) => a + t.length, 0);
+  // склеенная строка однозначна, только если цифр ровно столько, сколько строк (все однозначные)
+  const forced = long && !missed && !best.extra && digits === pend.length && !tokens.join('').includes('0');
+  // гипотеза «iPhone потерял цифры» (пропуск дешёвый): раскладывает иначе — цифры, скорее всего, потеряны
+  const lost = long && !forced ? alignGroup(names, tokens, null, true) : null;
+  const differs = !!lost && lost.qty.some((q, ix) => q !== best.qty[ix]);
+  pend.forEach((k, ix) => {
+    const it = items[k];
+    it.qty = best.qty[ix];
+    if (it.qty == null) return;
+    // всё из склеенной строки — «проверьте по фото» с подобранным значением
+    if (long && !forced) {
+      it.qtyCheck = true;
+      it.chunk = chunks.length;
+      return;
+    }
+    const alt = alignGroup(names, tokens, [ix, it.qty]);
+    if (alt.cost - best.cost < MARGIN) it.qtyCheck = true;
+  });
+  if (long && !forced) {
+    const a = names[0].name;
+    const b = names[names.length - 1].name;
+    chunks.push({ from: a, to: b, lost: !!(missed || best.extra || differs), size: pend.length });
+    warnings.push(
+      missed || best.extra || differs
+        ? `«${a}» … «${b}»: iPhone склеил числа и, похоже, потерял часть цифр — количества подобраны примерно, сверьте с фото.`
+        : `«${a}» … «${b}»: iPhone склеил числа в одну строку — количества разложены по смыслу, сверьте с фото.`
+    );
+  }
+}
+
 /**
  * Разобрать текст отчёта.
- * → { items: [{name, qty, raw}], warnings: string[], period: {from, to, date, time} | null, layout: 'inline'|'columns'|'mixed' }
+ * mOf(name) → ожидаемое количество строки (для выравнивания чисел).
+ * → { items: [{name, qty, qtyCheck, chunk?, raw}], warnings, chunks, period, layout }
  */
-export function parseReceipt(text) {
+export function parseReceipt(text, mOf = () => 4) {
   const lines = String(text || '')
     .replace(/\r/g, '')
     .split('\n')
-    .map((l) => l.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
+    .map((l) => l.replace(/\s+/g, ' ').trim());
   const items = [];
-  const names = [];
-  const nums = [];
   const warnings = [];
+  const chunks = []; // куски со склеенными цифрами: {from, to, lost, size}
+  let pend = []; // индексы строк без количества в текущем куске
+  let toks = []; // числа, пришедшие после них
   let from = null;
   let to = null;
   let inline = 0;
   let split = 0;
+  const flush = () => {
+    if (toks.length) {
+      resolveGroup(items, pend, toks, warnings, chunks);
+      pend = [];
+      toks = [];
+    }
+  };
   for (const l of lines) {
-    if (/^[=\-_*~.·\s]{3,}$/.test(l)) continue;
+    if (!l || /^[=\-_*~.·\s]{3,}$/.test(l)) continue;
     const d = DATE_RE.test(l) ? readDate(l) : null;
     if (d) {
       if (/^\s*по\b/i.test(l) || (from && !to)) to = d;
@@ -270,48 +393,74 @@ export function parseReceipt(text) {
       continue;
     }
     if (HEADER_RE.test(l) && !/\d\s*$/.test(l)) continue;
-    const q = asQty(l);
-    if (q != null) {
+    const dg = asDigits(l);
+    if (dg != null) {
       split++;
-      if (names.length) items.push({ name: names.shift(), qty: q, raw: null });
-      else nums.push(q);
+      toks.push(dg);
       continue;
     }
     if (!/[a-zа-яё]{2}/i.test(l)) continue; // мусор без букв
+    flush();
     const p = splitPair(l);
     if (p) {
       inline++;
-      items.push({ ...p, raw: l });
+      items.push({ ...p, qtyCheck: false, raw: l });
       continue;
     }
     split++;
-    if (nums.length) items.push({ name: l, qty: nums.shift(), raw: null });
-    else names.push(l);
+    items.push({ name: l, qty: null, qtyCheck: false, raw: l, m: mOf(l) });
+    pend.push(items.length - 1);
   }
-  for (const n of names) items.push({ name: n, qty: null, raw: null });
-  if (names.length || nums.length)
-    warnings.push(
-      `Названий и чисел не поровну: ${names.length ? `без количества ${names.length}` : ''}${names.length && nums.length ? ', ' : ''}${
-        nums.length ? `лишних чисел ${nums.length}` : ''
-      }. Проверьте количества.`
-    );
+  flush();
+  for (const it of items) delete it.m;
+  const miss = items.filter((x) => x.qty == null).length;
+  if (miss) warnings.push(`Без количества: ${miss} — iPhone не распознал эти числа, впишите их по фото.`);
   let period = null;
   if (from) {
     const h = from.h;
     const time = h == null ? null : h >= 15 || h < 4 ? 'night' : 'day';
     period = { from, to, date: from.date, time };
   }
-  return { items, warnings, period, layout: inline && split ? 'mixed' : split ? 'columns' : 'inline' };
+  return { items, warnings, chunks, period, layout: inline && split ? 'mixed' : split ? 'columns' : 'inline' };
 }
+
+// ожидаемое количество за смену, если истории нет
+const TYPICAL = {
+  gs: 40, ks: 40, fri: 30, bc: 20, kp: 15, crispy: 15, gsDv: 10, chili: 10, gp: 8, cheesemax: 8, ksDv: 5, tk: 5, tg: 4,
+  coffee: 2, cocoa: 1, beans: 1,
+};
 
 /**
  * Полный разбор: строки с сопоставлением + сводка по позициям.
- * rows: [{key, name, qty, id, status, score}] — порядок как в чеке.
+ * history — { [id]: ожидаемое количество } (медиана прошлых смен).
+ * rows: [{key, name, qty, qtyCheck, id, status, score}] — порядок как в чеке.
  */
-export function buildImport(text, learned = {}) {
-  const parsed = parseReceipt(text);
-  const rows = parsed.items.map((it, i) => ({ key: `r${i}`, name: it.name, qty: it.qty, ...matchName(it.name, learned) }));
+export function buildImport(text, learned = {}, history = {}) {
+  const mOf = (name) => {
+    const r = matchName(name, learned);
+    if (r.id) return history[r.id] || TYPICAL[r.id] || 4;
+    return 3; // напитки, соусы, стаканы
+  };
+  const parsed = parseReceipt(text, mOf);
+  const rows = parsed.items.map((it, i) => ({ key: `r${i}`, ...it, ...matchName(it.name, learned) }));
   return { ...parsed, rows };
+}
+
+/** Медиана количеств по позициям из сохранённых дней «Расчёта». */
+export function historyMedians(days = {}, itemTotalFn) {
+  const by = {};
+  for (const d of Object.values(days || {})) {
+    for (const [id, v] of Object.entries(d?.counts || {})) {
+      const q = itemTotalFn(v);
+      if (q > 0) (by[id] = by[id] || []).push(q);
+    }
+  }
+  const out = {};
+  for (const [id, a] of Object.entries(by)) {
+    a.sort((x, y) => x - y);
+    out[id] = a[Math.floor(a.length / 2)];
+  }
+  return out;
 }
 
 /** Сводка по позициям из строк (choice: {[rowKey]: id | 'skip'} — решения пользователя). */

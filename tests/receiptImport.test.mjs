@@ -84,16 +84,16 @@ test('шум OCR: латиница-двойники, точки, числа-дв
   assert.deepEqual(p.items.map((x) => [x.name, x.qty]), [['Фри', 40], ['Кофе', 2]]);
 });
 
-test('столбцы кусками и числа раньше названий', () => {
+test('столбцы кусками', () => {
   const p = parseReceipt('Фри\nЧизмакс\n40\n10\nЧили бургер\n16');
   assert.deepEqual(p.items.map((x) => [x.name, x.qty]), [['Фри', 40], ['Чизмакс', 10], ['Чили бургер', 16]]);
-  const q = parseReceipt('40\n10\nФри\nЧизмакс');
-  assert.deepEqual(q.items.map((x) => [x.name, x.qty]), [['Фри', 40], ['Чизмакс', 10]]);
 });
 
 test('не поровну — предупреждение, строка без количества', () => {
+  // как у Live Text: одиночное число — к названию прямо над ним, верхнее остаётся «?»
   const p = parseReceipt('Фри\nЧизмакс\n40');
-  assert.equal(p.items[1].qty, null);
+  assert.equal(p.items[0].qty, null);
+  assert.equal(p.items[1].qty, 40);
   assert.equal(p.warnings.length, 1);
 });
 
@@ -101,4 +101,71 @@ test('дневная смена по времени «за»', () => {
   const p = parseReceipt('за 2026-07-09 07:30:41\nпо 2026-07-09 19:30:00\nФри 3');
   assert.equal(p.period.time, 'day');
   assert.equal(p.period.date, '2026-07-09');
+});
+
+// ── настоящий текст Live Text (iPhone): числа кусками, склеенные строки цифр, потерянные цифры
+const TRUTH = JSON.parse(fx('receipt-truth.json'));
+
+test('Live Text: ни одного молча неверного количества, ≥45 точных', () => {
+  const r = buildImport(fx('receipt-livetext.txt'));
+  assert.equal(r.rows.length, 62);
+  let exact = 0;
+  r.rows.forEach((x, i) => {
+    if (x.qty === TRUTH[i]) exact++;
+    else assert.ok(x.qty == null || x.qtyCheck, `молча неверно: ${x.name} ${x.qty} ≠ ${TRUTH[i]}`);
+  });
+  assert.ok(exact >= 45, `точных ${exact}`);
+  assert.equal(r.period.time, 'night');
+});
+
+test('Live Text: склеенная строка «123525323511721» раскладывается точно', () => {
+  const r = buildImport(fx('receipt-livetext.txt'));
+  const i0 = r.rows.findIndex((x) => /^Соса-Cola \(0,5/.test(x.name));
+  assert.deepEqual(r.rows.slice(i0, i0 + 13).map((x) => x.qty), [1, 2, 3, 5, 2, 5, 3, 23, 5, 11, 7, 2, 1]);
+});
+
+test('Live Text: одиночное число относится к ближайшему названию над ним', () => {
+  const r = buildImport(fx('receipt-livetext.txt'));
+  const q = (re) => r.rows.find((x) => re.test(x.name));
+  assert.equal(q(/^Двои?й?ной чизбургер говядина/).qty, 22);
+  assert.equal(q(/^Двойной гамбургер говядина/).qty, null);
+  assert.equal(q(/^Двойной гамбургер курица/).qty, null);
+  assert.equal(q(/^Двоиной чизбургер курица$/).qty, 7);
+  assert.equal(q(/свех ов$/).qty, 1);
+  assert.equal(q(/^Капучино/).qty, 2);
+  assert.equal(q(/^Кола 0,5/).qty, 24);
+});
+
+test('Live Text: названия сопоставляются и без количества', () => {
+  const r = buildImport(fx('receipt-livetext.txt'));
+  const q = (re) => r.rows.find((x) => re.test(x.name));
+  assert.equal(q(/^Двойной гамбургер говядина/).id, 'gpDv');
+  assert.equal(q(/^Гамб\/ргер/).id, 'gpOm');
+  assert.equal(q(/^Санси с кур 8/).id, 'sk8');
+  assert.equal(q(/^Тэст и ролл/).id, 'tk');
+  assert.equal(q(/^Соса-Cola/).status, 'skip');
+  assert.equal(q(/^Сырний соус/).status, 'skip');
+});
+
+// ── потерянные числа в раскладке «столбцами» (каждое число отдельной строкой)
+function dropNumbers(text, drop) {
+  const lines = text.split('\n');
+  const firstNum = lines.findIndex((l) => /^\d+$/.test(l));
+  return lines.filter((l, i) => !(i >= firstNum && drop.has(i - firstNum))).join('\n');
+}
+let seed = 7;
+const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+
+test('столбцы с потерянными числами: никаких молча сдвинутых количеств', () => {
+  const base = fx('receipt-columns.txt');
+  for (let run = 0; run < 40; run++) {
+    const drop = new Set();
+    const k = 1 + Math.floor(rnd() * 4);
+    while (drop.size < k) drop.add(Math.floor(rnd() * 62));
+    const r = buildImport(dropNumbers(base, drop));
+    assert.equal(r.rows.length, 62);
+    r.rows.forEach((x, i) => {
+      if (x.qty !== TRUTH[i]) assert.ok(x.qty == null || x.qtyCheck, `прогон ${run}, выпали ${[...drop]}: ${x.name} ${x.qty} ≠ ${TRUTH[i]}`);
+    });
+  }
 });

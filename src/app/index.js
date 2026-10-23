@@ -76,7 +76,7 @@ import {
 } from '../lib/totals';
 import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
 import { parsePlan } from '../lib/planParse';
-import { ALIAS_KEY, ITEM_NAME, buildImport, normName, summarize } from '../lib/receiptImport';
+import { ALIAS_KEY, ITEM_NAME, buildImport, historyMedians, normName, summarize } from '../lib/receiptImport';
 import { parseShifts } from '../lib/shiftParse';
 import { applyShiftImport, previewShiftImport } from '../lib/shiftImport';
 import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../lib/shiftsNote';
@@ -338,7 +338,7 @@ function ensureSheetVisible(input) {
  * Modal'а, чтобы blur не «проявлялся» в конце).
  *
  * active   — ключ шторки, которую нужно показать (или null)
- * render   — (key) => { title, right, onClose, body }
+ * render   — (key) => { title, right, onClose, body, top? } (top — закреплён над прокруткой)
  * onClosed — вызывается после полного закрытия (Modal уже скрыт)
  */
 function SheetHost({ active, render, onClosed }) {
@@ -466,6 +466,7 @@ function SheetHost({ active, render, onClosed }) {
                       </View>
                     </View>
                   </GestureDetector>
+                  {cfg.top || null}
                   <ScrollView
                     key={shown}
                     ref={(r) => {
@@ -1517,7 +1518,7 @@ function seedDay(prefs, shifts, date) {
 const talliesOf = (v) => (Array.isArray(v) && v.length ? v.map((x) => Number(x) || 0) : [itemTotal(v)]);
 
 /** Числовое поле: тап — ввод с клавиатуры, пустое = 0; внешние ± сразу видны. */
-function NumInput({ value, onChange, style, inputRef, onFocused, onBlurred, onSubmit, accessoryId }) {
+function NumInput({ value, onChange, style, inputRef, onFocused, onBlurred, onSubmit, accessoryId, placeholder = '0', placeholderColor }) {
   const [draft, setDraft] = useState(null);
   const v = Number(value) || 0;
   const shown = draft !== null && (Number(draft) || 0) === v ? draft : v ? String(v) : '';
@@ -1530,8 +1531,8 @@ function NumInput({ value, onChange, style, inputRef, onFocused, onBlurred, onSu
       selectTextOnFocus
       maxLength={5}
       value={shown}
-      placeholder="0"
-      placeholderTextColor="rgba(235,235,245,0.3)"
+      placeholder={placeholder}
+      placeholderTextColor={placeholderColor || 'rgba(235,235,245,0.3)'}
       inputAccessoryViewID={accessoryId}
       onSubmitEditing={onSubmit}
       onFocus={() => {
@@ -1929,23 +1930,31 @@ const hm = (x) => (x && x.h != null ? `${String(x.h).padStart(2, '0')}:${String(
  * фото в «Фото» → «Выбрать все» → «Скопировать» → здесь «Вставить» → «Разобрать» → проверка → «Применить».
  * Сомнительные строки без подтверждения не применяются; выбор запоминается (zp_alias_v1).
  */
-function ReceiptImport({ day, date, accent, onApply }) {
+function ReceiptImport({ day, date, accent, onApply, photo, onPhoto, history }) {
   const [text, setText] = useState('');
-  const [photo, setPhoto] = useState(null);
-  const [photoBig, setPhotoBig] = useState(false);
   const [learned, setLearned] = useState({});
   const [res, setRes] = useState(null);
   const [choice, setChoice] = useState({}); // rowKey → id | 'skip'
-  const [qtyFix, setQtyFix] = useState({}); // rowKey → число
+  const [qtyFix, setQtyFix] = useState({}); // rowKey → число (вписано/исправлено)
+  const [qtyOk, setQtyOk] = useState({}); // rowKey → true: сверено с фото
+  const [review, setReview] = useState([]); // строки в «Проверьте» (список не прыгает, пока правите)
   const [picking, setPicking] = useState(null);
   const [mode, setMode] = useState(0); // 0 заменить, 1 прибавить
   const [useRcptDate, setUseRcptDate] = useState(true);
   const [showSkip, setShowSkip] = useState(false);
+  const inputs = useRef(new Map());
+  const focusRef = useRef(null);
 
   useEffect(() => {
     AsyncStorage.getItem(ALIAS_KEY)
       .then((raw) => raw && setLearned(JSON.parse(raw) || {}))
       .catch(() => {});
+  }, []);
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (focusRef.current) ensureSheetVisible(inputs.current.get(focusRef.current));
+    });
+    return () => sub.remove();
   }, []);
 
   const paste = async () => {
@@ -1961,30 +1970,35 @@ function ReceiptImport({ day, date, accent, onApply }) {
   };
   const pickPhoto = async () => {
     try {
-      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
-      if (!r.canceled && r.assets?.[0]?.uri) setPhoto(r.assets[0].uri);
+      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
+      if (!r.canceled && r.assets?.[0]?.uri) onPhoto(r.assets[0].uri);
     } catch (err) {
       console.warn('photo pick failed', err);
     }
-  };
-  const parse = () => {
-    Haptics.selectionAsync();
-    const r = buildImport(text, learned);
-    setRes(r);
-    setChoice({});
-    setQtyFix({});
-    setPicking(null);
-    setUseRcptDate(!!r.period);
   };
 
   const rows = useMemo(
     () => (res ? res.rows.map((r) => (qtyFix[r.key] != null ? { ...r, qty: qtyFix[r.key] } : r)) : []),
     [res, qtyFix]
   );
-  // нужно решение: «проверьте», без предложения, без количества — пока пользователь не выбрал
-  const pending = rows.filter((r) => !choice[r.key] && (r.status === 'check' || r.status === 'unknown' || (r.status === 'auto' && !r.qty)));
+  // куда идёт строка: id позиции, null — не учитывается, undefined — позиция не выбрана
+  const targetOf = (r) => {
+    const c = choice[r.key];
+    if (c) return c === 'skip' ? null : c;
+    if (r.status === 'skip') return null;
+    return r.status === 'unknown' ? undefined : r.id;
+  };
+  const needOf = (r) => {
+    if (targetOf(r) === null) return null;
+    const name = !choice[r.key] && (r.status === 'check' || r.status === 'unknown');
+    const qty = !(r.qty > 0);
+    const photoCheck = !qty && r.qtyCheck && !qtyOk[r.key] && qtyFix[r.key] == null;
+    return name || qty || photoCheck ? { name, qty, photoCheck } : null;
+  };
+  const pending = rows.filter((r) => needOf(r));
+  const reviewRows = rows.filter((r) => review.includes(r.key));
   const decided = rows.filter((r) => choice[r.key] && (r.status !== 'auto' || choice[r.key] !== r.id));
-  const skipped = rows.filter((r) => (choice[r.key] ? choice[r.key] === 'skip' : r.status === 'skip'));
+  const skipped = rows.filter((r) => targetOf(r) === null);
   const effective = useMemo(
     () => rows.map((r) => (choice[r.key] || r.status === 'auto' ? r : { ...r, status: 'unknown' })),
     [rows, choice]
@@ -1993,23 +2007,80 @@ function ReceiptImport({ day, date, accent, onApply }) {
   const targetDate = useRcptDate && res?.period ? res.period.date : date;
   const timeLabel = res?.period?.time === 'night' ? 'ночь' : res?.period?.time === 'day' ? 'день' : null;
 
+  const parse = () => {
+    Haptics.selectionAsync();
+    const r = buildImport(text, learned, history);
+    setRes(r);
+    setChoice({});
+    setQtyFix({});
+    setQtyOk({});
+    setPicking(null);
+    setUseRcptDate(!!r.period);
+    setReview(
+      r.rows
+        .filter((x) => x.status !== 'skip' && (x.status !== 'auto' || x.qtyCheck || !(x.qty > 0)))
+        .map((x) => x.key)
+    );
+  };
+  const addReview = (key) => setReview((v) => (v.includes(key) ? v : [...v, key]));
   const decide = (key, v) => {
     Haptics.selectionAsync();
     setChoice((c) => ({ ...c, [key]: v }));
     setPicking(null);
+    if (v !== 'skip') addReview(key);
   };
+  const confirm = (r) => {
+    Haptics.selectionAsync();
+    if (r.id && !choice[r.key]) setChoice((c) => ({ ...c, [r.key]: r.id }));
+    if (r.qty > 0) setQtyOk((q) => ({ ...q, [r.key]: true }));
+    setPicking(null);
+  };
+  const setQty = (key, n) => setQtyFix((q) => ({ ...q, [key]: Math.max(0, n) }));
   const acceptAll = () => {
     Haptics.selectionAsync();
     setChoice((c) => {
       const n = { ...c };
-      for (const r of pending) if (r.id && r.qty) n[r.key] = r.id;
+      for (const r of pending) if (r.id && !n[r.key]) n[r.key] = r.id;
+      return n;
+    });
+    setQtyOk((q) => {
+      const n = { ...q };
+      for (const r of pending) if (r.qty > 0) n[r.key] = true;
       return n;
     });
   };
+  // «Далее ›» — к следующей строке, где нет числа или его надо сверить
+  const qtyOrder = reviewRows.filter((r) => targetOf(r) !== null).map((r) => r.key);
+  const onNext = (key, dir) => {
+    const cur = rows.find((x) => x.key === key);
+    if (dir > 0 && cur && cur.qty > 0) setQtyOk((q) => ({ ...q, [key]: true }));
+    const i = qtyOrder.indexOf(key);
+    let nextKey = null;
+    if (dir < 0) nextKey = qtyOrder[i - 1] || null;
+    else {
+      for (let j = i + 1; j < qtyOrder.length && !nextKey; j++) {
+        const r = rows.find((x) => x.key === qtyOrder[j]);
+        const nd = r && needOf(r);
+        if (nd && (nd.qty || nd.photoCheck)) nextKey = r.key;
+      }
+    }
+    if (nextKey && inputs.current.get(nextKey)) {
+      Haptics.selectionAsync();
+      inputs.current.get(nextKey).focus();
+    } else if (dir > 0) Keyboard.dismiss();
+  };
+  const hasNextAfter = (key) => {
+    const i = qtyOrder.indexOf(key);
+    return qtyOrder.slice(i + 1).some((k) => {
+      const r = rows.find((x) => x.key === k);
+      const nd = r && needOf(r);
+      return nd && (nd.qty || nd.photoCheck);
+    });
+  };
+
   const apply = async () => {
     if (pending.length || !sum.length) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    // запомнить решения пользователя
     const nextL = { ...learned };
     for (const r of rows) if (choice[r.key]) nextL[normName(r.name)] = choice[r.key];
     AsyncStorage.setItem(ALIAS_KEY, JSON.stringify(nextL)).catch(() => {});
@@ -2061,11 +2132,6 @@ function ReceiptImport({ day, date, accent, onApply }) {
             <Text style={styles.actBtnTxt}>{photo ? 'Другое фото' : 'Фото для сверки'}</Text>
           </ScaleButton>
         </View>
-        {photo ? (
-          <Pressable onPress={() => setPhotoBig((v) => !v)}>
-            <Image source={{ uri: photo }} style={photoBig ? styles.impPhotoBig : styles.impPhoto} resizeMode="contain" />
-          </Pressable>
-        ) : null}
         {nLines ? (
           <ItemCard style={[styles.listCard, styles.padCard]}>
             <Text style={styles.k}>Вставлено строк: {nLines}</Text>
@@ -2078,8 +2144,7 @@ function ReceiptImport({ day, date, accent, onApply }) {
           <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
         </ScaleButton>
         <Text style={styles.hint}>
-          Фото здесь — только для сверки: распознаёт текст сам iPhone (Live Text). Названия и количества могут вставиться
-          одной колонкой или двумя — приложение разберёт оба варианта.
+          Фото — для сверки: оно будет закреплено сверху, пока проверяете числа. Распознаёт текст сам iPhone (Live Text).
         </Text>
       </View>
     );
@@ -2087,9 +2152,9 @@ function ReceiptImport({ day, date, accent, onApply }) {
 
   return (
     <View>
-      {photo ? (
-        <Pressable onPress={() => setPhotoBig((v) => !v)}>
-          <Image source={{ uri: photo }} style={photoBig ? styles.impPhotoBig : styles.impPhoto} resizeMode="contain" />
+      {!photo ? (
+        <Pressable onPress={pickPhoto}>
+          <Text style={[styles.link, styles.showAll, { color: accent, marginTop: 0 }]}>📷  Фото чека для сверки</Text>
         </Pressable>
       ) : null}
       {res.period ? (
@@ -2116,58 +2181,105 @@ function ReceiptImport({ day, date, accent, onApply }) {
         </ItemCard>
       ) : null}
       {res.warnings.map((w) => (
-        <Text key={w} style={[styles.hint, styles.bad]}>
+        <Text key={w} style={[styles.hint, styles.impWarn]}>
           ⚠︎ {w}
         </Text>
       ))}
 
-      {pending.length ? (
+      {reviewRows.length ? (
         <>
           <View style={styles.gHead}>
             <Text style={styles.gTitle}>Проверьте</Text>
-            <Text style={styles.gSub}>{pending.length}</Text>
+            <Text style={styles.gSub}>{pending.length ? `осталось ${pending.length}` : 'всё ✓'}</Text>
           </View>
           <ItemCard style={styles.listCard}>
-            {pending.map((r, i) => (
-              <View key={r.key} style={[styles.impRow, i < pending.length - 1 && styles.lRowSep]}>
-                <View style={styles.impRowTop}>
-                  <Text style={styles.impName} numberOfLines={2}>
-                    {r.name}
-                  </Text>
-                  <View style={styles.adjMini}>
-                    <Pressable
-                      style={styles.adjMiniBtn}
-                      onPress={() => setQtyFix((q) => ({ ...q, [r.key]: Math.max(0, (r.qty || 0) - 1) }))}
-                    >
-                      <Text style={styles.adjMiniTxt}>−</Text>
+            {reviewRows.map((r, i) => {
+              const nd = needOf(r);
+              const tgt = targetOf(r);
+              const off = tgt === null;
+              const chosen = choice[r.key] && choice[r.key] !== 'skip' ? choice[r.key] : null;
+              return (
+                <View key={r.key} style={[styles.impRow, i < reviewRows.length - 1 && styles.lRowSep, off && { opacity: 0.5 }]}>
+                  <View style={styles.impRowTop}>
+                    <Text style={styles.impName} numberOfLines={2}>
+                      {r.name}
+                    </Text>
+                    {off ? (
+                      <Text style={styles.impVal}>{r.qty ?? '—'}</Text>
+                    ) : (
+                      <View style={styles.adjMini}>
+                        <Pressable hitSlop={4} style={styles.adjMiniBtn} onPress={() => setQty(r.key, (r.qty || 0) - 1)}>
+                          <Text style={styles.adjMiniTxt}>−</Text>
+                        </Pressable>
+                        <NumInput
+                          inputRef={(x) => (x ? inputs.current.set(r.key, x) : inputs.current.delete(r.key))}
+                          value={r.qty || 0}
+                          placeholder="?"
+                          onChange={(n) => setQty(r.key, n)}
+                          onFocused={() => {
+                            focusRef.current = r.key;
+                            if (Keyboard.isVisible()) requestAnimationFrame(() => ensureSheetVisible(inputs.current.get(r.key)));
+                            const k = qtyOrder.indexOf(r.key);
+                            kbShow({
+                              key: `imp-${r.key}`,
+                              scope: 'sheet',
+                              label: r.name,
+                              hasPrev: k > 0,
+                              isLast: !hasNextAfter(r.key),
+                              accent,
+                              onPrev: () => onNext(r.key, -1),
+                              onNext: () => onNext(r.key, 1),
+                            });
+                          }}
+                          onBlurred={() => kbHide(`imp-${r.key}`)}
+                          onSubmit={() => onNext(r.key, 1)}
+                          accessoryId={KB_NONE}
+                          placeholderColor="rgba(255,69,58,0.9)"
+                          style={[styles.impQtyIn, nd?.photoCheck && styles.impQtyCheck, nd?.qty && styles.impQtyMiss]}
+                        />
+                        <Pressable hitSlop={4} style={styles.adjMiniBtn} onPress={() => setQty(r.key, (r.qty || 0) + 1)}>
+                          <Text style={styles.adjMiniTxt}>+</Text>
+                        </Pressable>
+                      </View>
+                    )}
+                  </View>
+                  {!off && nd?.qty ? <Text style={[styles.impTag, styles.bad]}>нет числа — впишите по фото</Text> : null}
+                  {!off && nd?.photoCheck ? <Text style={[styles.impTag, styles.impTagCheck]}>проверьте по фото</Text> : null}
+                  <View style={styles.impPick}>
+                    {r.id ? (
+                      <Pressable
+                        style={[styles.impChip, { borderColor: accent }, (chosen || (!nd && !off)) && { backgroundColor: accent }]}
+                        onPress={() => (chosen && chosen !== r.id ? decide(r.key, r.id) : confirm(r))}
+                      >
+                        <Text style={[styles.impChipTxt, chosen || (!nd && !off) ? styles.onAccent : { color: accent }]}>
+                          ✓ {ITEM_NAME[r.id]}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    {chosen && chosen !== r.id ? (
+                      <View style={[styles.impChip, { borderColor: accent, backgroundColor: accent }]}>
+                        <Text style={[styles.impChipTxt, styles.onAccent]}>✓ {ITEM_NAME[chosen]}</Text>
+                      </View>
+                    ) : null}
+                    <Pressable style={styles.impChip} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
+                      <Text style={styles.impChipTxt}>{r.id || chosen ? 'Другая…' : 'Выбрать позицию…'}</Text>
                     </Pressable>
-                    <Text style={[styles.impQty, !r.qty && styles.bad]}>{r.qty == null ? '?' : r.qty}</Text>
-                    <Pressable style={styles.adjMiniBtn} onPress={() => setQtyFix((q) => ({ ...q, [r.key]: (r.qty || 0) + 1 }))}>
-                      <Text style={styles.adjMiniTxt}>+</Text>
+                    <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(r.key, 'skip')}>
+                      <Text style={styles.impChipTxt}>Не учитывать</Text>
                     </Pressable>
                   </View>
+                  {picking === r.key ? <Picker rowKey={r.key} /> : null}
                 </View>
-                <View style={styles.impPick}>
-                  {r.id && r.qty ? (
-                    <Pressable style={[styles.impChip, { borderColor: accent }]} onPress={() => decide(r.key, r.id)}>
-                      <Text style={[styles.impChipTxt, { color: accent }]}>✓ {ITEM_NAME[r.id]}</Text>
-                    </Pressable>
-                  ) : null}
-                  <Pressable style={styles.impChip} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
-                    <Text style={styles.impChipTxt}>{r.id ? 'Другая…' : 'Выбрать позицию…'}</Text>
-                  </Pressable>
-                  <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(r.key, 'skip')}>
-                    <Text style={styles.impChipTxt}>Не учитывать</Text>
-                  </Pressable>
-                </View>
-                {picking === r.key ? <Picker rowKey={r.key} /> : null}
-              </View>
-            ))}
+              );
+            })}
           </ItemCard>
-          {pending.some((r) => r.id && r.qty) ? (
+          {pending.some((r) => (r.id && !choice[r.key]) || r.qty > 0) ? (
             <Pressable onPress={acceptAll}>
               <Text style={[styles.link, styles.showAll, { color: accent }]}>Согласиться со всеми предложениями</Text>
             </Pressable>
+          ) : null}
+          {pending.some((r) => !(r.qty > 0)) ? (
+            <Text style={styles.hint}>Строки без числа впишите сами — тап по «?», «Далее ›» ведёт к следующей.</Text>
           ) : null}
         </>
       ) : null}
@@ -2181,11 +2293,12 @@ function ReceiptImport({ day, date, accent, onApply }) {
           sum.map((x, i) => {
             const cur = itemTotal(day?.counts?.[x.id]);
             const next = mode === 1 ? cur + x.qty : x.qty;
+            const unsure = x.lines.some((l) => needOf(l));
             return (
               <View key={x.id} style={[styles.impRow, i < sum.length - 1 && styles.lRowSep]}>
                 <View style={styles.impRowTop}>
                   <Text style={styles.impPos}>{x.name}</Text>
-                  <Text style={styles.impVal}>
+                  <Text style={[styles.impVal, unsure && styles.impTagCheck]}>
                     {targetDate === date && cur !== next ? <Text style={styles.impOld}>{cur} → </Text> : null}
                     {next}
                   </Text>
@@ -2249,6 +2362,51 @@ function ReceiptImport({ day, date, accent, onApply }) {
       <Pressable onPress={() => setRes(null)}>
         <Text style={[styles.link, styles.showAll, { color: accent }]}>Вставить другой текст</Text>
       </Pressable>
+    </View>
+  );
+}
+
+/**
+ * Фото чека закреплено над списком шторки (не уезжает при прокрутке): щипок — увеличить прямо здесь,
+ * тап — на весь экран (там тоже щипок).
+ */
+function ReceiptThumb({ uri, onClear }) {
+  const [full, setFull] = useState(false);
+  const [tall, setTall] = useState(false);
+  const zoomPinch = { maximumZoomScale: 6, minimumZoomScale: 1, bouncesZoom: true, centerContent: true };
+  return (
+    <View style={styles.impThumbWrap}>
+      <ScrollView
+        {...zoomPinch}
+        style={[styles.impThumb, tall && styles.impThumbTall]}
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+      >
+        <Pressable onPress={() => setFull(true)}>
+          <Image source={{ uri }} style={[styles.impThumbImg, tall && styles.impThumbTall]} resizeMode="contain" />
+        </Pressable>
+      </ScrollView>
+      <View style={styles.impThumbBar}>
+        <Pressable hitSlop={8} onPress={() => setTall((v) => !v)}>
+          <Text style={styles.impThumbBtn}>{tall ? 'Меньше' : 'Больше'}</Text>
+        </Pressable>
+        <Pressable hitSlop={8} onPress={() => setFull(true)}>
+          <Text style={styles.impThumbBtn}>На весь экран</Text>
+        </Pressable>
+        <Pressable hitSlop={8} onPress={onClear}>
+          <Text style={styles.impThumbBtn}>Убрать</Text>
+        </Pressable>
+      </View>
+      <Modal visible={full} transparent animationType="fade" onRequestClose={() => setFull(false)}>
+        <View style={styles.impFull}>
+          <ScrollView {...zoomPinch} style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }}>
+            <Image source={{ uri }} style={styles.impFullImg} resizeMode="contain" />
+          </ScrollView>
+          <Pressable style={styles.impFullClose} hitSlop={14} onPress={() => setFull(false)}>
+            <Text style={styles.impFullCloseTxt}>Готово</Text>
+          </Pressable>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2934,6 +3092,9 @@ export default function App() {
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
+  const [impPhoto, setImpPhoto] = useState(null); // фото чека для сверки при импорте
+  // медианы прошлых смен по позициям — подсказка разбору склеенных цифр чека
+  const calcHistory = useMemo(() => historyMedians(calc?.days, itemTotal), [calc?.days]);
   const [calcDate, setCalcDate] = useState(todayIso);
   const [calcItem, setCalcItem] = useState(null);
   const calcDateRef = useRef(calcDate);
@@ -3707,7 +3868,7 @@ export default function App() {
 
   const pickBg = async () => {
     const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       quality: 0.8,
     });
     if (!res.canceled && res.assets?.[0]?.uri) {
@@ -5064,7 +5225,18 @@ export default function App() {
         return {
           title: 'Импорт из чека',
           onClose: () => setSheet('calcPos'),
-          body: <ReceiptImport day={calcDay} date={calcDate} accent={accent} onApply={applyCalcImport} />,
+          top: impPhoto ? <ReceiptThumb uri={impPhoto} onClear={() => setImpPhoto(null)} /> : null,
+          body: (
+            <ReceiptImport
+              day={calcDay}
+              date={calcDate}
+              accent={accent}
+              onApply={applyCalcImport}
+              photo={impPhoto}
+              onPhoto={setImpPhoto}
+              history={calcHistory}
+            />
+          ),
         };
       case 'calcSum':
         return {
@@ -5659,8 +5831,22 @@ const styles = StyleSheet.create({
   impStepN: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
   impStepNTxt: { fontSize: 13, fontWeight: '700' },
   impStepTxt: { flex: 1, color: '#fff', fontSize: 15, lineHeight: 20 },
-  impPhoto: { height: 120, borderRadius: 16, marginBottom: 12, backgroundColor: 'rgba(255,255,255,0.06)' },
-  impPhotoBig: { height: SCREEN_H * 0.6, borderRadius: 16, marginBottom: 12, backgroundColor: 'rgba(255,255,255,0.06)' },
+  impThumbWrap: { marginHorizontal: 16, marginBottom: 8 },
+  impThumb: { height: 128, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
+  impThumbTall: { height: SCREEN_H * 0.36 },
+  impThumbImg: { width: SCREEN_W - 32, height: 128 },
+  impThumbBar: { flexDirection: 'row', justifyContent: 'flex-end', gap: 18, paddingTop: 6, paddingHorizontal: 4 },
+  impThumbBtn: { color: 'rgba(235,235,245,0.6)', fontSize: 13, fontWeight: '500' },
+  impFull: { flex: 1, backgroundColor: '#000' },
+  impFullImg: { width: SCREEN_W, height: SCREEN_H },
+  impFullClose: { position: 'absolute', top: 56, right: 20, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18, backgroundColor: 'rgba(60,60,67,0.75)' },
+  impFullCloseTxt: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  impWarn: { color: '#ffd60a' },
+  impTag: { fontSize: 12, fontWeight: '600', marginTop: 4, textAlign: 'right' },
+  impTagCheck: { color: '#ffd60a' },
+  impQtyIn: { minWidth: 44, paddingVertical: 4, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  impQtyCheck: { color: '#ffd60a' },
+  impQtyMiss: { color: '#ff453a' },
   impRaw: { color: 'rgba(235,235,245,0.6)', fontSize: 12, marginTop: 6, lineHeight: 16 },
   impRow: { paddingHorizontal: 14, paddingVertical: 11 },
   impRowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
