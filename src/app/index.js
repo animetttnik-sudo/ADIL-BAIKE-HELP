@@ -25,7 +25,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRe
 import {
     Alert,
     AppState,
-    Dimensions, Image, ImageBackground,
+    Dimensions, ImageBackground,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -76,7 +76,6 @@ import {
 } from '../lib/totals';
 import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
 import { parsePlan } from '../lib/planParse';
-import { ALIAS_KEY, ITEM_NAME, buildImport, historyMedians, normName, summarize } from '../lib/receiptImport';
 import { parseShifts } from '../lib/shiftParse';
 import { applyShiftImport, previewShiftImport } from '../lib/shiftImport';
 import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../lib/shiftsNote';
@@ -92,6 +91,7 @@ import {
     ownPay,
     shiftTitle,
 } from '../lib/calc';
+import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import {
   KEY,
   ANCHOR,
@@ -338,7 +338,7 @@ function ensureSheetVisible(input) {
  * Modal'а, чтобы blur не «проявлялся» в конце).
  *
  * active   — ключ шторки, которую нужно показать (или null)
- * render   — (key) => { title, right, onClose, body, top? } (top — закреплён над прокруткой)
+ * render   — (key) => { title, right, onClose, body }
  * onClosed — вызывается после полного закрытия (Modal уже скрыт)
  */
 function SheetHost({ active, render, onClosed }) {
@@ -466,7 +466,6 @@ function SheetHost({ active, render, onClosed }) {
                       </View>
                     </View>
                   </GestureDetector>
-                  {cfg.top || null}
                   <ScrollView
                     key={shown}
                     ref={(r) => {
@@ -1859,7 +1858,7 @@ const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
  * Позиции в шторке — плоский список в порядке таблицы. Ввод подряд: «Далее ›» на панели
  * шторки идёт по позициям сверху вниз, поле в фокусе докручивается над клавиатурой.
  */
-const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen, onImport }) {
+const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen, onQuick }) {
   const inputs = useRef(new Map());
   const focusRef = useRef(null);
   const register = useCallback((id, r) => {
@@ -1889,8 +1888,8 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
   const units = CALC_ITEMS.reduce((a, it) => a + (it.note ? 0 : itemTotal(day.counts[it.id])), 0);
   return (
     <View>
-      <ScaleButton style={[styles.actBtn, styles.impOpen]} onPress={onImport}>
-        <Text style={styles.actBtnTxt}>🧾  Импорт из чека</Text>
+      <ScaleButton style={[styles.actBtn, styles.quickOpen]} onPress={onQuick}>
+        <Text style={styles.actBtnTxt}>⚡  Быстрый ввод</Text>
       </ScaleButton>
       <View style={styles.gHead}>
         <Text style={styles.gTitle}>Как в таблице</Text>
@@ -1923,490 +1922,196 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
 });
 
 
-const hm = (x) => (x && x.h != null ? `${String(x.h).padStart(2, '0')}:${String(x.min).padStart(2, '0')}` : '');
-
 /**
- * Импорт позиций из «Отчёта по продажам». Текст — из Live Text iOS (в Expo Go нет распознавания на устройстве):
- * фото в «Фото» → «Выбрать все» → «Скопировать» → здесь «Вставить» → «Разобрать» → проверка → «Применить».
- * Сомнительные строки без подтверждения не применяются; выбор запоминается (zp_alias_v1).
+ * «⚡ Быстрый ввод»: позиции по одной карточке в порядке строк Excel.
+ * Поле ввода одно и не пересоздаётся — клавиатура остаётся открытой между карточками;
+ * при «Далее ›» старая карточка (копия без поля) уезжает влево, новая въезжает справа, «↑» — наоборот.
+ * Значение сохраняется сразу при наборе; пустое поле — значение не меняется.
  */
-function ReceiptImport({ day, date, accent, onApply, photo, onPhoto, history }) {
-  const [text, setText] = useState('');
-  const [learned, setLearned] = useState({});
-  const [res, setRes] = useState(null);
-  const [choice, setChoice] = useState({}); // rowKey → id | 'skip'
-  const [qtyFix, setQtyFix] = useState({}); // rowKey → число (вписано/исправлено)
-  const [qtyOk, setQtyOk] = useState({}); // rowKey → true: сверено с фото
-  const [review, setReview] = useState([]); // строки в «Проверьте» (список не прыгает, пока правите)
-  const [picking, setPicking] = useState(null);
-  const [mode, setMode] = useState(0); // 0 заменить, 1 прибавить
-  const [useRcptDate, setUseRcptDate] = useState(true);
-  const [showSkip, setShowSkip] = useState(false);
-  const inputs = useRef(new Map());
-  const focusRef = useRef(null);
+const QUICK_IN = { duration: 260, easing: Easing.out(Easing.cubic) };
+const QUICK_W = SCREEN_W - 32;
+function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
+  const n = CALC_ITEMS.length;
+  const [idx, setIdx] = useState(0);
+  const [draft, setDraft] = useState('');
+  const [ghost, setGhost] = useState(null); // уезжающая карточка: {item, shown, key}
+  const inputRef = useRef(null);
+  const focused = useRef(false);
+  const base = useRef([0]); // подсчёты карточки на момент входа в неё
+  const dayRef = useRef(day);
+  dayRef.current = day;
+  const cardX = useSharedValue(0);
+  const ghostX = useSharedValue(0);
+  const ghostSeq = useRef(0);
 
+  const item = CALC_ITEMS[idx];
+  const tallies = day.counts[item.id];
+  const total = itemTotal(tallies);
+
+  // вход в карточку: запоминаем, что было, поле пустое (текущее — в подсказке)
   useEffect(() => {
-    AsyncStorage.getItem(ALIAS_KEY)
-      .then((raw) => raw && setLearned(JSON.parse(raw) || {}))
-      .catch(() => {});
-  }, []);
-  useEffect(() => {
-    const sub = Keyboard.addListener('keyboardDidShow', () => {
-      if (focusRef.current) ensureSheetVisible(inputs.current.get(focusRef.current));
-    });
-    return () => sub.remove();
+    base.current = talliesOf(dayRef.current.counts[CALC_ITEMS[idx].id]);
+    setDraft('');
+  }, [idx]);
+
+  const clearGhost = useCallback((k) => {
+    setGhost((g) => (g && g.key === k ? null : g));
   }, []);
 
-  const paste = async () => {
-    try {
-      const t = await Clipboard.getStringAsync();
-      if (!t || !t.trim()) return Alert.alert('Буфер пуст', 'Скопируйте текст чека в «Фото» (Выбрать все → Скопировать) и нажмите «Вставить».');
-      Haptics.selectionAsync();
-      setText(t);
-      setRes(null);
-    } catch (err) {
-      console.warn('clipboard failed', err);
-    }
-  };
-  const pickPhoto = async () => {
-    try {
-      const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
-      if (!r.canceled && r.assets?.[0]?.uri) onPhoto(r.assets[0].uri);
-    } catch (err) {
-      console.warn('photo pick failed', err);
-    }
-  };
-
-  const rows = useMemo(
-    () => (res ? res.rows.map((r) => (qtyFix[r.key] != null ? { ...r, qty: qtyFix[r.key] } : r)) : []),
-    [res, qtyFix]
-  );
-  // куда идёт строка: id позиции, null — не учитывается, undefined — позиция не выбрана
-  const targetOf = (r) => {
-    const c = choice[r.key];
-    if (c) return c === 'skip' ? null : c;
-    if (r.status === 'skip') return null;
-    return r.status === 'unknown' ? undefined : r.id;
-  };
-  const needOf = (r) => {
-    if (targetOf(r) === null) return null;
-    const name = !choice[r.key] && (r.status === 'check' || r.status === 'unknown');
-    const qty = !(r.qty > 0);
-    const photoCheck = !qty && r.qtyCheck && !qtyOk[r.key] && qtyFix[r.key] == null;
-    return name || qty || photoCheck ? { name, qty, photoCheck } : null;
-  };
-  const pending = rows.filter((r) => needOf(r));
-  const reviewRows = rows.filter((r) => review.includes(r.key));
-  const decided = rows.filter((r) => choice[r.key] && (r.status !== 'auto' || choice[r.key] !== r.id));
-  const skipped = rows.filter((r) => targetOf(r) === null);
-  const effective = useMemo(
-    () => rows.map((r) => (choice[r.key] || r.status === 'auto' ? r : { ...r, status: 'unknown' })),
-    [rows, choice]
-  );
-  const sum = useMemo(() => summarize(effective, choice), [effective, choice]);
-  const targetDate = useRcptDate && res?.period ? res.period.date : date;
-  const timeLabel = res?.period?.time === 'night' ? 'ночь' : res?.period?.time === 'day' ? 'день' : null;
-
-  const parse = () => {
-    Haptics.selectionAsync();
-    const r = buildImport(text, learned, history);
-    setRes(r);
-    setChoice({});
-    setQtyFix({});
-    setQtyOk({});
-    setPicking(null);
-    setUseRcptDate(!!r.period);
-    setReview(
-      r.rows
-        .filter((x) => x.status !== 'skip' && (x.status !== 'auto' || x.qtyCheck || !(x.qty > 0)))
-        .map((x) => x.key)
-    );
-  };
-  const addReview = (key) => setReview((v) => (v.includes(key) ? v : [...v, key]));
-  const decide = (key, v) => {
-    Haptics.selectionAsync();
-    setChoice((c) => ({ ...c, [key]: v }));
-    setPicking(null);
-    if (v !== 'skip') addReview(key);
-  };
-  const confirm = (r) => {
-    Haptics.selectionAsync();
-    if (r.id && !choice[r.key]) setChoice((c) => ({ ...c, [r.key]: r.id }));
-    if (r.qty > 0) setQtyOk((q) => ({ ...q, [r.key]: true }));
-    setPicking(null);
-  };
-  const setQty = (key, n) => setQtyFix((q) => ({ ...q, [key]: Math.max(0, n) }));
-  const acceptAll = () => {
-    Haptics.selectionAsync();
-    setChoice((c) => {
-      const n = { ...c };
-      for (const r of pending) if (r.id && !n[r.key]) n[r.key] = r.id;
-      return n;
-    });
-    setQtyOk((q) => {
-      const n = { ...q };
-      for (const r of pending) if (r.qty > 0) n[r.key] = true;
-      return n;
-    });
-  };
-  // «Далее ›» — к следующей строке, где нет числа или его надо сверить
-  const qtyOrder = reviewRows.filter((r) => targetOf(r) !== null).map((r) => r.key);
-  const onNext = (key, dir) => {
-    const cur = rows.find((x) => x.key === key);
-    if (dir > 0 && cur && cur.qty > 0) setQtyOk((q) => ({ ...q, [key]: true }));
-    const i = qtyOrder.indexOf(key);
-    let nextKey = null;
-    if (dir < 0) nextKey = qtyOrder[i - 1] || null;
-    else {
-      for (let j = i + 1; j < qtyOrder.length && !nextKey; j++) {
-        const r = rows.find((x) => x.key === qtyOrder[j]);
-        const nd = r && needOf(r);
-        if (nd && (nd.qty || nd.photoCheck)) nextKey = r.key;
+  const go = useCallback(
+    (dir) => {
+      const r = quickStep(idx, dir, n);
+      if (r.done) {
+        Keyboard.dismiss();
+        onDone();
+        return;
       }
-    }
-    if (nextKey && inputs.current.get(nextKey)) {
+      if (r.index === idx) return;
       Haptics.selectionAsync();
-      inputs.current.get(nextKey).focus();
-    } else if (dir > 0) Keyboard.dismiss();
-  };
-  const hasNextAfter = (key) => {
-    const i = qtyOrder.indexOf(key);
-    return qtyOrder.slice(i + 1).some((k) => {
-      const r = rows.find((x) => x.key === k);
-      const nd = r && needOf(r);
-      return nd && (nd.qty || nd.photoCheck);
-    });
-  };
-
-  const apply = async () => {
-    if (pending.length || !sum.length) return;
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const nextL = { ...learned };
-    for (const r of rows) if (choice[r.key]) nextL[normName(r.name)] = choice[r.key];
-    AsyncStorage.setItem(ALIAS_KEY, JSON.stringify(nextL)).catch(() => {});
-    setLearned(nextL);
-    onApply({
-      date: targetDate,
-      time: res.period?.time || null,
-      mode: mode === 1 ? 'add' : 'replace',
-      items: sum.map((x) => ({ id: x.id, tallies: x.lines.map((l) => l.qty) })),
-    });
-  };
-
-  const Picker = ({ rowKey }) => (
-    <View style={styles.impPick}>
-      {CALC_ITEMS.map((it) => (
-        <Pressable key={it.id} style={styles.impChip} onPress={() => decide(rowKey, it.id)}>
-          <Text style={styles.impChipTxt}>{it.name}</Text>
-        </Pressable>
-      ))}
-      <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(rowKey, 'skip')}>
-        <Text style={styles.impChipTxt}>Не учитывать</Text>
-      </Pressable>
-    </View>
+      const it = CALC_ITEMS[idx];
+      ghostSeq.current += 1;
+      const k = ghostSeq.current;
+      setGhost({ item: it, shown: draft || quickShown(dayRef.current.counts[it.id]), pos: idx, key: k });
+      ghostX.value = 0;
+      ghostX.value = withTiming(-dir * QUICK_W, QUICK_IN, (fin) => {
+        'worklet';
+        try {
+          if (fin) scheduleOnRN(clearGhost, k);
+        } catch (err) {
+          wErr(err);
+        }
+      });
+      cardX.value = dir * QUICK_W;
+      cardX.value = withTiming(0, QUICK_IN);
+      setIdx(r.index);
+    },
+    [idx, n, draft, onDone, cardX, ghostX, clearGhost]
   );
+  const goRef = useRef(go);
+  goRef.current = go;
 
-  if (!res) {
-    const nLines = text ? text.split('\n').filter((l) => l.trim()).length : 0;
-    return (
-      <View>
-        <ItemCard style={[styles.listCard, styles.padCard]}>
-          {[
-            ['1', 'Откройте фото чека в «Фото».'],
-            ['2', 'Удерживайте палец на тексте (или значок текста справа внизу) → «Выбрать все» → «Скопировать».'],
-            ['3', 'Вернитесь сюда и нажмите «Вставить», затем «Разобрать».'],
-          ].map(([n, t]) => (
-            <View key={n} style={styles.impStep}>
-              <View style={[styles.impStepN, { backgroundColor: accent }]}>
-                <Text style={[styles.impStepNTxt, styles.onAccent]}>{n}</Text>
-              </View>
-              <Text style={styles.impStepTxt}>{t}</Text>
-            </View>
-          ))}
-        </ItemCard>
-        <View style={styles.notesBtns}>
-          <ScaleButton style={[styles.actBtn, styles.notesBtn]} onPress={paste}>
-            <Text style={styles.actBtnTxt}>Вставить</Text>
-          </ScaleButton>
-          <ScaleButton style={[styles.actBtn, styles.notesBtn]} onPress={pickPhoto}>
-            <Text style={styles.actBtnTxt}>{photo ? 'Другое фото' : 'Фото для сверки'}</Text>
-          </ScaleButton>
-        </View>
-        {nLines ? (
-          <ItemCard style={[styles.listCard, styles.padCard]}>
-            <Text style={styles.k}>Вставлено строк: {nLines}</Text>
-            <Text style={styles.impRaw} numberOfLines={6}>
-              {text.trim()}
-            </Text>
-          </ItemCard>
-        ) : null}
-        <ScaleButton style={[styles.actBtn, { backgroundColor: accent }, !nLines && { opacity: 0.45 }]} onPress={() => nLines && parse()}>
-          <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
-        </ScaleButton>
-        <Text style={styles.hint}>
-          Фото — для сверки: оно будет закреплено сверху, пока проверяете числа. Распознаёт текст сам iPhone (Live Text).
-        </Text>
-      </View>
-    );
-  }
+  const showBar = useCallback(() => {
+    kbShow({
+      key: 'calc-quick',
+      scope: 'sheet',
+      label: `${CALC_ITEMS[idx].name}  ·  ${idx + 1}/${n}`,
+      hasPrev: idx > 0,
+      isLast: idx === n - 1,
+      accent,
+      onPrev: () => goRef.current(-1),
+      onNext: () => goRef.current(1),
+    });
+  }, [idx, n, accent]);
+  useEffect(() => {
+    if (focused.current) showBar();
+  }, [showBar]);
+
+  // клавиатура открывается сама, когда шторка доехала
+  useEffect(() => {
+    const t = setTimeout(() => inputRef.current?.focus(), 380);
+    return () => {
+      clearTimeout(t);
+      kbHide('calc-quick');
+    };
+  }, []);
+
+  const onType = (t) => {
+    const clean = String(t).replace(/[^0-9+]/g, '').replace(/^\++/, '').replace(/\+{2,}/g, '+');
+    setDraft(clean);
+    onSetTallies(item.id, quickValue(base.current, clean));
+  };
+  const addPlus = () => {
+    if (!quickCanPlus(draft)) return;
+    Haptics.selectionAsync();
+    setDraft(draft + '+');
+    inputRef.current?.focus();
+  };
+
+  const cardStyle = useAnimatedStyle(() => ({ transform: [{ translateX: cardX.value }] }));
+  const ghostStyle = useAnimatedStyle(() => ({ transform: [{ translateX: ghostX.value }] }));
+  const prevName = idx > 0 ? CALC_ITEMS[idx - 1].name : '';
+  const nextName = idx < n - 1 ? CALC_ITEMS[idx + 1].name : '';
+  const multi = talliesOf(tallies).length > 1;
 
   return (
     <View>
-      {!photo ? (
-        <Pressable onPress={pickPhoto}>
-          <Text style={[styles.link, styles.showAll, { color: accent, marginTop: 0 }]}>📷  Фото чека для сверки</Text>
-        </Pressable>
-      ) : null}
-      {res.period ? (
-        <ItemCard style={[styles.listCard, styles.padCard]}>
-          <Text style={styles.k}>
-            Чек: {fmtShort(res.period.from.date)} {hm(res.period.from)}
-            {res.period.to ? ` → ${fmtShort(res.period.to.date)} ${hm(res.period.to)}` : ''}
-            {timeLabel ? ` · ${timeLabel}` : ''}
-          </Text>
-          <View style={[styles.notesBtns, { marginTop: 10, marginBottom: 0 }]}>
-            <Pressable
-              style={[styles.impChip, styles.impSeg, useRcptDate && { borderColor: accent }]}
-              onPress={() => setUseRcptDate(true)}
-            >
-              <Text style={[styles.impChipTxt, useRcptDate && { color: accent }]}>На {fmtShort(res.period.date)}</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.impChip, styles.impSeg, !useRcptDate && { borderColor: accent }]}
-              onPress={() => setUseRcptDate(false)}
-            >
-              <Text style={[styles.impChipTxt, !useRcptDate && { color: accent }]}>На {fmtShort(date)} (открыта)</Text>
-            </Pressable>
-          </View>
-        </ItemCard>
-      ) : null}
-      {res.warnings.map((w) => (
-        <Text key={w} style={[styles.hint, styles.impWarn]}>
-          ⚠︎ {w}
-        </Text>
-      ))}
-
-      {reviewRows.length ? (
-        <>
-          <View style={styles.gHead}>
-            <Text style={styles.gTitle}>Проверьте</Text>
-            <Text style={styles.gSub}>{pending.length ? `осталось ${pending.length}` : 'всё ✓'}</Text>
-          </View>
-          <ItemCard style={styles.listCard}>
-            {reviewRows.map((r, i) => {
-              const nd = needOf(r);
-              const tgt = targetOf(r);
-              const off = tgt === null;
-              const chosen = choice[r.key] && choice[r.key] !== 'skip' ? choice[r.key] : null;
-              return (
-                <View key={r.key} style={[styles.impRow, i < reviewRows.length - 1 && styles.lRowSep, off && { opacity: 0.5 }]}>
-                  <View style={styles.impRowTop}>
-                    <Text style={styles.impName} numberOfLines={2}>
-                      {r.name}
-                    </Text>
-                    {off ? (
-                      <Text style={styles.impVal}>{r.qty ?? '—'}</Text>
-                    ) : (
-                      <View style={styles.adjMini}>
-                        <Pressable hitSlop={4} style={styles.adjMiniBtn} onPress={() => setQty(r.key, (r.qty || 0) - 1)}>
-                          <Text style={styles.adjMiniTxt}>−</Text>
-                        </Pressable>
-                        <NumInput
-                          inputRef={(x) => (x ? inputs.current.set(r.key, x) : inputs.current.delete(r.key))}
-                          value={r.qty || 0}
-                          placeholder="?"
-                          onChange={(n) => setQty(r.key, n)}
-                          onFocused={() => {
-                            focusRef.current = r.key;
-                            if (Keyboard.isVisible()) requestAnimationFrame(() => ensureSheetVisible(inputs.current.get(r.key)));
-                            const k = qtyOrder.indexOf(r.key);
-                            kbShow({
-                              key: `imp-${r.key}`,
-                              scope: 'sheet',
-                              label: r.name,
-                              hasPrev: k > 0,
-                              isLast: !hasNextAfter(r.key),
-                              accent,
-                              onPrev: () => onNext(r.key, -1),
-                              onNext: () => onNext(r.key, 1),
-                            });
-                          }}
-                          onBlurred={() => kbHide(`imp-${r.key}`)}
-                          onSubmit={() => onNext(r.key, 1)}
-                          accessoryId={KB_NONE}
-                          placeholderColor="rgba(255,69,58,0.9)"
-                          style={[styles.impQtyIn, nd?.photoCheck && styles.impQtyCheck, nd?.qty && styles.impQtyMiss]}
-                        />
-                        <Pressable hitSlop={4} style={styles.adjMiniBtn} onPress={() => setQty(r.key, (r.qty || 0) + 1)}>
-                          <Text style={styles.adjMiniTxt}>+</Text>
-                        </Pressable>
-                      </View>
-                    )}
-                  </View>
-                  {!off && nd?.qty ? <Text style={[styles.impTag, styles.bad]}>нет числа — впишите по фото</Text> : null}
-                  {!off && nd?.photoCheck ? <Text style={[styles.impTag, styles.impTagCheck]}>проверьте по фото</Text> : null}
-                  <View style={styles.impPick}>
-                    {r.id ? (
-                      <Pressable
-                        style={[styles.impChip, { borderColor: accent }, (chosen || (!nd && !off)) && { backgroundColor: accent }]}
-                        onPress={() => (chosen && chosen !== r.id ? decide(r.key, r.id) : confirm(r))}
-                      >
-                        <Text style={[styles.impChipTxt, chosen || (!nd && !off) ? styles.onAccent : { color: accent }]}>
-                          ✓ {ITEM_NAME[r.id]}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                    {chosen && chosen !== r.id ? (
-                      <View style={[styles.impChip, { borderColor: accent, backgroundColor: accent }]}>
-                        <Text style={[styles.impChipTxt, styles.onAccent]}>✓ {ITEM_NAME[chosen]}</Text>
-                      </View>
-                    ) : null}
-                    <Pressable style={styles.impChip} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
-                      <Text style={styles.impChipTxt}>{r.id || chosen ? 'Другая…' : 'Выбрать позицию…'}</Text>
-                    </Pressable>
-                    <Pressable style={[styles.impChip, styles.impChipSkip]} onPress={() => decide(r.key, 'skip')}>
-                      <Text style={styles.impChipTxt}>Не учитывать</Text>
-                    </Pressable>
-                  </View>
-                  {picking === r.key ? <Picker rowKey={r.key} /> : null}
-                </View>
-              );
-            })}
-          </ItemCard>
-          {pending.some((r) => (r.id && !choice[r.key]) || r.qty > 0) ? (
-            <Pressable onPress={acceptAll}>
-              <Text style={[styles.link, styles.showAll, { color: accent }]}>Согласиться со всеми предложениями</Text>
-            </Pressable>
-          ) : null}
-          {pending.some((r) => !(r.qty > 0)) ? (
-            <Text style={styles.hint}>Строки без числа впишите сами — тап по «?», «Далее ›» ведёт к следующей.</Text>
-          ) : null}
-        </>
-      ) : null}
-
-      <View style={styles.gHead}>
-        <Text style={styles.gTitle}>Позиции</Text>
-        <Text style={styles.gSub}>{sum.reduce((a, x) => a + x.qty, 0)}</Text>
+      <View style={styles.qeProgress}>
+        <View style={[styles.qeProgressFill, { width: `${((idx + 1) / n) * 100}%`, backgroundColor: accent }]} />
       </View>
-      <ItemCard style={styles.listCard}>
-        {sum.length ? (
-          sum.map((x, i) => {
-            const cur = itemTotal(day?.counts?.[x.id]);
-            const next = mode === 1 ? cur + x.qty : x.qty;
-            const unsure = x.lines.some((l) => needOf(l));
-            return (
-              <View key={x.id} style={[styles.impRow, i < sum.length - 1 && styles.lRowSep]}>
-                <View style={styles.impRowTop}>
-                  <Text style={styles.impPos}>{x.name}</Text>
-                  <Text style={[styles.impVal, unsure && styles.impTagCheck]}>
-                    {targetDate === date && cur !== next ? <Text style={styles.impOld}>{cur} → </Text> : null}
-                    {next}
-                  </Text>
-                </View>
-                <Text style={styles.impFrom} numberOfLines={3}>
-                  {x.lines.map((l) => `${l.name} ${l.qty}`).join(' + ')}
-                </Text>
-              </View>
-            );
-          })
-        ) : (
-          <Text style={[styles.hint, { padding: 14 }]}>Пока ни одной позиции.</Text>
-        )}
-      </ItemCard>
-
-      {decided.length ? (
-        <Text style={styles.hint}>
-          Запомню ваш выбор для {decided.length} назв. — в следующий раз сопоставлю сам.
+      <View style={styles.qeStage}>
+        {ghost ? (
+          <Animated.View key={ghost.key} pointerEvents="none" style={[styles.qeGhost, ghostStyle]}>
+            <Glass style={styles.qeCard} intensity={40}>
+              <Text style={styles.qeCount}>
+                {ghost.pos + 1} / {n}
+              </Text>
+              <Text style={styles.qeName} numberOfLines={1} adjustsFontSizeToFit>
+                {ghost.item.name}
+              </Text>
+              <Text style={styles.qeNum}>{ghost.shown}</Text>
+              <View style={styles.qeFoot} />
+            </Glass>
+          </Animated.View>
+        ) : null}
+        <Animated.View style={cardStyle}>
+          <Glass style={styles.qeCard} intensity={40}>
+            <Text style={styles.qeCount}>
+              {idx + 1} / {n}
+            </Text>
+            <Text style={styles.qeName} numberOfLines={1} adjustsFontSizeToFit>
+              {item.name}
+            </Text>
+            <Pressable onPress={() => inputRef.current?.focus()}>
+              <TextInput
+                ref={inputRef}
+                style={styles.qeNum}
+                keyboardType="number-pad"
+                keyboardAppearance="dark"
+                maxLength={24}
+                value={draft}
+                placeholder={total || multi ? quickShown(tallies) : '0'}
+                placeholderTextColor="rgba(235,235,245,0.35)"
+                inputAccessoryViewID={KB_NONE}
+                onChangeText={onType}
+                submitBehavior="submit"
+                {...(Platform.OS === 'web' ? { blurOnSubmit: false } : null)}
+                onSubmitEditing={() => goRef.current(1)}
+                onFocus={() => {
+                  focused.current = true;
+                  showBar();
+                }}
+                onBlur={() => {
+                  focused.current = false;
+                  kbHide('calc-quick');
+                }}
+              />
+            </Pressable>
+            <View style={styles.qeFoot}>
+              <Text style={styles.qeNow} numberOfLines={1}>
+                {draft ? `было ${quickShown(base.current)}` : item.note || (total ? 'пусто + Далее — оставить' : ' ')}
+              </Text>
+              <Pressable
+                hitSlop={8}
+                style={[styles.qePlus, !quickCanPlus(draft) && styles.qePlusOff]}
+                onPress={addPlus}
+              >
+                <Text style={styles.qePlusTxt}>+ подсчёт</Text>
+              </Pressable>
+            </View>
+          </Glass>
+        </Animated.View>
+      </View>
+      <View style={styles.qePeek}>
+        <Text style={styles.qePeekTxt} numberOfLines={1}>
+          {prevName ? `‹ ${prevName}` : ''}
         </Text>
-      ) : null}
-
-      {skipped.length ? (
-        <>
-          <Pressable style={styles.gHead} onPress={() => setShowSkip((v) => !v)}>
-            <Text style={styles.gTitle}>Не учитывается {showSkip ? '▾' : '▸'}</Text>
-            <Text style={styles.gSub}>{skipped.length}</Text>
-          </Pressable>
-          {showSkip ? (
-            <ItemCard style={styles.listCard}>
-              {skipped.map((r, i) => (
-                <View key={r.key} style={[styles.impRow, i < skipped.length - 1 && styles.lRowSep]}>
-                  <Pressable style={styles.impRowTop} onPress={() => setPicking((k) => (k === r.key ? null : r.key))}>
-                    <Text style={styles.impName}>{r.name}</Text>
-                    <Text style={styles.impVal}>{r.qty ?? '?'}</Text>
-                  </Pressable>
-                  {picking === r.key ? <Picker rowKey={r.key} /> : null}
-                </View>
-              ))}
-            </ItemCard>
-          ) : null}
-        </>
-      ) : null}
-
-      <View style={{ marginTop: 14 }}>
-        <SegmentCapsule value={mode} labels={['Заменить', 'Прибавить']} onChange={setMode} height={44} />
+        <Text style={[styles.qePeekTxt, { textAlign: 'right' }]} numberOfLines={1}>
+          {nextName ? `${nextName} ›` : 'последняя'}
+        </Text>
       </View>
       <Text style={styles.hint}>
-        {mode === 1
-          ? 'Прибавить — количества из чека добавятся к уже вписанным.'
-          : 'Заменить — позиции из чека перезапишутся, остальные останутся как есть.'}
-        {timeLabel ? ` Смена: ${timeLabel}.` : ''}
+        «Далее ›» сохраняет и показывает следующую, «↑» — назад. Пустое поле — значение не меняется. 59+98 — через «+ подсчёт».
       </Text>
-      <ScaleButton
-        style={[styles.actBtn, { backgroundColor: accent }, (pending.length || !sum.length) && { opacity: 0.45 }]}
-        onPress={apply}
-      >
-        <Text style={[styles.actBtnTxt, styles.onAccent]}>
-          {pending.length ? `Осталось проверить: ${pending.length}` : `Применить на ${fmtShort(targetDate)}`}
-        </Text>
-      </ScaleButton>
-      <Pressable onPress={() => setRes(null)}>
-        <Text style={[styles.link, styles.showAll, { color: accent }]}>Вставить другой текст</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-/**
- * Фото чека закреплено над списком шторки (не уезжает при прокрутке): щипок — увеличить прямо здесь,
- * тап — на весь экран (там тоже щипок).
- */
-function ReceiptThumb({ uri, onClear }) {
-  const [full, setFull] = useState(false);
-  const [tall, setTall] = useState(false);
-  const zoomPinch = { maximumZoomScale: 6, minimumZoomScale: 1, bouncesZoom: true, centerContent: true };
-  return (
-    <View style={styles.impThumbWrap}>
-      <ScrollView
-        {...zoomPinch}
-        style={[styles.impThumb, tall && styles.impThumbTall]}
-        showsHorizontalScrollIndicator={false}
-        showsVerticalScrollIndicator={false}
-      >
-        <Pressable onPress={() => setFull(true)}>
-          <Image source={{ uri }} style={[styles.impThumbImg, tall && styles.impThumbTall]} resizeMode="contain" />
-        </Pressable>
-      </ScrollView>
-      <View style={styles.impThumbBar}>
-        <Pressable hitSlop={8} onPress={() => setTall((v) => !v)}>
-          <Text style={styles.impThumbBtn}>{tall ? 'Меньше' : 'Больше'}</Text>
-        </Pressable>
-        <Pressable hitSlop={8} onPress={() => setFull(true)}>
-          <Text style={styles.impThumbBtn}>На весь экран</Text>
-        </Pressable>
-        <Pressable hitSlop={8} onPress={onClear}>
-          <Text style={styles.impThumbBtn}>Убрать</Text>
-        </Pressable>
-      </View>
-      <Modal visible={full} transparent animationType="fade" onRequestClose={() => setFull(false)}>
-        <View style={styles.impFull}>
-          <ScrollView {...zoomPinch} style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }}>
-            <Image source={{ uri }} style={styles.impFullImg} resizeMode="contain" />
-          </ScrollView>
-          <Pressable style={styles.impFullClose} hitSlop={14} onPress={() => setFull(false)}>
-            <Text style={styles.impFullCloseTxt}>Готово</Text>
-          </Pressable>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -3092,9 +2797,6 @@ export default function App() {
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
-  const [impPhoto, setImpPhoto] = useState(null); // фото чека для сверки при импорте
-  // медианы прошлых смен по позициям — подсказка разбору склеенных цифр чека
-  const calcHistory = useMemo(() => historyMedians(calc?.days, itemTotal), [calc?.days]);
   const [calcDate, setCalcDate] = useState(todayIso);
   const [calcItem, setCalcItem] = useState(null);
   const calcDateRef = useRef(calcDate);
@@ -3179,23 +2881,7 @@ export default function App() {
       }),
     [editTallies]
   );
-  /** Импорт из чека: позиции на дату (несколько строк чека → несколько подсчётов), смена день/ночь из чека. */
-  const applyCalcImport = useCallback(
-    ({ date, time, mode, items }) => {
-      patchCalc((p) => {
-        const d = p.days[date] || seedDay(p.prefs, stateRef.current?.shifts, date);
-        const counts = { ...d.counts };
-        for (const x of items) {
-          const prev = talliesOf(counts[x.id]).filter((v) => v > 0);
-          counts[x.id] = mode === 'add' ? [...prev, ...x.tallies] : x.tallies;
-        }
-        return { ...p, days: { ...p.days, [date]: { ...d, counts, ...(time ? { time } : {}), updated: Date.now() } } };
-      });
-      setCalcDate(date);
-      setSheet('calcPos');
-    },
-    [patchCalc]
-  );
+  const setCalcTallies = useCallback((id, t) => editTallies(id, () => t), [editTallies]);
   const onCalcStep = useCallback((id, d) => stepTally(id, d, 0), [stepTally]);
   const onCalcSet = useCallback((id, n) => setTally(id, n, 0), [setTally]);
   // разделы «Расчёта» в шторках; подсчёты позиции, открытые из списка позиций, закрываются назад в список
@@ -5217,26 +4903,22 @@ export default function App() {
               onStep={onCalcStep}
               onSet={onCalcSet}
               onOpen={openCalcItem}
-              onImport={() => setSheet('calcImport')}
+              onQuick={() => openCalcSection('calcQuick')}
             />
           ) : null,
         };
-      case 'calcImport':
+      case 'calcQuick':
         return {
-          title: 'Импорт из чека',
+          title: 'Быстрый ввод',
           onClose: () => setSheet('calcPos'),
-          top: impPhoto ? <ReceiptThumb uri={impPhoto} onClear={() => setImpPhoto(null)} /> : null,
-          body: (
-            <ReceiptImport
-              day={calcDay}
-              date={calcDate}
-              accent={accent}
-              onApply={applyCalcImport}
-              photo={impPhoto}
-              onPhoto={setImpPhoto}
-              history={calcHistory}
-            />
+          right: (
+            <Pressable onPress={() => setSheet('calcPos')} hitSlop={10}>
+              <Text style={[styles.link, { color: accent }]}>Готово</Text>
+            </Pressable>
           ),
+          body: calcDay ? (
+            <CalcQuickEntry day={calcDay} accent={accent} onSetTallies={setCalcTallies} onDone={() => setSheet('calcPos')} />
+          ) : null,
         };
       case 'calcSum':
         return {
@@ -5826,48 +5508,39 @@ const styles = StyleSheet.create({
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
-  impOpen: { marginBottom: 4 },
-  impStep: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 6 },
-  impStepN: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
-  impStepNTxt: { fontSize: 13, fontWeight: '700' },
-  impStepTxt: { flex: 1, color: '#fff', fontSize: 15, lineHeight: 20 },
-  impThumbWrap: { marginHorizontal: 16, marginBottom: 8 },
-  impThumb: { height: 128, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.35)' },
-  impThumbTall: { height: SCREEN_H * 0.36 },
-  impThumbImg: { width: SCREEN_W - 32, height: 128 },
-  impThumbBar: { flexDirection: 'row', justifyContent: 'flex-end', gap: 18, paddingTop: 6, paddingHorizontal: 4 },
-  impThumbBtn: { color: 'rgba(235,235,245,0.6)', fontSize: 13, fontWeight: '500' },
-  impFull: { flex: 1, backgroundColor: '#000' },
-  impFullImg: { width: SCREEN_W, height: SCREEN_H },
-  impFullClose: { position: 'absolute', top: 56, right: 20, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18, backgroundColor: 'rgba(60,60,67,0.75)' },
-  impFullCloseTxt: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  impWarn: { color: '#ffd60a' },
-  impTag: { fontSize: 12, fontWeight: '600', marginTop: 4, textAlign: 'right' },
-  impTagCheck: { color: '#ffd60a' },
-  impQtyIn: { minWidth: 44, paddingVertical: 4, textAlign: 'center', color: '#fff', fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  impQtyCheck: { color: '#ffd60a' },
-  impQtyMiss: { color: '#ff453a' },
-  impRaw: { color: 'rgba(235,235,245,0.6)', fontSize: 12, marginTop: 6, lineHeight: 16 },
-  impRow: { paddingHorizontal: 14, paddingVertical: 11 },
-  impRowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
-  impName: { flex: 1, color: '#fff', fontSize: 15 },
-  impPos: { flex: 1, color: '#fff', fontSize: 16, fontWeight: '600' },
-  impVal: { color: '#fff', fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  impOld: { color: 'rgba(235,235,245,0.45)', fontWeight: '500' },
-  impQty: { minWidth: 30, textAlign: 'center', color: '#fff', fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  impFrom: { color: 'rgba(235,235,245,0.5)', fontSize: 12, marginTop: 3 },
-  impPick: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
-  impChip: {
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+  quickOpen: { marginBottom: 4 },
+  qeProgress: { height: 3, borderRadius: 2, marginHorizontal: 4, marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
+  qeProgressFill: { height: 3, borderRadius: 2 },
+  qeStage: { minHeight: 236 },
+  qeGhost: { position: 'absolute', left: 0, right: 0, top: 0 },
+  qeCard: {
+    paddingHorizontal: 22,
+    paddingTop: 18,
+    paddingBottom: 16,
+    borderRadius: 30,
+    backgroundColor: 'rgba(44,44,50,0.42)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.18)',
+    overflow: 'hidden',
   },
-  impChipSkip: { backgroundColor: 'rgba(255,69,58,0.12)' },
-  impChipTxt: { color: '#fff', fontSize: 13, fontWeight: '500' },
-  impSeg: { flex: 1, alignItems: 'center' },
+  qeCount: { color: 'rgba(235,235,245,0.55)', fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  qeName: { color: '#fff', fontSize: 34, fontWeight: '800', marginTop: 6, letterSpacing: 0.2 },
+  qeNum: {
+    color: '#fff',
+    fontSize: 64,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    paddingVertical: 4,
+    marginTop: 6,
+    minHeight: 84,
+  },
+  qeFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 32 },
+  qeNow: { flex: 1, color: 'rgba(235,235,245,0.5)', fontSize: 13 },
+  qePlus: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.12)' },
+  qePlusOff: { backgroundColor: 'rgba(255,255,255,0.05)' },
+  qePlusTxt: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  qePeek: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingHorizontal: 8, marginTop: 12 },
+  qePeekTxt: { flex: 1, color: 'rgba(235,235,245,0.38)', fontSize: 13 },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16, marginBottom: 6 },
   tileHit: { width: CALC_TILE_W },
   tile: {
