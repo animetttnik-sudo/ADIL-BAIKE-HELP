@@ -43,6 +43,11 @@ test('несколько подсчётов складываются (59+98), с
   const v = val(computeBoxes({ fri: [59, 98], special: 4 }));
   assert.equal(v['Коробка фри'], 157);
   assert.equal(v['Вес фри'], 22.451);
-  assert.equal(fmtKg(22.451).replace(/\s/g, ' '), '22,45 кг');
+  assert.equal(fmtKg(22.451).replace(/\s/g, ' '), '22,451 кг');
   assert.equal(v['Коробка'], 4);
+});
+
+test('фри 87 → 12,441 кг без округления', () => {
+  const v = Object.fromEntries(computeBoxes({ fri: 87 }).map((r) => [r.label, r.value]));
+  assert.equal(fmtKg(v['Вес фри']).replace(/\s/g, ' '), '12,441 кг');
 });

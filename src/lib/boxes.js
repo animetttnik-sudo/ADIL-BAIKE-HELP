@@ -28,6 +28,6 @@ export function computeBoxes(counts = {}) {
   ];
 }
 
-const kgF = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-/** 5.72 → «5,72 кг»; 0 → «0 кг». */
+const kgF = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+/** Без округления: 87 × 0,143 → «12,441 кг»; 0 → «0 кг». */
 export const fmtKg = (v) => (Number(v) > 0 ? `${kgF.format(Number(v))} кг` : '0 кг');
