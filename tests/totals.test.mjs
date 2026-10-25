@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  carryExpense, carryInState, expensesInPeriod, monthTotals, monthView, origDate, paydayOf, paydayTotals, summaryView,
+  carryExpense, carryInState, uncarryExpense, uncarryInState, expensesInPeriod, monthTotals, monthView, origDate, paydayOf, paydayTotals, summaryView,
   toggledStatus, undoCarry, defaultPayday, shouldAutoAdvance, pagerRange, paydayMode,
   toggleInState,
 } from '../src/lib/totals.js';
@@ -268,4 +268,22 @@ test('summaryView: заработано большим плюсом и стро�
   const more = summaryView({ total: 30000, paid: 30000, remaining: 0, open: 0, count: 2, earned: 33000 });
   assert.equal(more.planDiff, 3000);
   assert.match(more.planLine, /сверх плана \+3/);
+});
+
+test('«Вернуть»: перенос обратно на прошлую зарплату, исходная дата и поля восстанавливаются', () => {
+  const e = { id: 'r', date: '2026-10-20', amount: 500, status: 'paid' };
+  const c1 = carryExpense(e);
+  const back1 = uncarryExpense(c1);
+  assert.equal(back1.date, '2026-10-20');
+  assert.equal('movedFrom' in back1, false);
+  assert.equal('moves' in back1, false);
+  const c2 = carryExpense(c1);
+  const back2 = uncarryExpense(c2);
+  assert.equal(back2.date, c1.date);
+  assert.equal(back2.moves, 1);
+  assert.equal(back2.movedFrom, '2026-10-20');
+  const app = { expenses: [c1] };
+  const r = uncarryInState(app, 'r');
+  assert.equal(r.state.expenses[0].date, '2026-10-20');
+  assert.equal(uncarryInState({ expenses: [e] }, 'r').state.expenses[0], e);
 });

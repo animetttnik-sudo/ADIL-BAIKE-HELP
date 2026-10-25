@@ -91,6 +91,26 @@ export function carryInState(app, id) {
   return { state: { ...app, expenses: app.expenses.map((x) => (x.id === id ? next : x)) }, prev, next };
 }
 
+/**
+ * «Вернуть»: обратный перенос — на предыдущую зарплату (−14 дней). Если переносов больше нет
+ * (moves ≤ 1 или дошли до movedFrom) — дата = исходная, поля movedFrom/moves убираются. Статус снимается.
+ */
+export function uncarryExpense(e) {
+  const moves = Math.max(0, (Number(e.moves) || 0) - 1);
+  const back = addDays(e.date, -PERIOD_DAYS);
+  const { movedFrom, moves: _m, ...rest } = e;
+  if (moves <= 0 || !movedFrom || back <= movedFrom) return { ...rest, date: movedFrom || back, status: null };
+  return { ...rest, date: back, status: null, movedFrom, moves };
+}
+
+/** Возврат в состоянии приложения: { state, prev, next } (prev — для «Отменить»). */
+export function uncarryInState(app, id) {
+  const prev = (app.expenses || []).find((x) => x.id === id);
+  if (!prev || !prev.movedFrom) return { state: app, prev: null, next: null };
+  const next = uncarryExpense(prev);
+  return { state: { ...app, expenses: app.expenses.map((x) => (x.id === id ? next : x)) }, prev, next };
+}
+
 /** «Отменить»: вернуть расход как был (если его не удалили за это время). */
 export function undoCarry(app, prev) {
   if (!prev || !(app.expenses || []).some((x) => x.id === prev.id)) return app;

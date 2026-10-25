@@ -73,6 +73,7 @@ import {
   shouldAutoAdvance,
   summaryView,
   toggleInState,
+  uncarryInState,
   undoCarry,
 } from '../lib/totals';
 import { applyImport, autoAddedLeft, autoAddedRecurring, monthTitle, previewImport, removeExpenses } from '../lib/planImport';
@@ -1047,7 +1048,7 @@ const CARD_EXIT = () => {
  * Отдельная стеклянная карточка расхода. Горизонтальный свайп отдан листанию зарплат,
  * поэтому: тап по карточке — изменить (там же «Удалить расход»), кнопка — статус.
  */
-const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, arc }) {
   const st = displayStatus(item);
   const id = item.id;
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
@@ -1071,10 +1072,17 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, arc }) {
               </Text>
             ) : null}
             {item.movedFrom ? (
-              <Text style={styles.metaMoved} numberOfLines={1}>
-                ↪ перенесено с {fmtShort(item.movedFrom)}
-                {item.moves > 1 ? ` · ${item.moves}×` : ''}
-              </Text>
+              <View style={styles.movedRow}>
+                <Text style={[styles.metaMoved, { flexShrink: 1 }]} numberOfLines={1}>
+                  ↪ перенесено с {fmtShort(item.movedFrom)}
+                  {item.moves > 1 ? ` · ${item.moves}×` : ''}
+                </Text>
+                {onReturn ? (
+                  <Pressable hitSlop={8} style={styles.returnBtn} onPress={() => onReturn(id)}>
+                    <Text style={styles.returnTxt}>вернуть</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             ) : null}
           </View>
           <Text style={[styles.amt, st === 'paid' && styles.amtPaid]}>{money(item.amount)}</Text>
@@ -2538,7 +2546,7 @@ const PayCard = memo(function PayCard({ payday, t, short, mentor, accent }) {
   );
 });
 
-const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, arc }) {
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, arc }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2558,7 +2566,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                 <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
               </ItemCard>
             ) : (
-              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} arc={arc} />)
+              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
             )}
             <Text style={[styles.hint, styles.pageHint]}>
               Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
@@ -3388,6 +3396,19 @@ export default function App() {
     },
     [patch]
   );
+  /** «Вернуть» перенесённый расход на прошлую зарплату (тап по «вернуть» на карточке). */
+  const returnExpenseNow = useCallback(
+    (id) => {
+      const st = stateRef.current;
+      if (!st) return;
+      const { prev, next } = uncarryInState(st, id);
+      if (!prev) return;
+      patch((p) => uncarryInState(p, id).state);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setToast({ k: Date.now(), text: `Возвращено на ${fmtShort(next.date)}`, undo: prev });
+    },
+    [patch]
+  );
   const hideToast = useCallback(() => setToast(null), []);
   // ── Перенос данных: все ключи zp_* одной JSON-строкой через буфер обмена
   const [backupInfo, setBackupInfo] = useState(null); // { summary, size } последней копии
@@ -3557,8 +3578,8 @@ export default function App() {
 
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
   const payPageProps = useMemo(
-    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, arc }),
-    [accent, openExpense, toggleStatus, arc]
+    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, arc }),
+    [accent, openExpense, toggleStatus, returnExpenseNow, arc]
   );
   const shiftPageProps = useMemo(
     () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry }),
@@ -5798,6 +5819,14 @@ const styles = StyleSheet.create({
   adjNum: { width: 84 },
   adjLineNote: { color: 'rgba(235,235,245,0.45)', fontSize: 12, marginTop: -2, marginBottom: 2 },
   metaMoved: { color: 'rgba(100,210,255,0.85)', fontSize: 12, marginTop: 2 },
+  movedRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  returnBtn: {
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(100,210,255,0.16)',
+  },
+  returnTxt: { color: 'rgba(100,210,255,0.95)', fontSize: 12, fontWeight: '700' },
   islBox: { position: 'absolute', left: 0, top: 0, width: ISL_T, height: ISL_L },
   island: {
     width: ISL_T,
