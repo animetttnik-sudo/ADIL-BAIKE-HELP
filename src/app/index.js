@@ -1384,7 +1384,7 @@ function AnalysisView({ state, accent }) {
   state.shifts.forEach((x) => {
     get(x.date.slice(0, 7)).e += shiftNet(x);
   });
-  // недостача с прошлой зп — в месяц последнего дня смен этой зарплаты
+  // депонирование — в месяц последнего дня смен этой зарплаты
   Object.keys(state.carry || {}).forEach((p) => {
     get(workPeriod(p).end.slice(0, 7)).e -= carryDue(carryOf(state, p));
   });
@@ -2557,13 +2557,13 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
 });
 
 /**
- * Большая карточка зарплаты в «Сменах»: к выплате = заработано + наставник − недостача − недостача с прошлой зп
+ * Большая карточка зарплаты в «Сменах»: к выплате = заработано + наставник − недостача ± депонирование
  * (излишек показывается для сведения, к выплате не прибавляется).
- * Тап по «Недостаче» — вписать недостачу с прошлой зарплаты.
+ * Тап по «Недостаче» — вписать депонирование (+ / −) этой зарплаты.
  */
 const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) {
   const per = workPeriod(payday);
-  const minus = t.short + carryDue(t.carry); // всего минусом (смены + с прошлой зп); излишек не считается
+  const minus = t.short; // недостача по сменам; излишек не считается, депонирование — отдельной строкой
   const bad = minus > 0;
   return (
     <Glass style={styles.balance} intensity={42}>
@@ -2592,14 +2592,18 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
       </View>
       <View style={styles.statRow}>
         <Stat k="Заработано" v={money(t.earned)} />
+        <Stat k="Недостача" v={minus > 0 ? `−${money(minus)}` : '0'} tone={minus > 0 ? 'bad' : undefined} />
         <Pressable
           style={({ pressed }) => [styles.stat3, pressed && styles.rowPressed]}
           hitSlop={6}
           onPress={() => onCarry && onCarry(payday)}
         >
-          <Stat k="Недостача ›" v={minus > 0 ? `−${money(minus)}` : '0'} tone={minus > 0 ? 'bad' : undefined} />
+          <Stat
+            k="Депонирование ›"
+            v={t.carry > 0 ? `−${money(t.carry)}` : t.carry < 0 ? `+${money(-t.carry)}` : '0'}
+            tone={t.carry > 0 ? 'bad' : t.carry < 0 ? 'good' : undefined}
+          />
         </Pressable>
-        <Stat k="Смен" v={String(t.count)} />
       </View>
       <Text style={styles.calcMeta}>
         с суммой {t.withSum} · из расчёта {t.fromCalc}
@@ -2609,8 +2613,8 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
         <Text style={styles.calcMeta}>
           {[
             t.carry ? (
-              <Text key="c" style={styles.bad}>
-                {t.carry > 0 ? `с прошлой зп −${money(t.carry)}` : `излишек с прошлой зп ${money(-t.carry)} (не в зарплату)`}
+              <Text key="c" style={t.carry > 0 ? styles.bad : styles.good}>
+                {t.carry > 0 ? `депонирование −${money(t.carry)}` : `депонирование +${money(-t.carry)}`}
               </Text>
             ) : null,
             t.mentor ? (
@@ -3207,7 +3211,7 @@ export default function App() {
         payday: p,
         list: expensesInPeriod(state.expenses, p),
         earned: st.net,
-        short: st.short + carryDue(st.carry),
+        short: st.short,
         mentor: st.mentor,
       });
     }
@@ -3700,9 +3704,9 @@ export default function App() {
   const spent = paid.reduce((a, e) => a + Number(e.amount || 0), 0);
   // заработано за всё время — чистыми, после недостачи (как «К выплате» в «Сменах»)
   // + наставник − недостача по сменам − недостача с прошлой зп (излишек не считается — его забирает работодатель)
-  const carryAll = Object.values(state.carry || {}).reduce((a, v) => a + carryDue(v), 0);
+  const carryAll = Object.values(state.carry || {}).reduce((a, v) => a + carryDue(v), 0); // депонирование: > 0 минус, < 0 плюс
   const earnedAll = state.shifts.reduce((a, s) => a + shiftNet(s), 0) - carryAll;
-  const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0) + carryAll;
+  const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0);
   const mentorAll = state.shifts.reduce((a, s) => a + mentorOf(s), 0);
 
   /**
@@ -4051,23 +4055,23 @@ export default function App() {
   };
 
   /**
-   * Поле «Недостача / Излишек» с переключателем −/+ (смена и «с прошлой зп»).
+   * Поле «Недостача / Излишек» с переключателем −/+ (смена).
    * Сумму смены не меняет: недостача минусуется из итога зарплаты; излишек — только для сведения
    * (красный, в зарплату не идёт). Недостача < 500 — зелёная, ≥ 500 — красная.
    */
-  const adjField = (kb, { key = 'shortage', note } = {}) => {
+  const adjField = (kb, { key = 'shortage', note, label, segs } = {}) => {
     const plus = !!form.surplus;
     const v = form[key] || '';
     const tone = plus || shortTone(v) === 'bad' ? styles.bad : styles.good;
     return (
       <View style={styles.field}>
         <View style={styles.adjHead}>
-          <Text style={styles.label}>{plus ? 'Излишек' : 'Недостача'}</Text>
+          <Text style={styles.label}>{label || (plus ? 'Излишек' : 'Недостача')}</Text>
           <View style={styles.adjSeg}>
-            {[
+            {(segs || [
               [false, '− недостача'],
               [true, '+ излишек'],
-            ].map(([on, lab]) => (
+            ]).map(([on, lab]) => (
               <Pressable
                 key={lab}
                 hitSlop={6}
@@ -4130,7 +4134,7 @@ export default function App() {
       const parts = [
         adds ? `добавить ${adds}` : null,
         upds ? `обновить ${upds}` : null,
-        carryAdd ? `недостача с прошлой зп ${carryAdd}` : null,
+        carryAdd ? `депонирование ${carryAdd}` : null,
         pv.clear.length ? `убрать пустых ${pv.clear.length}` : null,
       ].filter(Boolean);
       Alert.alert('Импорт смен', `${parts.join(', ')}?`, [
@@ -4163,7 +4167,7 @@ export default function App() {
           </Text>
           <Text style={styles.calcMeta}>
             добавить {adds} · обновить {upds} · уже есть {same}
-            {pv.carry.length ? ` · с прошлой зп ${pv.carry.length}` : ''}
+            {pv.carry.length ? ` · депонирование ${pv.carry.length}` : ''}
           </Text>
         </ItemCard>
         <Text style={styles.hint}>
@@ -4259,7 +4263,7 @@ export default function App() {
                 {c ? (
                   <View style={styles.lRow}>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.lTitle}>Недостача с прошлой зп</Text>
+                      <Text style={styles.lTitle}>Депонирование</Text>
                       <Text style={[styles.lSub, c.value > 0 ? styles.bad : styles.good]}>
                         {c.value > 0 ? `−${money(c.value)}` : `+${money(-c.value)}`}
                         {c.kind === 'same' && c.existing !== c.value ? ` (в приложении ${money(c.existing)} — не меняю)` : ''}
@@ -4285,9 +4289,9 @@ export default function App() {
   const renderSheet = (key) => {
     switch (key) {
       case 'carry': {
-        const kC = fieldKb('carry', ['carry'], form.surplus ? 'Излишек' : 'Недостача');
+        const kC = fieldKb('carry', ['carry'], 'Депонирование');
         return {
-          title: 'С прошлой зарплаты',
+          title: 'Депонирование',
           onClose: closeSheet,
           right: (
             <Pressable onPress={saveCarry} hitSlop={10}>
@@ -4297,13 +4301,18 @@ export default function App() {
           body: (
             <>
               <Text style={styles.hint}>
-                Зарплата {form.carryP ? fmtShort(form.carryP) : ''}: недостача, перенесённая с прошлой зарплаты. Не
-                привязана к смене — вычитается из «К выплате» этой зарплаты. Пусто или 0 — убрать.
+                Зарплата {form.carryP ? fmtShort(form.carryP) : ''}: депонирование. Не привязано к смене — «−»
+                вычитается из «К выплате» этой зарплаты, «+» прибавляется. Пусто или 0 — убрать.
               </Text>
               {adjField(kC, {
                 key: 'carry',
+                label: 'Депонирование',
+                segs: [
+                  [false, '− минус'],
+                  [true, '+ плюс'],
+                ],
                 note: form.surplus
-                  ? 'Излишек — только для сведения, к «К выплате» не прибавляется.'
+                  ? 'Прибавляется к «К выплате» этой зарплаты.'
                   : 'Вычитается из «К выплате» этой зарплаты.',
               })}
             </>
@@ -4354,7 +4363,7 @@ export default function App() {
                   style={[styles.input, styles.notesInput]}
                   value={shNotes.text}
                   onChangeText={(t) => setShNotes((x) => ({ ...x, text: t }))}
-                  placeholder={'10-23 окт. Зп 30 октябрь\n10 - день касса -2406\n17 - день рядовой +300\n-3927 с прошлой зп'}
+                  placeholder={'10-23 окт. Зп 30 октябрь\n10 - день касса -2406\n17 - день рядовой +300\n-3927 депонирование'}
                   placeholderTextColor="rgba(235,235,245,0.3)"
                   textAlignVertical="top"
                   scrollEnabled={false}
@@ -4394,7 +4403,7 @@ export default function App() {
               </ScaleButton>
               <Text style={styles.hint}>
                 Заголовок «21-4 дек. Зп 11 декабрь», затем смены «21 - ночь касса», можно несколько в строке. «- 2430» после
-                смены — недостача, «+300» — наставник (доплата к зарплате), «-3927 с прошлой зп» — недостача с прошлой зарплаты. Место пишите между
+                смены — недостача, «+300» — наставник (доплата к зарплате), «-3927 депонирование» — депонирование зарплаты (также понимаю «с прошлой зп»; «+» прибавляется). Место пишите между
                 временем и ролью: «26 - день Аламедин рядовой».
               </Text>
             </>
@@ -5039,6 +5048,15 @@ export default function App() {
                     <Text style={[styles.lVal, styles.bad]}>−{money(shortAll)}</Text>
                   </View>
                 ) : null}
+                {carryAll ? (
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>· депонирование</Text>
+                    <Text style={[styles.lVal, carryAll > 0 ? styles.bad : styles.good]}>
+                      {carryAll > 0 ? '−' : '+'}
+                      {money(Math.abs(carryAll))}
+                    </Text>
+                  </View>
+                ) : null}
                 {mentorAll ? (
                   <View style={[styles.lRow, styles.lRowSep]}>
                     <Text style={styles.lKey}>· наставник</Text>
@@ -5051,7 +5069,7 @@ export default function App() {
                 </View>
               </ItemCard>
               <Text style={styles.hint}>
-                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи (и с прошлой зп), плюс наставник. Излишек не считается — его забирает работодатель.
+                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи, плюс наставник и депонирование (+ / −). Излишек не считается — его забирает работодатель.
               </Text>
             </>
           ),

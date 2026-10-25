@@ -92,8 +92,8 @@ test('излишек — только для сведения: к выплате
   assert.equal(t.carry, 3927);
   assert.equal(t.net, 5000 - 2406 - 3927); // излишек не прибавляется и недостачу не перекрывает
   assert.equal(shiftNet(list[1]), 2000);
-  // «излишек с прошлой зп» (перенос < 0) тоже не прибавляется
-  assert.equal(shiftTotals(list, -500).net, 5000 - 2406);
+  // депонирование «+» (перенос < 0) прибавляется к выплате
+  assert.equal(shiftTotals(list, -500).net, 5000 - 2406 + 500);
   assert.equal(surplusOf(list[1]), 300);
   assert.equal(withShortage({ id: 'a' }, -300).shortage, -300);
   let st = withCarry(base(), '2026-10-30', 3927);
