@@ -128,6 +128,17 @@ export function summaryView(t) {
     total: fmt(t.total),
     paid: fmt(t.paid),
     earned: t.earned > 0 ? fmt(t.earned) : null,
+    earnedBig: `+${fmt(Math.max(0, t.earned))}`,
+    // план = все расходы зарплаты; разница с заработанным: «не хватает −X» / «сверх плана +X»
+    planTotal: fmt(t.total),
+    planDiff: Math.round(t.earned || 0) - Math.round(t.total || 0),
+    planLine:
+      t.total <= 0 && !(t.earned > 0)
+        ? null
+        : (() => {
+            const d = Math.round(t.earned || 0) - Math.round(t.total || 0);
+            return `План ${fmt(t.total)} · ${d < 0 ? `не хватает −${fmt(-d)}` : d > 0 ? `сверх плана +${fmt(d)}` : 'ровно в план'}`;
+          })(),
   };
 }
 

@@ -259,3 +259,13 @@ test('тап по ✓: переключение, без лишних перер�
   assert.equal(app.expenses[1].status, null);
   assert.equal(shouldAutoAdvance(prev, snap()), false);
 });
+
+test('summaryView: заработано большим плюсом и строка плана (не хватает / сверх плана)', () => {
+  const less = summaryView({ total: 40000, paid: 0, remaining: 40000, open: 3, count: 3, earned: 35000 });
+  assert.equal(less.earnedBig.replace(/\s/g, ' '), '+35 000'.replace(/\s/g, ' '));
+  assert.equal(less.planDiff, -5000);
+  assert.match(less.planLine, /не хватает −5/);
+  const more = summaryView({ total: 30000, paid: 30000, remaining: 0, open: 0, count: 2, earned: 33000 });
+  assert.equal(more.planDiff, 3000);
+  assert.match(more.planLine, /сверх плана \+3/);
+});

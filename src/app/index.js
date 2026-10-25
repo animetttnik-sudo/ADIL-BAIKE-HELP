@@ -2509,15 +2509,24 @@ const PayCard = memo(function PayCard({ payday, t, short, mentor, accent }) {
         >
           {sv.big}
         </Text>
+        <Text style={[styles.k, { marginTop: 14 }]}>Заработано</Text>
+        <Text key={sv.earnedBig} style={[styles.bigPay, { color: '#30d158', marginTop: 2 }]} numberOfLines={1}>
+          {sv.earnedBig}
+        </Text>
+        {sv.planLine ? (
+          <Text style={[styles.calcMeta, { marginTop: 4 }, sv.planDiff < 0 && styles.bad, sv.planDiff > 0 && styles.good]} numberOfLines={1}>
+            {sv.planLine}
+          </Text>
+        ) : null}
       </View>
       <Meter value={sv.progress} color={accent} />
       <View style={styles.statRow}>
         <Stat k="Расходы за зарплату" v={sv.total} />
         <Stat k="Оплачено" v={sv.paid} tone="good" />
       </View>
-      {sv.earned || short || mentor ? (
+      {short > 0 || mentor > 0 ? (
         <Text style={styles.calcMeta}>
-          заработано за смены · {sv.earned || '0'}
+          заработано за смены
           {short > 0 || mentor > 0
             ? ` (с учётом ${[short > 0 ? `недостачи −${money(short)}` : '', mentor > 0 ? `наставника +${money(mentor)}` : '']
                 .filter(Boolean)
