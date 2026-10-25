@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { parseShifts } from '../src/lib/shiftParse.js';
 import { applyShiftImport, previewShiftImport } from '../src/lib/shiftImport.js';
 import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../src/lib/shiftsNote.js';
-import { adjOf, carryOf, payTotals, shiftNet, shiftTotals, shiftsInPeriod, surplusOf, withCarry, withShortage } from '../src/lib/shifts.js';
+import { bonusLossOf, adjOf, carryOf, payTotals, shiftNet, shiftTotals, shiftsInPeriod, surplusOf, withCarry, withShortage } from '../src/lib/shifts.js';
 import { syncCalcShifts } from '../src/lib/link.js';
 import { DEFAULT_RATES } from '../src/lib/calc.js';
 import { PAYDAYS, defaultState, normalizeApp, paydayForDate, seedShiftPaydays, workPeriod } from '../src/lib/periods.js';
@@ -230,7 +230,8 @@ test('30 окт: страница с телефона (заготовки 10,11,
   assert.ok(list.every((s) => adjOf(s) >= 0), 'импорт не создаёт излишек');
   const t = payTotals(st, P30);
   assert.deepEqual([t.earned, t.short, t.mentor, t.surplus, t.carry], [1625, 2464, 300, 0, 3927]);
-  assert.equal(t.net, 1625 + 300 - 2464 - 3927);
+  assert.equal(t.net, 1625 + 300 - 2464 - 3927 - t.bonusLoss);
+  assert.equal(t.bonusLoss, 400);
   assert.equal(previewShiftImport(st, r).changes, 0);
 });
 
@@ -312,7 +313,7 @@ test('недостача дня в «Расчёте» = поле смены (о�
   // излишек не в зарплату
   assert.equal(payTotals(app, paydayForDate(D)).net, amount);
   app = withCalcDayAdj(app, D, day, 600, paydayForDate, mkId);
-  assert.equal(payTotals(app, paydayForDate(D)).net, amount - 600);
+  assert.equal(payTotals(app, paydayForDate(D)).net, amount - 600 - 400); // кассир: недостача ≥ 500 — без премии 400
   // без изменений — тот же объект
   assert.equal(withCalcDayAdj(app, D, day, 600, paydayForDate, mkId), app);
   // обнулили на созданной из «Расчёта» пустой смене (расчёт сброшен) → она убирается
@@ -340,4 +341,17 @@ test('недостача дня в «Расчёте»: две смены в де
   assert.equal(n.source, 'calc');
   assert.equal(n.shortage, 300);
   assert.equal(calcDayAdj(linked.shifts, D, 'night'), 300);
+});
+
+test('кассир с недостачей ≥ 500 теряет премию 400; рядовой и малая недостача — нет', () => {
+  const kass = { date: '2026-10-10', title: 'день касса', amount: 3000, shortage: 600 };
+  const ryad = { date: '2026-10-11', title: 'ночь ряд', amount: 2000, shortage: 900 };
+  const small = { date: '2026-10-12', title: 'ночь касса', amount: 2500, shortage: 499 };
+  assert.equal(bonusLossOf(kass), 400);
+  assert.equal(bonusLossOf(ryad), 0);
+  assert.equal(bonusLossOf(small), 0);
+  assert.equal(shiftNet(kass), 3000 - 600 - 400);
+  const t = shiftTotals([kass, ryad, small], 0);
+  assert.equal(t.bonusLoss, 400);
+  assert.equal(t.net, 3000 + 2000 + 2500 - 600 - 900 - 499 - 400);
 });

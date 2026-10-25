@@ -35,8 +35,13 @@ export const surplusOf = (s) => Math.max(0, -adjOf(s));
 export const mentorMark = (s) => Math.max(0, signed(s?.mentor));
 /** Доплата наставника, которая считается сейчас: только пока у смены нет суммы. */
 export const mentorOf = (s) => (hasAmount(s) ? 0 : mentorMark(s));
-/** Чистыми за смену: сумма + наставник − недостача (излишек не считается) — для «Анализа». */
-export const shiftNet = (s) => shiftAmount(s) + mentorOf(s) - shortageOf(s);
+/** Премия кассира (П\касса), сом: пропадает со смены кассира, если недостача ≥ SHORT_RED_FROM. */
+export const CASH_BONUS = 400;
+/** Потерянная премия смены: CASH_BONUS у кассира с недостачей ≥ 500, иначе 0. */
+export const bonusLossOf = (s) =>
+  s && shortageOf(s) >= SHORT_RED_FROM && shiftRole(s) === 'kass' ? CASH_BONUS : 0;
+/** Чистыми за смену: сумма + наставник − недостача − потерянная премия кассира (излишек не считается) — для «Анализа». */
+export const shiftNet = (s) => shiftAmount(s) + mentorOf(s) - shortageOf(s) - bonusLossOf(s);
 
 /** С какой суммы недостача смены красная (меньше — зелёная). */
 export const SHORT_RED_FROM = 500;
@@ -86,7 +91,8 @@ export function shiftsInPeriod(shifts, p) {
  *  earned  — заработано (суммы смен, недостача их не трогает);
  *  mentor  — наставник (доплаты смен без суммы); mentorCount — таких смен;
  *  short   — недостача по сменам; surplus — излишек по сменам; carry — депонирование (± к выплате);
- *  net     — к выплате = earned + mentor − short − carry (carry со знаком: < 0 прибавляет; излишек не считается);
+ *  bonusLoss — потерянная премия кассира (400 за смену кассира с недостачей ≥ 500);
+ *  net     — к выплате = earned + mentor − short − bonusLoss − carry (carry со знаком: < 0 прибавляет; излишек не считается);
  *  count   — смен в периоде; withSum — с суммой; fromCalc — из «Расчёта»;
  *  shortCount / surplusCount — смен с недостачей / излишком.
  */
@@ -100,8 +106,10 @@ export function shiftTotals(list, carry = 0) {
   let surplusCount = 0;
   let mentor = 0;
   let mentorCount = 0;
+  let bonusLoss = 0;
   for (const s of list || []) {
     earned += shiftAmount(s);
+    bonusLoss += bonusLossOf(s);
     const m = mentorOf(s);
     if (m) {
       mentor += m;
@@ -125,7 +133,8 @@ export function shiftTotals(list, carry = 0) {
     short,
     surplus,
     carry: c,
-    net: earned + mentor - short - carryDue(c),
+    bonusLoss,
+    net: earned + mentor - short - bonusLoss - carryDue(c),
     count: (list || []).length,
     withSum,
     fromCalc,

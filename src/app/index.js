@@ -143,6 +143,7 @@ import {
   shiftsInPeriod,
   shiftTotals,
   shortageOf,
+  bonusLossOf,
   upcomingPayday,
   withShortage,
 } from '../lib/shifts';
@@ -1130,6 +1131,11 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
             {short ? (
               <Text style={shortTone(short) === 'bad' ? styles.metaShort : styles.metaPlus} numberOfLines={1}>
                 недостача −{money(short)}
+              </Text>
+            ) : null}
+            {bonusLossOf(item) ? (
+              <Text style={styles.metaShort} numberOfLines={1}>
+                без премии кассира −{money(bonusLossOf(item))}
               </Text>
             ) : null}
             {plus ? (
@@ -2609,9 +2615,14 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
         с суммой {t.withSum} · из расчёта {t.fromCalc}
         {t.shortCount ? ` · с недостачей ${t.shortCount}` : ''}
       </Text>
-      {t.carry || t.mentor || t.surplus ? (
+      {t.carry || t.mentor || t.surplus || t.bonusLoss ? (
         <Text style={styles.calcMeta}>
           {[
+            t.bonusLoss ? (
+              <Text key="b" style={styles.bad}>
+                без премии кассира −{money(t.bonusLoss)}
+              </Text>
+            ) : null,
             t.carry ? (
               <Text key="c" style={t.carry > 0 ? styles.bad : styles.good}>
                 {t.carry > 0 ? `депонирование −${money(t.carry)}` : `депонирование +${money(-t.carry)}`}
@@ -3708,6 +3719,7 @@ export default function App() {
   const earnedAll = state.shifts.reduce((a, s) => a + shiftNet(s), 0) - carryAll;
   const shortAll = state.shifts.reduce((a, s) => a + shortageOf(s), 0);
   const mentorAll = state.shifts.reduce((a, s) => a + mentorOf(s), 0);
+  const bonusLossAll = state.shifts.reduce((a, s) => a + bonusLossOf(s), 0);
 
   /**
    * Поле шторки в цепочке «Далее ›»: ref, return-клавиша и своя панель над
@@ -5046,6 +5058,12 @@ export default function App() {
                   <View style={[styles.lRow, styles.lRowSep]}>
                     <Text style={styles.lKey}>· недостача</Text>
                     <Text style={[styles.lVal, styles.bad]}>−{money(shortAll)}</Text>
+                  </View>
+                ) : null}
+                {bonusLossAll ? (
+                  <View style={[styles.lRow, styles.lRowSep]}>
+                    <Text style={styles.lKey}>· без премии кассира</Text>
+                    <Text style={[styles.lVal, styles.bad]}>−{money(bonusLossAll)}</Text>
                   </View>
                 ) : null}
                 {carryAll ? (
