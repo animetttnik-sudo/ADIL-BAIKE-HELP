@@ -13,7 +13,8 @@
  */
 import React from 'react';
 import { Dimensions } from 'react-native';
-import { useDerivedValue } from 'react-native-reanimated';
+import { makeMutable, useAnimatedReaction } from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 
 export const REAL_GLASS_REFRACTION = true;
 
@@ -34,7 +35,12 @@ export const GLASS_DIAG = {
   canvasErr: '',
   ready: null, // () => число 0…1 (shared value плавного появления)
   idle: '—',
+  bind: '—', // связка Skia ↔ Reanimated (живые uniforms на UI-потоке)
+  geo: '—', // uniforms при последнем подъёме капли
+  ticks: 0, // сколько раз uniforms пересчитались на UI-потоке за последнее удержание
 };
+/** Отладочная подсветка холста (двойной тап по строке диагностики). */
+export const GLASS_TINT = makeMutable(0);
 const errText = (e) => String((e && (e.message || e)) || 'ошибка').slice(0, 120);
 
 let SK = null;
@@ -56,8 +62,8 @@ uniform float2 uCenter;
 uniform float2 uOrigin;
 uniform float2 uImg;
 uniform float uScale;
-uniform float uOn;
-uniform float uReady;
+uniform float4 uBar;
+uniform float uDebug;
 
 float sdCap(float2 p, float2 b) {
   float r = min(b.x, b.y);
@@ -66,36 +72,43 @@ float sdCap(float2 p, float2 b) {
 }
 
 half4 sampleAt(float2 screenPt) {
-  // точки экрана → пиксели снимка панели; вне снимка — прозрачно (там видно живой экран)
+  // точки экрана → пиксели снимка (снимок в пикселях экрана, ×uScale); вне снимка — прозрачно
   float2 px = (screenPt - uOrigin) * uScale;
   if (px.x < 0.0 || px.y < 0.0 || px.x > uImg.x || px.y > uImg.y) { return half4(0.0); }
   return image.eval(px);
 }
 
 half4 main(float2 xy) {
-  float2 p = xy - uCanvas * 0.5;
+  if (uDebug > 0.5 && (xy.x < 1.5 || xy.y < 1.5 || xy.x > uCanvas.x - 1.5 || xy.y > uCanvas.y - 1.5)) {
+    return half4(0.85, 0.0, 0.0, 0.85); // отладка: границы холста
+  }
+  float2 p = xy - uCanvas * 0.5; // центр холста = центр капли
   float2 hb = uSize * 0.5;
   float d = sdCap(p, hb);
-  // мягкий сглаженный край ровно по форме капли (1.5 пт)
-  float edge = 1.0 - smoothstep(-1.5, 0.0, d);
+  float edge = 1.0 - smoothstep(-1.5, 0.0, d); // сглаженный край по форме капли
   if (edge <= 0.0) { return half4(0.0); }
-  float band = clamp(hb.y * 0.8, 10.0, 28.0); // широкая полоса преломления — эффект виден
-  float k = clamp(1.0 + d / band, 0.0, 1.0); // 0 — внутри, 1 — у кромки
+  float band = clamp(hb.y * 0.9, 10.0, 30.0); // полоса сильного изгиба у кромки
+  float k = clamp(1.0 + d / band, 0.0, 1.0); // 0 — середина, 1 — кромка
   float e = 0.75;
   float2 g = float2(sdCap(p + float2(e, 0.0), hb) - sdCap(p - float2(e, 0.0), hb),
                     sdCap(p + float2(0.0, e), hb) - sdCap(p - float2(0.0, e), hb));
   float2 n = g / max(length(g), 0.0001);
-  float2 base = p / (1.0 + 0.25 * uOn); // увеличение ~1.25×
-  float bend = k * k * band * 1.9 * uOn;
-  float2 c = uCenter + base;
-  half4 cr = sampleAt(c + n * bend * 0.84);
+  float2 c = uCenter + p / 1.3; // увеличение 1.3× в середине
+  float bend = k * k * band * 1.7; // у кромки контент снаружи затягивается внутрь
+  half4 cr = sampleAt(c + n * bend * 0.9);
   half4 cg = sampleAt(c + n * bend);
-  half4 cb = sampleAt(c + n * bend * 1.2);
-  float sa = max(max(cr.a, cg.a), cb.a); // цвета снимка — premultiplied
-  half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.12 * uOn * sa);
-  // середина прозрачная (видно живой экран и подписи), преломление — только в полосе у кромки:
-  // снимок неподвижен, поэтому в центре он дал бы «призраки» старой плашки при перетаскивании
-  float a = smoothstep(0.0, 0.5, k) * edge * uReady * uOn;
+  half4 cb = sampleAt(c + n * bend * 1.12);
+  float sa = max(max(cr.a, cg.a), cb.a); // premultiplied
+  half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.14 * sa);
+  // середина: над/под панелью — увеличенный снимок; внутри самой панели — прозрачно
+  // (там живые подписи с их собственной линзой, без двойного текста и «призраков» старой плашки)
+  float2 bq = abs(c - (uBar.xy + uBar.zw * 0.5)) - uBar.zw * 0.5;
+  float outBar = smoothstep(-1.0, 3.0, max(bq.x, bq.y));
+  float a = max(outBar, smoothstep(0.2, 0.6, k)) * edge;
+  if (uDebug > 0.5) {
+    col = mix(col, half3(sa, 0.0, 0.0), 0.4); // отладка: область выборки — красным
+    a = max(a, 0.6 * edge);
+  }
   return half4(col * a, sa * a);
 }
 `;
@@ -111,6 +124,9 @@ if (SK && REAL_GLASS_REFRACTION) {
   }
 }
 GLASS_DIAG.effect = !!EFFECT;
+// без этой связки Skia молча рисует статичный холст: uniforms читаются один раз при монтировании
+const LIVE = !!(SK && SK.HAS_REANIMATED_4);
+GLASS_DIAG.bind = SK ? (LIVE ? 'живые' : 'нет (JS-режим)') : '—';
 
 /** Можно ли рисовать настоящее преломление на этом устройстве. */
 export const glassLensAvailable = !!(SK && EFFECT && REAL_GLASS_REFRACTION);
@@ -168,45 +184,30 @@ class Guard extends React.Component {
 }
 
 /**
- * Холст преломления (snap — результат snapshotView, ready — shared value 0…1 для плавного появления).
- * Размер холста фиксированный (cw × ch, не меньше самой большой капли),
- * центр холста совпадает с центром капли. geo() — ворклет: { w, h, cx, cy, on } в точках экрана.
+ * Холст преломления. uniforms — shared value (считается в SegmentCapsule на UI-потоке):
+ * { uCanvas, uSize, uCenter, uOrigin, uImg, uScale, uBar, uDebug } в точках экрана (uScale — пикс./пт снимка).
+ * Центр холста (cw × ch) совпадает с центром капли. Видимость/появление — прозрачностью родителя.
+ * Если связка Skia ↔ Reanimated недоступна — uniforms передаются из JS (реакция → setState).
  */
-function LensCanvas({ snap, cw, ch, geo, ready, style }) {
+function LensCanvas({ snap, cw, ch, uniforms }) {
   const { image } = snap;
   const iw = image.width();
   const ih = image.height();
-  const scale = iw / Math.max(1, snap.w);
-  const ox0 = snap.ox;
-  const oy0 = snap.oy;
-  const uniforms = useDerivedValue(() => {
-    const g = geo();
-    // начало снимка — живое положение снятого View (если geo его даёт), иначе — замер при съёмке
-    const ox = g.ox !== undefined ? g.ox : ox0;
-    const oy = g.oy !== undefined ? g.oy : oy0;
-    return {
-      uCanvas: [cw, ch],
-      uSize: [g.w, g.h],
-      uCenter: [g.cx, g.cy],
-      uOrigin: [ox, oy],
-      uImg: [iw, ih],
-      uScale: scale,
-      uOn: g.on,
-      uReady: ready.value,
-    };
-  });
+  const [jsU, setJsU] = React.useState(() => uniforms.value);
+  useAnimatedReaction(
+    () => uniforms.value,
+    (u) => {
+      if (!LIVE) scheduleOnRN(setJsU, u);
+    }
+  );
+  React.useEffect(() => {
+    GLASS_DIAG.canvas = `да ${cw}×${ch}`;
+  }, [cw, ch]);
   const { Canvas, Fill, Shader, ImageShader } = SK;
   return (
-    <Canvas
-      style={[{ width: cw, height: ch }, style]}
-      pointerEvents="none"
-      onLayout={(e) => {
-        const l = e.nativeEvent.layout;
-        GLASS_DIAG.canvas = `да ${Math.round(l.width)}×${Math.round(l.height)}`;
-      }}
-    >
+    <Canvas style={{ width: cw, height: ch }} pointerEvents="none">
       <Fill>
-        <Shader source={EFFECT} uniforms={uniforms}>
+        <Shader source={EFFECT} uniforms={LIVE ? uniforms : jsU}>
           <ImageShader image={image} fit="none" x={0} y={0} width={iw} height={ih} tx="decal" ty="decal" />
         </Shader>
       </Fill>
@@ -215,7 +216,7 @@ function LensCanvas({ snap, cw, ch, geo, ready, style }) {
 }
 
 export function GlassLens(props) {
-  if (!glassLensAvailable || !props.snap || !props.snap.image || !props.ready || props.cw <= 0 || props.ch <= 0) return null;
+  if (!glassLensAvailable || !props.snap || !props.snap.image || !props.uniforms || props.cw <= 0 || props.ch <= 0) return null;
   return (
     <Guard>
       <LensCanvas {...props} />

@@ -58,7 +58,7 @@ import Animated, {
     LinearTransition,
     useAnimatedKeyboard,
     useAnimatedReaction,
-    useAnimatedStyle, useReducedMotion, useSharedValue,
+    useAnimatedStyle, useDerivedValue, useReducedMotion, useSharedValue,
     withDelay,
     withSequence,
     withSpring,
@@ -103,7 +103,7 @@ import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
 import { liquidShape } from '../lib/liquid';
-import { GLASS_DIAG, GlassLens, glassLensAvailable, REAL_GLASS_REFRACTION, snapshotView } from '../ui/GlassLens';
+import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, REAL_GLASS_REFRACTION, snapshotView } from '../ui/GlassLens';
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
@@ -1345,6 +1345,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
 /** Скромная строка диагностики стекла дока (Настройки, внизу). Обновляется раз в секунду. */
 function GlassDiagLine() {
   const [, tick] = useState(0);
+  const lastTap = useRef(0);
   useEffect(() => {
     const t = setInterval(() => tick((x) => x + 1), 1000);
     return () => clearInterval(t);
@@ -1359,11 +1360,25 @@ function GlassDiagLine() {
     ready = '?';
   }
   const err = [d.skiaErr, d.effectErr, d.canvasErr].filter(Boolean).join(' / ') || '—';
+  const tint = GLASS_TINT.value > 0.5;
+  // один тап — переснять в покое; двойной — отладочная подсветка холста (красная рамка и выборка)
+  const onPress = () => {
+    const now = Date.now();
+    if (now - lastTap.current < 400) {
+      GLASS_TINT.value = GLASS_TINT.value > 0.5 ? 0 : 1;
+      lastTap.current = 0;
+      tick((x) => x + 1);
+      return;
+    }
+    lastTap.current = now;
+    if (SNAP_BUS.kick) SNAP_BUS.kick();
+  };
   return (
-    <Text style={styles.diagLine} onPress={() => SNAP_BUS.kick && SNAP_BUS.kick()}>
-      {`Стекло: флаг ${yn(REAL_GLASS_REFRACTION)} · Skia ${yn(d.skia)} · шейдер ${yn(d.effect)} · снимков ${d.snaps}` +
+    <Text style={styles.diagLine} onPress={onPress}>
+      {`Стекло: флаг ${yn(REAL_GLASS_REFRACTION)} · Skia ${yn(d.skia)} · шейдер ${yn(d.effect)} · связка ${d.bind} · снимков ${d.snaps}` +
         (d.snapFails ? ` (сбоев ${d.snapFails})` : '') +
-        ` · последний: ${d.last}${ago ? ', ' + ago : ''} · холст: ${d.canvas} · ready ${ready} · покой: ${d.idle} · ошибка: ${err}`}
+        ` · последний: ${d.last}${ago ? ', ' + ago : ''} · холст: ${d.canvas} · ready ${ready} · покой: ${d.idle} · ошибка: ${err}` +
+        `\nuniforms ${d.geo} · пересчётов на UI за удержание: ${d.ticks} · подсветка: ${tint ? 'вкл' : 'выкл'}`}
     </Text>
   );
 }
@@ -1689,20 +1704,56 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   // холст преломления: фиксированного размера (больше самой большой капли), центр — в центре капли
   const lensW = Math.ceil(segWJs * 1.18 * 1.35) + 8;
   const lensH = Math.ceil(h0 * 1.55) + 8;
-  const lensGeo = useCallback(() => {
-    'worklet';
+  // uniforms шейдера — здесь же, на UI-потоке, из тех же shared values, что и сама капля (точки экрана)
+  const snapK = lensSnap ? `${lensSnap.image.width()}|${lensSnap.ox}|${lensSnap.oy}|${lensSnap.w}` : '';
+  const sIw = lensSnap ? lensSnap.image.width() : 1;
+  const sIh = lensSnap ? lensSnap.image.height() : 1;
+  const sScale = lensSnap ? sIw / Math.max(1, lensSnap.w) : 1;
+  const sOx = lensSnap ? lensSnap.ox : 0;
+  const sOy = lensSnap ? lensSnap.oy : 0;
+  const lensUniforms = useDerivedValue(() => {
     const sh = liquidShape(liquid.value, pos.value, vel.value);
     return {
-      w: segW.value * sh.rx,
-      h: h0 * sh.ry,
-      cx: hostX.value + 5 + pos.value * segW.value + segW.value / 2,
-      cy: hostY.value + 5 + h0 / 2,
-      on: Math.min(1, Math.max(0, liquid.value)),
+      uCanvas: [lensW, lensH],
+      uSize: [segW.value * sh.rx, h0 * sh.ry],
+      uCenter: [hostX.value + 5 + pos.value * segW.value + segW.value / 2, hostY.value + 5 + h0 / 2],
+      uOrigin: [sOx, sOy],
+      uImg: [sIw, sIh],
+      uScale: sScale,
+      uBar: [hostX.value, hostY.value, segW.value * n + 10, height],
+      uDebug: GLASS_TINT.value,
     };
-  }, [liquid, pos, vel, segW, hostX, hostY, h0]);
+  }, [snapK, lensW, lensH, h0, n, height]);
+  // диагностика: живые uniforms при подъёме капли и сколько раз они пересчитались на UI-потоке
+  const uTicks = useSharedValue(0);
+  useAnimatedReaction(
+    () => lensUniforms.value,
+    () => {
+      if (liquid.value > 0.04) uTicks.value += 1;
+    }
+  );
+  const recordGeo = useCallback((u, ticks, phase) => {
+    const r = (x) => Math.round(x);
+    GLASS_DIAG.geo =
+      `${phase}: капля ${r(u.uCenter[0])},${r(u.uCenter[1])} ${r(u.uSize[0])}×${r(u.uSize[1])} пт · ` +
+      `панель ${r(u.uBar[0])},${r(u.uBar[1])} ${r(u.uBar[2])}×${r(u.uBar[3])} · начало снимка ${r(u.uOrigin[0])},${r(u.uOrigin[1])} · ` +
+      `масштаб ${u.uScale.toFixed(2)} · снимок ${r(u.uImg[0])}×${r(u.uImg[1])} · холст ${r(u.uCanvas[0])}×${r(u.uCanvas[1])}`;
+    GLASS_DIAG.ticks = ticks;
+  }, []);
+  useAnimatedReaction(
+    () => (liquid.value > 0.9 ? 1 : liquid.value < 0.04 ? 0 : -1),
+    (st, was) => {
+      if (!realLens || st === -1 || st === was) return;
+      if (st === 1) scheduleOnRN(recordGeo, lensUniforms.value, uTicks.value, 'подъём');
+      else if (was === 1 || was === -1) {
+        scheduleOnRN(recordGeo, lensUniforms.value, uTicks.value, 'отпуск');
+        uTicks.value = 0;
+      }
+    }
+  );
   const lensPos = useAnimatedStyle(() => {
     const sh = liquidShape(liquid.value, pos.value, vel.value);
-    return { left: (segW.value * sh.rx - lensW) / 2, top: (h0 * sh.ry - lensH) / 2 };
+    return { left: (segW.value * sh.rx - lensW) / 2, top: (h0 * sh.ry - lensH) / 2, opacity: lensReady.value };
   });
 
   const Wrap = glass ? Glass : View;
@@ -1749,7 +1800,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
             {/* настоящее преломление снимка экрана (Skia); без Skia — прозрачная приближённая линза */}
             {realLens && lensSnap ? (
               <Animated.View style={[styles.lqCanvas, lensPos]}>
-                <GlassLens snap={lensSnap} ready={lensReady} cw={lensW} ch={lensH} geo={lensGeo} />
+                <GlassLens snap={lensSnap} cw={lensW} ch={lensH} uniforms={lensUniforms} />
               </Animated.View>
             ) : null}
             {/* прозрачная линза: без размытия и заливки — видно всё, что под каплей */}
