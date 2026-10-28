@@ -136,7 +136,6 @@ import {
   calcKey,
   calcPayForDay,
   calcSlots,
-  calcTargetFor,
   compareKeys,
   isLinkedShift,
   keyDate,
@@ -1075,24 +1074,12 @@ const CARD_EXIT = () => {
  * Отдельная стеклянная карточка расхода. Горизонтальный свайп отдан листанию зарплат,
  * поэтому: тап по карточке — изменить (там же «Удалить расход»), кнопка — статус.
  */
-/**
- * Нажатие на строку: подсветка — ровным слоем на ВСЮ карточку (по её скруглению), а не на часть строки;
- * удержание — меню строки (onMenu: «Изменить» / «Рассчитать» / «Удалить» / «Отмена»).
- */
-function useRowPress(id, onEdit, onMenu) {
+/** Нажатие на строку: подсветка — ровным слоем на ВСЮ карточку (по её скруглению), а не на часть строки. */
+function useRowPress(id, onEdit) {
   const [down, setDown] = useState(false);
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
-  const menu = useCallback(() => {
-    setDown(false);
-    if (onMenu) {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-      onMenu(id);
-    }
-  }, [id, onMenu]);
   const props = {
     onPress: edit,
-    onLongPress: onMenu ? menu : undefined,
-    delayLongPress: 450,
     onPressIn: () => setDown(true),
     onPressOut: () => setDown(false),
   };
@@ -1100,10 +1087,10 @@ function useRowPress(id, onEdit, onMenu) {
   return { props, hi };
 }
 
-const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, onMenu, arc }) {
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, arc }) {
   const st = displayStatus(item);
   const id = item.id;
-  const { props: pressProps, hi } = useRowPress(id, onEdit, onMenu);
+  const { props: pressProps, hi } = useRowPress(id, onEdit);
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       {/* стекло не кладём прямо в вид с layout-анимациями — между ними обычный View */}
@@ -1152,9 +1139,9 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
  * «Убрать день»); у смены из «Расчёта» бейдж «из расчёта ›» открывает расчёт этого дня.
  * Недостача не уменьшает сумму смены — отдельная красная строка.
  */
-const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, onMenu, accent, dayTotal }) {
+const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTotal }) {
   const id = item.id;
-  const { props: pressProps, hi } = useRowPress(id, onEdit, onMenu);
+  const { props: pressProps, hi } = useRowPress(id, onEdit);
   const noSum = item.amount == null || item.amount === '';
   const short = shortageOf(item);
   const plus = surplusOf(item);
@@ -2765,7 +2752,7 @@ const PayCard = memo(function PayCard({ payday, t, short, mentor, accent }) {
   );
 });
 
-const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, onMenu, arc }) {
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, arc }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2785,7 +2772,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                 <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
               </ItemCard>
             ) : (
-              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} onMenu={onMenu} arc={arc} />)
+              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
             )}
             <Text style={[styles.hint, styles.pageHint]}>
               Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
@@ -2933,7 +2920,7 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
   );
 };
 
-const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onMenu, onCarry, onExport }) {
+const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry, onExport }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2965,7 +2952,6 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
                   item={s}
                   onEdit={onEdit}
                   onCalc={onCalc}
-                  onMenu={onMenu}
                   accent={accent}
                   // итог дня — под последней сменой дня, где смен 2 и больше
                   dayTotal={days[s.date] && list[i + 1]?.date !== s.date ? days[s.date] : null}
@@ -3176,7 +3162,6 @@ export default function App() {
   }, []);
   const calcKeyNow = calcKey(calcDate, calcSlot);
   const [calcItem, setCalcItem] = useState(null);
-  const [rowMenu, setRowMenu] = useState(null); // { kind: 'exp' | 'shift', id } — меню строки по удержанию
   const calcDateRef = useRef(calcKeyNow);
   calcDateRef.current = calcKeyNow;
   const calcTimer = useRef(null);
@@ -3939,41 +3924,13 @@ export default function App() {
     }
   }, [closeThen, shareFile]);
 
-  /** Меню строки (долгое нажатие): «Изменить» / «Рассчитать» / «Удалить» / «Отмена». */
-  const openExpenseMenu = useCallback((id) => {
-    setRowMenu({ kind: 'exp', id });
-    setSheet('rowMenu');
-  }, []);
-  const openShiftMenu = useCallback((id) => {
-    setRowMenu({ kind: 'shift', id });
-    setSheet('rowMenu');
-  }, []);
-  /** «Рассчитать» для конкретной смены: её расчёт, а у пустой — свободный расчёт этой даты с её ролью/временем. */
-  const calcShiftNow = useCallback(
-    (id) => {
-      const s = stateRef.current?.shifts.find((x) => x.id === id);
-      const c = calcRef.current;
-      if (!s || !c) return;
-      const tg = calcTargetFor(s, c.days);
-      if (tg.seed) {
-        patchCalc((p) => {
-          const cur = p.days[tg.key];
-          if (cur && hasCounts(cur.counts)) return p;
-          const base = cur || seedDay(p.prefs, stateRef.current?.shifts, tg.key, p.days);
-          return { ...p, days: { ...p.days, [tg.key]: { ...base, ...tg.seed, updated: Date.now() } } };
-        });
-      }
-      openCalcOn(tg.key);
-    },
-    [patchCalc, openCalcOn]
-  );
   const payPageProps = useMemo(
-    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, onMenu: openExpenseMenu, arc }),
-    [accent, openExpense, toggleStatus, returnExpenseNow, openExpenseMenu, arc]
+    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, arc }),
+    [accent, openExpense, toggleStatus, returnExpenseNow, arc]
   );
   const shiftPageProps = useMemo(
-    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onMenu: openShiftMenu, onCarry: openCarry, onExport: openExportMenu }),
-    [accent, openShift, openCalcOn, openShiftMenu, openCarry, openExportMenu]
+    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry, onExport: openExportMenu }),
+    [accent, openShift, openCalcOn, openCarry, openExportMenu]
   );
 
   if (!state) {
@@ -4870,57 +4827,6 @@ export default function App() {
                 <Text style={styles.actBtnTxt}>Отмена</Text>
               </ScaleButton>
               <Text style={styles.hint}>Откроется «Поделиться»: «Сохранить в Файлы», «Сохранить изображение» или отправить.</Text>
-            </>
-          ),
-        };
-      }
-
-      case 'rowMenu': {
-        const isShift = rowMenu?.kind === 'shift';
-        const it = rowMenu
-          ? (isShift ? state.shifts : state.expenses).find((x) => x.id === rowMenu.id)
-          : null;
-        if (!it) return { title: '', onClose: closeSheet, body: null };
-        const linkedIt = isShift && isLinkedShift(it);
-        const head = `${fmtShort(it.date)}, ${DOW[parse(it.date).getDay()]} · ${it.title || (isShift ? 'Смена' : 'Без названия')}${
-          it.amount != null && it.amount !== '' ? ` · ${money(it.amount)}` : ''
-        }`;
-        const id = it.id;
-        const acts = [
-          ['Изменить', isShift ? 'сумма, недостача, место' : 'сумма, название, дата', () => closeThen(() => (isShift ? openShift(id) : openExpense(id)))],
-          isShift
-            ? ['Рассчитать', linkedIt ? 'открыть расчёт этой смены' : 'посчитать эту смену по позициям', () => closeThen(() => calcShiftNow(id))]
-            : ['Рассчитать', 'смену за этот день — в «Расчёте»', () => closeThen(() => openCalcOn(it.date))],
-          ['Удалить', linkedIt ? 'смена из расчёта — сбросить расчёт' : 'с подтверждением', () => closeThen(() => (isShift ? confirmDeleteShift(id) : confirmDeleteExpense(id))), true],
-        ];
-        return {
-          title: isShift ? 'Смена' : 'Расход',
-          onClose: closeSheet,
-          body: (
-            <>
-              <Text style={styles.menuHead} numberOfLines={2}>
-                {head}
-              </Text>
-              <ItemCard style={styles.listCard}>
-                {acts.map(([t, sub, fn, danger], i) => (
-                  <Pressable
-                    key={t}
-                    style={({ pressed }) => [styles.lRow, i < acts.length - 1 && styles.lRowSep, pressed && styles.rowPressed]}
-                    onPress={() => {
-                      Haptics.selectionAsync();
-                      fn();
-                    }}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.lTitle, danger && { color: '#ff453a' }]}>{t}</Text>
-                      <Text style={styles.lSub}>{sub}</Text>
-                    </View>
-                  </Pressable>
-                ))}
-              </ItemCard>
-              <ScaleButton style={styles.actBtn} onPress={closeSheet}>
-                <Text style={styles.actBtnTxt}>Отмена</Text>
-              </ScaleButton>
             </>
           ),
         };
@@ -6844,7 +6750,6 @@ const styles = StyleSheet.create({
   expNetV: { fontSize: 22, fontWeight: '800' },
   rowHi: { ...StyleSheet.absoluteFillObject, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.09)', opacity: 0 },
   rowHiOn: { opacity: 1 },
-  menuHead: { color: 'rgba(235,235,245,0.6)', fontSize: 14, textAlign: 'center', marginBottom: 12 },
   dayTotalL: { flex: 1, color: 'rgba(235,235,245,0.7)', fontSize: 13 },
   dayTotalV: { fontSize: 15, fontWeight: '700' },
   calcBtns: { flexDirection: 'row', gap: 10 },
