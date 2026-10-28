@@ -1521,11 +1521,12 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
             >
               <View style={styles.segIndEdge} />
               {isLiquid ? (
-                <Animated.View style={[StyleSheet.absoluteFill, liquidLayer]}>
+                // все слои кромки — внутри обёртки той же формы, что и плашка (обрезаются по ней)
+                <Animated.View style={[styles.lqClip, { borderRadius: (height - 10) / 2 }, liquidLayer]}>
+                  <View style={styles.lqShine} />
                   <View style={[styles.lqFringe, styles.lqFringeR, { borderRadius: (height - 10) / 2 }]} />
                   <View style={[styles.lqFringe, styles.lqFringeB, { borderRadius: (height - 10) / 2 }]} />
                   <View style={[styles.lqRim, { borderRadius: (height - 10) / 2 }]} />
-                  <View style={[styles.lqShine, { borderTopLeftRadius: (height - 10) / 2, borderTopRightRadius: (height - 10) / 2 }]} />
                 </Animated.View>
               ) : null}
             </Animated.View>
@@ -6431,11 +6432,14 @@ const styles = StyleSheet.create({
   },
   // твёрдое стекло плашки дока: чуть плотнее и с яркой кромкой
   segIndSolid: { backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.42)' },
-  lqRim: { ...StyleSheet.absoluteFillObject, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.75)' },
-  lqFringe: { ...StyleSheet.absoluteFillObject, borderWidth: 1.5 },
+  // StyleSheet.absoluteFillObject в этой версии RN нет — заливка задана явно
+  lqClip: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+  lqRim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.75)' },
+  lqFringe: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 1.5 },
   lqFringeR: { borderColor: 'rgba(255,70,90,0.45)', transform: [{ translateX: -1.2 }] },
   lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
-  lqShine: { position: 'absolute', top: 1, left: 10, right: 10, height: '42%', backgroundColor: 'rgba(255,255,255,0.12)' },
+  // мягкий верхний блик на всю ширину; форму даёт обрезка lqClip (без своих скруглений)
+  lqShine: { position: 'absolute', top: 0, left: 0, right: 0, height: '38%', backgroundColor: 'rgba(255,255,255,0.07)' },
   lqLens: { position: 'absolute', top: 5, left: 5, bottom: 5, overflow: 'hidden' },
   lqLab: { position: 'absolute', top: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
   lqTxtR: { color: 'rgba(255,80,100,0.55)', transform: [{ translateX: -1 }] },
