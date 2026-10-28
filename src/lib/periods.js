@@ -26,7 +26,9 @@ export const fmtShort = (s) => {
   const d = parse(s);
   return `${d.getDate()} ${MONTHS_R[d.getMonth()]}`;
 };
-export const money = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
+// один форматтер на всё приложение: создавать Intl.NumberFormat на каждую сумму дорого (длинные списки)
+const MONEY_FMT = new Intl.NumberFormat('ru-RU');
+export const money = (n) => MONEY_FMT.format(Math.round(Number(n) || 0));
 export const uid = () => Math.random().toString(36).slice(2, 9);
 export const todayIso = () => iso(new Date());
 

@@ -295,3 +295,13 @@ test('зарплаты идут и после 2028 года (приложени�
     assert.equal((Date.parse(PAYDAYS[i]) - Date.parse(PAYDAYS[i - 1])) / 864e5, 14);
   }
 });
+
+test('money: формат как у Intl ru-RU, округление, мусор → 0', async () => {
+  const { money } = await import('../src/lib/periods.js');
+  const ref = (n) => new Intl.NumberFormat('ru-RU').format(n);
+  assert.equal(money(1234567), ref(1234567));
+  assert.equal(money(1350.6), ref(1351));
+  assert.equal(money(-14052), ref(-14052));
+  assert.equal(money('abc'), '0');
+  assert.equal(money(null), '0');
+});

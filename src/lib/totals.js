@@ -125,7 +125,8 @@ export function plural(n, one, few, many) {
   return many;
 }
 
-const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
+const FMT = new Intl.NumberFormat('ru-RU');
+const fmt = (n) => FMT.format(Math.round(Number(n) || 0));
 
 /**
  * Всё, что показывает карточка «К зарплате», из paydayTotals — одной чистой функцией, без кэшей.
