@@ -6006,7 +6006,7 @@ export default function App() {
 
       case 'find': {
         const isShift = find.kind === 'shift';
-        const res = searchItems(isShift ? state.shifts : state.expenses, find.q);
+        const res = searchItems(isShift ? state.shifts : state.expenses, find.q, 40, todayIso());
         const go = (x) => {
           const k = paydayIndexFor(isShift ? 'shift' : 'expense', x.date);
           if (isShift) jumpShiftIdx(k);
@@ -6055,7 +6055,7 @@ export default function App() {
               {!find.q.trim() ? (
                 <Text style={[styles.hint, { textAlign: 'center' }]}>Ищет по всем зарплатам. Тап по найденному — открыть.</Text>
               ) : res.length >= 40 ? (
-                <Text style={[styles.hint, { textAlign: 'center' }]}>Показаны 40 последних — уточните запрос.</Text>
+                <Text style={[styles.hint, { textAlign: 'center' }]}>Показаны первые 40 — уточните запрос.</Text>
               ) : null}
             </>
           ),

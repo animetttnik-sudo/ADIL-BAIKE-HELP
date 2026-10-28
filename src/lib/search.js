@@ -6,7 +6,11 @@ import { PAYDAYS, addDays } from './periods.js';
 
 const norm = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 
-export function searchItems(list, q, limit = 40) {
+/**
+ * today (необязательно) — сначала прошедшие и сегодняшние (новые сверху), потом будущие (ближние сверху),
+ * чтобы запланированные на год вперёд пустые смены не заслоняли настоящие.
+ */
+export function searchItems(list, q, limit = 40, today = null) {
   const nq = norm(q);
   if (!nq) return [];
   const digits = nq.replace(/[\s\u00a0]/g, '');
@@ -18,6 +22,11 @@ export function searchItems(list, q, limit = 40) {
     const amt = x.amount === null || x.amount === undefined ? '' : String(Math.round(Number(x.amount) || 0));
     const hit = text.includes(nq) || (isNum && amt.includes(digits)) || x.date.includes(nq);
     if (hit) out.push(x);
+  }
+  if (today) {
+    const past = out.filter((x) => x.date.slice(0, 10) <= today).sort((a, b) => b.date.localeCompare(a.date));
+    const next = out.filter((x) => x.date.slice(0, 10) > today).sort((a, b) => a.date.localeCompare(b.date));
+    return [...past, ...next].slice(0, limit);
   }
   out.sort((a, b) => b.date.localeCompare(a.date));
   return out.slice(0, limit);

@@ -31,3 +31,14 @@ test('страница зарплаты для найденного', () => {
   assert.equal(paydayIndexFor('shift', workPeriod(p).end), 12);
   assert.equal(paydayIndexFor('shift', 'xx'), -1);
 });
+
+test('с today: сначала прошедшие (новые сверху), затем будущие (ближние сверху)', () => {
+  const l = [
+    { id: 1, date: '2026-10-01', title: 'ночь' },
+    { id: 2, date: '2027-01-01', title: 'ночь' },
+    { id: 3, date: '2026-10-28', title: 'ночь' },
+    { id: 4, date: '2026-11-02', title: 'ночь' },
+  ];
+  assert.deepEqual(searchItems(l, 'ночь', 40, '2026-10-28').map((x) => x.id), [3, 1, 4, 2]);
+  assert.deepEqual(searchItems(l, 'ночь', 2, '2026-10-28').map((x) => x.id), [3, 1]);
+});
