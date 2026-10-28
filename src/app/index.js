@@ -100,6 +100,7 @@ import { computeBoxes, fmtKg } from '../lib/boxes';
 import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
+import { repeatShiftDraft } from '../lib/repeatShift';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -3975,18 +3976,18 @@ export default function App() {
     setSheet('exp');
   }, []);
 
-  const openShift = useCallback((id) => {
+  const openShift = useCallback((id, draft) => {
     const st = stateRef.current;
     const s = id ? st.shifts.find((x) => x.id === id) : null;
     setEditId(id || null);
     setForm({
-      date: s ? s.date : newShiftDate(siRef.current),
+      date: s ? s.date : (draft && draft.date) || newShiftDate(siRef.current),
       amount: s && s.amount != null ? String(s.amount) : '',
-      title: s ? s.title : 'ночь касса',
+      title: s ? s.title : (draft && draft.title) || 'ночь касса',
       linked: isLinkedShift(s),
       shortage: s && adjOf(s) ? String(Math.abs(adjOf(s))) : '',
       surplus: !!s && adjOf(s) < 0,
-      place: (s && s.place) || '',
+      place: (s && s.place) || (draft && draft.place) || '',
     });
     setSheet('shift');
   }, []);
@@ -4609,6 +4610,7 @@ export default function App() {
     setImpClear(true);
     setSheet('shiftNotes');
   };
+  const repeatDraft = menuPage === 1 && si != null ? repeatShiftDraft(state.shifts, PAYDAYS[si], newShiftDate(si), todayIso()) : null;
   const shiftAddItems = [
     {
       icon: '+',
@@ -4619,6 +4621,19 @@ export default function App() {
         openShift(null);
       },
     },
+    ...(repeatDraft
+      ? [
+          {
+            icon: '↻',
+            title: 'Как прошлая смена',
+            sub: `${repeatDraft.title}${repeatDraft.place ? ` · ${repeatDraft.place}` : ''} · ${fmtShort(repeatDraft.date)}`,
+            onPress: () => {
+              setAddMenu(null);
+              openShift(null, repeatDraft);
+            },
+          },
+        ]
+      : []),
     {
       icon: '≡',
       title: 'Импорт из заметок',
