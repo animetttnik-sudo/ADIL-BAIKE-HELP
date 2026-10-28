@@ -99,6 +99,7 @@ import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEnt
 import { computeBoxes, fmtKg } from '../lib/boxes';
 import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
+import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -1053,7 +1054,7 @@ const AddMenu = memo(function AddMenu({ visible, anchor, items, accent, onClose 
 function Toast({ toast, onUndo, onHide }) {
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(onHide, 4000);
+    const t = setTimeout(onHide, toast.undo ? 6000 : 4000); // с «Отменить» — чуть дольше
     return () => clearTimeout(t);
   }, [toast, onHide]);
   if (!toast) return null;
@@ -1068,7 +1069,7 @@ function Toast({ toast, onUndo, onHide }) {
       <Glass style={styles.toast} intensity={60}>
         <Text style={styles.toastTxt} numberOfLines={1}>{toast.text}</Text>
         {toast.undo ? (
-          <Pressable hitSlop={10} onPress={onUndo}>
+          <Pressable hitSlop={12} onPress={onUndo} accessibilityRole="button" accessibilityLabel="Отменить">
             <Text style={styles.toastBtn}>Отменить</Text>
           </Pressable>
         ) : null}
@@ -4152,7 +4153,7 @@ export default function App() {
     const prev = toast?.undo;
     setToast(null);
     if (!prev) return;
-    patch((p) => undoCarry(p, prev));
+    patch((p) => (prev.kind ? restoreRemoved(p, prev) : undoCarry(p, prev)));
     Haptics.selectionAsync().catch(noop);
   }, [toast, patch]);
   // выбор в веере: 0 ✓, 1 → перенести, 2 без отметки
@@ -4172,14 +4173,21 @@ export default function App() {
 
   const confirmDeleteExpense = useCallback(
     (id) => {
+      const e = stateRef.current.expenses.find((x) => x.id === id);
+      if (!e) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
-      Alert.alert('Удалить расход?', '', [
+      const what = `${e.title || 'Без названия'} · ${fmtShort(e.date)} · ${money(Number(e.amount) || 0)} сом`;
+      Alert.alert('Удалить расход?', what, [
         { text: 'Отмена', style: 'cancel' },
         {
           text: 'Удалить',
           style: 'destructive',
-          onPress: () =>
-            patch((p) => ({ ...p, expenses: p.expenses.filter((x) => x.id !== id) })),
+          onPress: () => {
+            const { undo } = removeExpense(stateRef.current, id);
+            patch((p) => removeExpense(p, id).app);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
+            if (undo) setToast({ k: Date.now(), text: 'Расход удалён', undo });
+          },
         },
       ]);
     },
@@ -4213,17 +4221,18 @@ export default function App() {
         );
         return;
       }
-      Alert.alert('Убрать день?', '', [
+      const what = `${fmtShort(s.date)} · ${s.title || 'смена'}${s.amount != null && s.amount !== '' ? ` · ${money(Number(s.amount) || 0)} сом` : ''}`;
+      Alert.alert('Убрать день?', what, [
         { text: 'Отмена', style: 'cancel' },
         {
           text: 'Убрать',
           style: 'destructive',
-          onPress: () =>
-            patch((p) => ({
-              ...p,
-              shifts: p.shifts.filter((x) => x.id !== id),
-              removed: p.removed.includes(s.date) ? p.removed : [...p.removed, s.date],
-            })),
+          onPress: () => {
+            const { undo } = removeShift(stateRef.current, id);
+            patch((p) => removeShift(p, id).app);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
+            if (undo) setToast({ k: Date.now(), text: 'Смена убрана', undo });
+          },
         },
       ]);
     },
