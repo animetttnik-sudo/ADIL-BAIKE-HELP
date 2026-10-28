@@ -650,7 +650,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
               {eyebrow}
             </Text>
           ) : null}
-          <ScaleButton style={styles.hDateHit} onPress={show}>
+          <ScaleButton style={styles.hDateHit} hitSlop={4} onPress={show}>
             <Glass style={styles.hDatePill} intensity={40}>
               <Text style={styles.hDateTxt} numberOfLines={1} adjustsFontSizeToFit>
                 {fmtShort(value || iso(date))}
@@ -1305,7 +1305,7 @@ function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' })
  * ломает BlurView/GlassView на iOS). Небольшая задержка pressIn, чтобы кнопки
  * не сжимались, когда палец просто начинает скролл.
  */
-function ScaleButton({ onPress, style, children }) {
+function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) {
   const scale = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
@@ -1324,6 +1324,9 @@ function ScaleButton({ onPress, style, children }) {
         onPress?.();
       }}
       style={[style, anim]}
+      hitSlop={hitSlop}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
     >
       {children}
     </APressable>
@@ -2056,7 +2059,7 @@ const CountRow = memo(function CountRow({
           </Text>
         )}
       </Pressable>
-      <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, -1)}>
+      <ScaleButton style={styles.stepBtn} hitSlop={4} accessibilityLabel="Меньше" onPress={() => onStep(id, -1)}>
         <Text style={styles.stepTxt}>−</Text>
       </ScaleButton>
       <NumInput
@@ -2081,7 +2084,7 @@ const CountRow = memo(function CountRow({
         accessoryId={KB_NONE}
         style={[styles.cCount, styles.cCountTxt]}
       />
-      <ScaleButton style={styles.stepBtn} onPress={() => onStep(id, 1)}>
+      <ScaleButton style={styles.stepBtn} hitSlop={4} accessibilityLabel="Больше" onPress={() => onStep(id, 1)}>
         <Text style={styles.stepTxt}>+</Text>
       </ScaleButton>
     </View>
@@ -2254,7 +2257,9 @@ const CalcAdjRow = memo(function CalcAdjRow({ value, date, onChange, accent, reg
           ].map(([on, lab]) => (
             <Pressable
               key={lab}
-              hitSlop={4}
+              hitSlop={{ top: 5, bottom: 5, left: 3, right: 3 }}
+              accessibilityRole="button"
+              accessibilityState={{ selected: plus === on }}
               accessibilityLabel={on ? 'Излишек' : 'Недостача'}
               style={[styles.adjMiniBtn, plus === on && styles.adjBtnMinus]}
               onPress={() => {
@@ -4942,7 +4947,7 @@ export default function App() {
           </Text>
         )}
         {pv.lines.length > 0 && (
-          <Pressable onPress={() => setImpAll((v) => !v)} hitSlop={8}>
+          <Pressable onPress={() => setImpAll((v) => !v)} hitSlop={12}>
             <Text style={[styles.link, styles.showAll, { color: accent }]}>
               {impAll ? 'Скрыть строки' : `Все строки (${pv.lines.length})`}
             </Text>
@@ -4997,7 +5002,9 @@ export default function App() {
             ]).map(([on, lab]) => (
               <Pressable
                 key={lab}
-                hitSlop={6}
+                hitSlop={{ top: 9, bottom: 9, left: 4, right: 4 }}
+                accessibilityRole="button"
+                accessibilityState={{ selected: plus === on }}
                 style={[styles.adjBtn, plus === on && styles.adjBtnMinus]}
                 onPress={() => {
                   Haptics.selectionAsync().catch(noop);
@@ -5143,7 +5150,7 @@ export default function App() {
           </ItemCard>
         )}
         {!impClear && (
-          <Pressable onPress={() => setImpClear(true)} hitSlop={8}>
+          <Pressable onPress={() => setImpClear(true)} hitSlop={12}>
             <Text style={[styles.link, styles.showAll, { color: accent }]}>Убирать пустые дни, которых нет в заметке</Text>
           </Pressable>
         )}
@@ -5217,7 +5224,7 @@ export default function App() {
           title: 'Депонирование',
           onClose: closeSheet,
           right: (
-            <Pressable onPress={saveCarry} hitSlop={10}>
+            <Pressable onPress={saveCarry} hitSlop={12}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
@@ -5251,7 +5258,7 @@ export default function App() {
             onClose: closeSheet,
             body: (
               <>
-                <Pressable hitSlop={8} onPress={() => setShNotes((x) => ({ ...x, parsed: null }))}>
+                <Pressable hitSlop={12} onPress={() => setShNotes((x) => ({ ...x, parsed: null }))}>
                   <Text style={[styles.link, styles.notesBack, { color: accent }]}>‹ Изменить текст</Text>
                 </Pressable>
                 {shiftImportBody(P)}
@@ -5404,7 +5411,7 @@ export default function App() {
           title: editId ? 'Расход' : 'Новый расход',
           onClose: closeSheet,
           right: (
-            <Pressable onPress={saveExpense} hitSlop={10}>
+            <Pressable onPress={saveExpense} hitSlop={12}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
@@ -5465,7 +5472,7 @@ export default function App() {
             title: 'Смена из расчёта',
             onClose: closeSheet,
             right: (
-              <Pressable onPress={saveShortage} hitSlop={10}>
+              <Pressable onPress={saveShortage} hitSlop={12}>
                 <Text style={[styles.link, { color: accent }]}>Готово</Text>
               </Pressable>
             ),
@@ -5528,7 +5535,7 @@ export default function App() {
           title: editId ? 'Смена' : 'Новая смена',
           onClose: closeSheet,
           right: (
-            <Pressable onPress={saveShift} hitSlop={10}>
+            <Pressable onPress={saveShift} hitSlop={12}>
               <Text style={[styles.link, { color: accent }]}>Готово</Text>
             </Pressable>
           ),
