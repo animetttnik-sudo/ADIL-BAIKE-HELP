@@ -98,6 +98,7 @@ import {
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
 import { monthAvg, monthStats } from '../lib/analysis';
+import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -3379,6 +3380,7 @@ export default function App() {
   const [shNotes, setShNotes] = useState({ text: '', parsed: null }); // импорт смен: текст и разбор
   const [impClear, setImpClear] = useState(true); // импорт смен: убрать пустые заготовки
   const [toast, setToast] = useState(null); // { k, text, undo }
+
   // Расходы: показанная зарплата (индекс в PAYDAYS) + shared values пейджера
   const [pi, setPi] = useState(null);
   const pagePos = useSharedValue(0);
@@ -3398,6 +3400,33 @@ export default function App() {
 
   // ── Расчёт: отдельный ключ zp_calc_v1, zp_app_v1 не трогаем
   const [calc, setCalc] = useState(null);
+  // запись в хранилище: по очереди, с повтором, без битого состояния (src/lib/persist.js)
+  // сбой записи: одно короткое сообщение (не чаще раза в 20 с); незаписанное повторится само
+  const [onSaveErr] = useState(() => {
+    let at = 0;
+    return (why) => {
+      const now = Date.now();
+      if (now - at < 20000) return;
+      at = now;
+      setToast({ k: now, text: why === 'invalid' ? 'Не сохранено: данные выглядят повреждёнными' : 'Не сохранилось — повторю позже' });
+    };
+  });
+  const [appWriter] = useState(() =>
+    createWriter({
+      setItem: (k, v) => AsyncStorage.setItem(k, v),
+      key: KEY,
+      validate: validAppState,
+      onError: onSaveErr,
+    })
+  );
+  const [calcWriter] = useState(() =>
+    createWriter({
+      setItem: (k, v) => AsyncStorage.setItem(k, v),
+      key: CALC_KEY,
+      validate: validCalcState,
+      onError: onSaveErr,
+    })
+  );
   const calcRef = useRef(null);
   calcRef.current = calc;
   const [calcDate, setCalcDateRaw] = useState(todayIso);
@@ -3419,8 +3448,9 @@ export default function App() {
     calcTimer.current = null;
     const data = calcPending.current;
     calcPending.current = null;
-    if (data) AsyncStorage.setItem(CALC_KEY, JSON.stringify(data)).catch(() => {});
-  }, []);
+    if (data) calcWriter.write(data);
+    else calcWriter.flush();
+  }, [calcWriter]);
   const patchCalc = useCallback(
     (fn) => {
       setCalc((prev) => {
@@ -3439,13 +3469,16 @@ export default function App() {
   );
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
-      if (s !== 'active') flushCalc();
+      if (s !== 'active') {
+        flushCalc();
+        appWriter.flush();
+      } else if (appWriter.hasPending) appWriter.flush(); // вернулись — дописать, что не записалось
     });
     return () => {
       sub.remove();
       flushCalc();
     };
-  }, [flushCalc]);
+  }, [flushCalc, appWriter]);
 
   /** Изменить расчёт текущей даты (prefs — запомнить роль/смену по умолчанию). */
   const patchDay = useCallback(
@@ -3636,6 +3669,7 @@ export default function App() {
   );
 
 
+  const loadAllRef = useRef(null);
   // загрузка всех данных из AsyncStorage в память (при старте и после «Вставить данные»)
   const loadAll = useCallback(async () => {
     {
@@ -3678,16 +3712,39 @@ export default function App() {
       shiftCur.value = s0;
       let calcLoaded;
       let rawC = null;
+      let calcReadFailed = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          rawC = await AsyncStorage.getItem(CALC_KEY);
+          calcReadFailed = false;
+          break;
+        } catch {
+          calcReadFailed = true;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
       try {
-        rawC = await AsyncStorage.getItem(CALC_KEY);
         calcLoaded = normalizeCalc(rawC ? JSON.parse(rawC) : null);
       } catch {
         calcLoaded = normalizeCalc(null);
         if (rawC) await AsyncStorage.setItem(brokenKey(CALC_KEY), rawC).catch(() => {});
       }
+      // не прочиталось — ничего не пишем поверх (до успешного чтения)
+      appWriter.block(readFailed);
+      calcWriter.block(calcReadFailed);
+      if (readFailed || calcReadFailed) {
+        Alert.alert(
+          'Данные не прочитались',
+          'Похоже, временный сбой памяти телефона. Чтобы не затереть сохранённое, изменения пока не записываются.',
+          [
+            { text: 'Позже', style: 'cancel' },
+            { text: 'Повторить', onPress: () => loadAllRef.current && loadAllRef.current() },
+          ]
+        );
+      }
       // сразу связываем расчёт со сменами (и узнаём смены от старой кнопки)
       const linked = syncCalcShifts(seeded, calcLoaded, paydayForDate, uid);
-      if (linked !== loaded && !readFailed) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
+      if (linked !== loaded && !readFailed) appWriter.write(linked);
       setCalc(calcLoaded);
       setPi(p0);
       setSi(s0);
@@ -3696,16 +3753,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
+    loadAllRef.current = loadAll;
     loadAll();
   }, [loadAll]);
 
   const patch = useCallback((fn) => {
     setState((prev) => {
       const next = typeof fn === 'function' ? fn(prev) : fn;
-      if (next !== prev) AsyncStorage.setItem(KEY, JSON.stringify(next)).catch(() => {});
+      if (next !== prev && next) appWriter.write(next);
       return next;
     });
-  }, []);
+  }, [appWriter]);
 
   const stateRef = useRef(null);
   stateRef.current = state;
@@ -3953,6 +4011,7 @@ export default function App() {
   const copyBackup = useCallback(async () => {
     try {
       // несохранённые +/− расчёта — сначала на диск
+      await appWriter.flush();
       if (calcTimer.current) clearTimeout(calcTimer.current);
       calcTimer.current = null;
       const pend = calcPending.current;
@@ -3975,7 +4034,7 @@ export default function App() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
       Alert.alert('Не получилось скопировать', String(err?.message || err));
     }
-  }, []);
+  }, [appWriter]);
   // копия перед последней вставкой (для «Вернуть как было»): { summary, createdAt } или null
   const [prePaste, setPrePaste] = useState(null);
   useEffect(() => {
@@ -3993,12 +4052,15 @@ export default function App() {
       if (calcTimer.current) clearTimeout(calcTimer.current);
       calcTimer.current = null;
       calcPending.current = null;
+      // незаписанное старое состояние не должно лечь поверх вставленного
+      await appWriter.flush();
+      await calcWriter.flush();
       const { set, remove } = restorePlan(data, await AsyncStorage.getAllKeys());
       await AsyncStorage.multiSet(set);
       if (remove.length) await AsyncStorage.multiRemove(remove);
       await loadAll(); // перечитать в память — без перезапуска
     },
-    [loadAll]
+    [loadAll, appWriter, calcWriter]
   );
   const undoPaste = useCallback(async () => {
     let r;
@@ -4066,6 +4128,7 @@ export default function App() {
               // сначала — копия того, что есть сейчас (чтобы вставку можно было отменить)
               const pend = calcPending.current;
               if (pend) await AsyncStorage.setItem(CALC_KEY, JSON.stringify(pend));
+              await appWriter.flush();
               const keys = appKeys(await AsyncStorage.getAllKeys());
               const entries = keys.length ? await AsyncStorage.multiGet(keys) : [];
               const before = makeBackup(entries);
@@ -4084,7 +4147,7 @@ export default function App() {
         },
       ]
     );
-  }, [applyBackupData, closeThen]);
+  }, [applyBackupData, closeThen, appWriter]);
   const undoToast = useCallback(() => {
     const prev = toast?.undo;
     setToast(null);
