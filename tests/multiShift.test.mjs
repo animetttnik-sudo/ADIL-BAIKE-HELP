@@ -181,3 +181,23 @@ test('экспорт зарплаты: обе смены дня, итог дня
   assert.ok(html.includes('За день · 2 смены'));
   assert.ok(html.includes('смена 2'));
 });
+
+test('экспорт: дата выдачи в отчёте и имени файла, печать — своя, включается/выключается', async () => {
+  const { exportFileName, stampSvg, stampSpec, dotDate, STAMP_APP } = await import('../src/lib/payExport.js');
+  const st = base([{ id: 'q', date: D, title: 'ночь касса', amount: 1500, payday: P }]);
+  const r = payReport(st, P, calcOf({}));
+  assert.equal(r.payout, dotDate(P));
+  assert.match(r.payout, /^\d\d\.\d\d\.\d{4}$/);
+  assert.match(r.periodDates, /^\d\d\.\d\d\.\d{4} – \d\d\.\d\d\.\d{4}$/);
+  assert.equal(exportFileName(r, 'pdf'), `Зарплата_${r.payout}.pdf`);
+  assert.equal(exportFileName(r, 'jpg', true), `Zarplata_${r.payout}.jpg`);
+  const html = reportHtml(r);
+  assert.ok(html.includes(`Дата выдачи: <b>${r.payout}</b>`));
+  assert.ok(html.includes(r.periodDates));
+  assert.ok(html.includes('<svg') && html.includes('РАСЧЁТ ЗАРПЛАТЫ') && html.includes(STAMP_APP));
+  assert.ok(!reportHtml(r, '#30d158', { stamp: false }).includes('<svg'));
+  const k = stampSpec(r);
+  assert.equal(k.rotate, -8);
+  assert.equal(k.date, r.payout);
+  assert.ok(stampSvg(r).includes('rotate(-8deg)'));
+});

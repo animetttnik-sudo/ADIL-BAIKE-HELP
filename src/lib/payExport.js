@@ -62,6 +62,9 @@ export function payReport(state, p, calc) {
     payday: p,
     title: `Зарплата ${fmtShort(p)} ${p.slice(0, 4)}`,
     period: `смены ${fmtShort(per.start)} – ${fmtShort(per.end)}`,
+    // дата выдачи зарплаты — это сам ключ зарплаты (payday) в данных приложения
+    payout: dotDate(p),
+    periodDates: `${dotDate(per.start)} – ${dotDate(per.end)}`,
     count: t.count,
     rows,
     lines,
@@ -71,11 +74,72 @@ export function payReport(state, p, calc) {
   };
 }
 
+/** «2026-10-15» → «15.10.2026». */
+export function dotDate(iso) {
+  const [y, m, d] = String(iso || '').split('-');
+  return y && m && d ? `${d}.${m}.${y}` : String(iso || '');
+}
+
+/** Имя файла: «Зарплата_15.10.2026.pdf»; latin — запасной вариант «Zarplata_15.10.2026.pdf». */
+export function exportFileName(r, ext, latin = false) {
+  const date = String(r.payout || dotDate(r.payday)).replace(/[^0-9.]/g, '');
+  return `${latin ? 'Zarplata' : 'Зарплата'}_${date}.${ext}`;
+}
+
+/** Название приложения на печати (app.json → expo.name). */
+export const STAMP_APP = 'ADIL BAIKE HELP PLEASE';
+/** Цвет «чернил» печати — полупрозрачный синий (на белом PDF и светлее — на тёмной карточке фото). */
+export const STAMP_INK = 'rgba(28,86,196,0.72)';
+export const STAMP_INK_DARK = 'rgba(96,156,255,0.78)';
+
+/**
+ * Геометрия собственной печати приложения (не имитирует ничью официальную печать):
+ * двойное кольцо, по кругу — название приложения и «РАСЧЁТ ЗАРПЛАТЫ», в центре — звезда и дата выдачи.
+ * Общая для PDF (SVG-строка) и фото (react-native-svg).
+ */
+export function stampSpec(r, size = 150, ink = STAMP_INK) {
+  const c = size / 2;
+  const tr = size * 0.355; // радиус строки текста по кругу
+  return {
+    size,
+    c,
+    rings: [
+      { r: size * 0.47, w: 3 },
+      { r: size * 0.41, w: 1 },
+      { r: size * 0.25, w: 1 },
+    ],
+    path: `M ${c} ${c} m -${tr} 0 a ${tr} ${tr} 0 1 1 ${2 * tr} 0 a ${tr} ${tr} 0 1 1 -${2 * tr} 0`,
+    ring: `${STAMP_APP} ★ РАСЧЁТ ЗАРПЛАТЫ ★`,
+    ringFont: size * 0.072,
+    star: '★',
+    starFont: size * 0.16,
+    date: r.payout || dotDate(r.payday),
+    dateFont: size * 0.075,
+    rotate: -8,
+    ink,
+  };
+}
+
+export function stampSvg(r, size = 150) {
+  const k = stampSpec(r, size);
+  const rings = k.rings
+    .map((g) => `<circle cx="${k.c}" cy="${k.c}" r="${g.r}" fill="none" stroke="${k.ink}" stroke-width="${g.w}"/>`)
+    .join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${k.size}" height="${k.size}" viewBox="0 0 ${k.size} ${k.size}" style="transform: rotate(${k.rotate}deg)">
+  <defs><path id="stampRing" d="${k.path}"/></defs>${rings}
+  <text fill="${k.ink}" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="${k.ringFont}" font-weight="700" letter-spacing="1">
+    <textPath href="#stampRing" xlink:href="#stampRing" startOffset="0">${esc(k.ring)}</textPath></text>
+  <text x="${k.c}" y="${k.c - k.size * 0.01}" text-anchor="middle" fill="${k.ink}" font-size="${k.starFont}">${k.star}</text>
+  <text x="${k.c}" y="${k.c + k.size * 0.12}" text-anchor="middle" fill="${k.ink}" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="${k.dateFont}" font-weight="700">${esc(k.date)}</text>
+</svg>`;
+}
+
 const esc = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 /** HTML для expo-print (A4, тёмный акцент как в приложении, но на белом — для печати). */
-export function reportHtml(r, accent = '#30d158') {
+export function reportHtml(r, accent = '#30d158', opts = {}) {
+  const stamp = opts.stamp !== false;
   const rows = r.rows
     .map(
       (x) => `
@@ -103,12 +167,16 @@ export function reportHtml(r, accent = '#30d158') {
   .tot { margin-top: 18px; } .net { margin-top: 14px; padding: 14px 16px; border-radius: 14px; background: #f4f6f4; border: 2px solid ${esc(accent)};
     display: flex; justify-content: space-between; font-size: 20px; font-weight: 700; }
   .foot { color: #999; font-size: 11px; margin-top: 18px; }
+  .pay { color: #333; font-size: 14px; margin: -10px 0 16px; }
+  .stamp { display: flex; justify-content: flex-end; margin: 8px 24px 0 0; }
 </style></head><body>
   <h1>${esc(r.title)}</h1>
   <div class="sub">${esc(r.period)} · ${esc(r.count)} ${esc(plural(r.count))}</div>
+  <div class="pay">Период: ${esc(r.periodDates)} · Дата выдачи: <b>${esc(r.payout)}</b></div>
   <table>${rows}</table>
   <table class="tot">${lines}</table>
   <div class="net"><span>К выплате</span><span>${esc(r.net)}</span></div>
+  ${stamp ? `<div class="stamp">${stampSvg(r)}</div>` : ''}
   ${r.surplus ? `<div class="foot">Излишек ${esc(r.surplus)} — не в зарплату.</div>` : ''}
   <div class="foot">ADIL BAIKE HELP · «Смены»</div>
 </body></html>`;

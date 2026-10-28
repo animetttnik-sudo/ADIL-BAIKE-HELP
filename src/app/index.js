@@ -33,6 +33,7 @@ import {
     Platform,
     Pressable,
     StyleSheet,
+    Switch,
     Text,
     TextInput,
     View,
@@ -99,8 +100,14 @@ import {
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
-import { payReport, reportHtml } from '../lib/payExport';
+import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
+import { File, Paths } from 'expo-file-system';
+import Svg, { Circle, Defs, Path as SvgPath, Text as SvgText, TextPath } from 'react-native-svg';
 import { liquidShape } from '../lib/liquid';
+import { GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
+
+/** Корневой View экрана — его снимок преломляет капля дока (Skia). */
+const SNAP_ROOT = { current: null };
 import { appKeys, fmtSummary, makeBackup, parseBackup, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
@@ -1337,6 +1344,33 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const vel = useSharedValue(0);
   const lastPos = useSharedValue(value);
   const lastT = useSharedValue(0);
+  // настоящее преломление (Skia): снимок экрана при касании + положение дока на экране
+  const realLens = isLiquid && glassLensAvailable;
+  const hostRef = useRef(null);
+  const hostX = useSharedValue(0);
+  const hostY = useSharedValue(0);
+  const [lensImg, setLensImg] = useState(null);
+  const [segWJs, setSegWJs] = useState(0);
+  const snapBusy = useRef(false);
+  const takeSnap = useCallback(() => {
+    if (!realLens || snapBusy.current) return;
+    snapBusy.current = true;
+    try {
+      hostRef.current?.measureInWindow?.((x, y) => {
+        hostX.value = x;
+        hostY.value = y;
+      });
+    } catch {
+      // нет замера — останется прежний
+    }
+    snapshotView(SNAP_ROOT)
+      .then((img) => {
+        if (img) setLensImg(img);
+      })
+      .finally(() => {
+        snapBusy.current = false;
+      });
+  }, [realLens, hostX, hostY]);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -1374,6 +1408,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .maxDuration(5000)
       .onBegin(() => {
         try {
+          if (realLens) scheduleOnRN(takeSnap);
           press.value = withTiming(1, { duration: 90 });
           // удержание (дольше 160 мс) — плашка «разжижается»
           if (isLiquid) liquid.value = withDelay(160, withSpring(1, liquidOnSpring));
@@ -1403,6 +1438,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onBegin(() => {
         try {
           drag0.value = pos.value;
+          if (realLens) scheduleOnRN(takeSnap);
         } catch (err) {
           wErr(err);
         }
@@ -1443,7 +1479,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         }
       });
     return Gesture.Race(pan, tap);
-  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel]);
+  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel, realLens, takeSnap]);
 
   // скорость плашки и при пружине после отпускания (сегментов/с) — для растяжения по ходу
   useAnimatedReaction(
@@ -1506,6 +1542,25 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     };
   });
 
+  // холст преломления: фиксированного размера (больше самой большой капли), центр — в центре капли
+  const lensW = Math.ceil(segWJs * 1.18 * 1.35) + 8;
+  const lensH = Math.ceil(h0 * 1.55) + 8;
+  const lensGeo = useCallback(() => {
+    'worklet';
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    return {
+      w: segW.value * sh.rx,
+      h: h0 * sh.ry,
+      cx: hostX.value + 5 + pos.value * segW.value + segW.value / 2,
+      cy: hostY.value + 5 + h0 / 2,
+      on: Math.min(1, Math.max(0, liquid.value)),
+    };
+  }, [liquid, pos, vel, segW, hostX, hostY, h0]);
+  const lensPos = useAnimatedStyle(() => {
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    return { left: (segW.value * sh.rx - lensW) / 2, top: (h0 * sh.ry - lensH) / 2 };
+  });
+
   const Wrap = glass ? Glass : View;
   const capsule = (
     <Wrap
@@ -1519,6 +1574,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
           onLayout={(e) => {
             const w = e.nativeEvent.layout.width;
             segW.value = (w - 10) / n;
+            if (isLiquid) setSegWJs((w - 10) / n);
             if (!measured) setMeasured(true);
           }}
         >
@@ -1540,12 +1596,18 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   );
   if (!isLiquid) return capsule;
   return (
-    <View style={styles.lqHost}>
+    <View style={styles.lqHost} ref={hostRef} collapsable={false}>
       {capsule}
       {/* капля — отдельный слой над панелью (панель её не обрезает), с тенью под собой */}
       {measured ? (
         <Animated.View pointerEvents="none" style={[styles.lqDrop, { top: 5, left: 5, height: h0 }, drop]}>
           <Animated.View style={[styles.lqClip, dropRad]}>
+            {/* настоящее преломление снимка экрана (Skia); без Skia — прозрачная приближённая линза */}
+            {realLens && lensImg ? (
+              <Animated.View style={[styles.lqCanvas, lensPos]}>
+                <GlassLens image={lensImg} cw={lensW} ch={lensH} geo={lensGeo} />
+              </Animated.View>
+            ) : null}
             {/* прозрачная линза: без размытия и заливки — видно всё, что под каплей */}
             <View style={styles.lqDropFill} />
             <View style={[styles.lqHi, styles.lqHiTop1]} />
@@ -2873,12 +2935,43 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
 });
 
 /** Карточка закрытой зарплаты для «Фото» (снимок этого View) — тот же текст, что в PDF. */
-const ExportCard = function ExportCard({ r, accent, viewRef }) {
+/** Собственная печать приложения (как на чеке): кольца, название приложения по кругу, звезда, дата выдачи. */
+function Stamp({ r, size = 132 }) {
+  const k = stampSpec(r, size, STAMP_INK_DARK);
+  return (
+    <View style={[styles.expStamp, { transform: [{ rotate: `${k.rotate}deg` }] }]} pointerEvents="none">
+      <Svg width={k.size} height={k.size} viewBox={`0 0 ${k.size} ${k.size}`}>
+        <Defs>
+          <SvgPath id="stampRing" d={k.path} />
+        </Defs>
+        {k.rings.map((g) => (
+          <Circle key={g.r} cx={k.c} cy={k.c} r={g.r} fill="none" stroke={k.ink} strokeWidth={g.w} />
+        ))}
+        <SvgText fill={k.ink} fontSize={k.ringFont} fontWeight="700" letterSpacing={1}>
+          <TextPath href="#stampRing" startOffset="0">
+            {k.ring}
+          </TextPath>
+        </SvgText>
+        <SvgText x={k.c} y={k.c - k.size * 0.01} textAnchor="middle" fill={k.ink} fontSize={k.starFont}>
+          {k.star}
+        </SvgText>
+        <SvgText x={k.c} y={k.c + k.size * 0.12} textAnchor="middle" fill={k.ink} fontSize={k.dateFont} fontWeight="700">
+          {k.date}
+        </SvgText>
+      </Svg>
+    </View>
+  );
+}
+
+const ExportCard = function ExportCard({ r, accent, viewRef, stamp = true }) {
   return (
     <View ref={viewRef} collapsable={false} style={styles.expCard}>
       <Text style={styles.expTitle}>{r.title}</Text>
       <Text style={styles.expSub}>
         {r.period} · {r.count} {plural(r.count, 'смена', 'смены', 'смен')}
+      </Text>
+      <Text style={styles.expPay}>
+        Период: {r.periodDates} · Дата выдачи: <Text style={styles.expPayB}>{r.payout}</Text>
       </Text>
       {r.rows.map((x) => (
         <View key={x.id}>
@@ -2918,6 +3011,7 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
         <Text style={[styles.expNetV, { color: r.netValue < 0 ? '#ff453a' : accent }]}>{r.net}</Text>
       </View>
       {r.surplus ? <Text style={styles.expM}>Излишек {r.surplus} — не в зарплату.</Text> : null}
+      {stamp ? <Stamp r={r} /> : null}
     </View>
   );
 };
@@ -3890,26 +3984,54 @@ export default function App() {
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
   // ── Экспорт зарплаты: PDF (expo-print) / Фото (снимок карточки) → системное «Поделиться / Сохранить»
   const [exportP, setExportP] = useState(null);
+  const [exportStamp, setExportStamp] = useState(true); // «Печать» на PDF/фото, по умолчанию — да
+  const exportStampRef = useRef(true);
+  exportStampRef.current = exportStamp;
   const exportRef = useRef(null);
   const openExportMenu = useCallback((p) => {
     Haptics.selectionAsync();
     setExportP(p);
     setSheet('export');
   }, []);
-  const shareFile = useCallback(async (uri, mimeType, UTI) => {
-    if (!(await Sharing.isAvailableAsync())) {
-      Alert.alert('Не получилось', 'На этом устройстве нельзя поделиться файлом.');
-      return;
-    }
-    await Sharing.shareAsync(uri, { mimeType, UTI, dialogTitle: 'Сохранить зарплату' });
+  /** Копия временного файла под понятным именем («Зарплата_15.10.2026.pdf»), латиницей — если кириллица не прошла. */
+  const namedCopy = useCallback((uri, r, ext, latin) => {
+    const src = new File(uri);
+    const dest = new File(Paths.cache, exportFileName(r, ext, latin));
+    if (dest.exists) dest.delete();
+    src.copySync(dest);
+    return dest.uri;
   }, []);
+  const shareFile = useCallback(
+    async (uri, mimeType, UTI, r, ext) => {
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('Не получилось', 'На этом устройстве нельзя поделиться файлом.');
+        return;
+      }
+      const opts = { mimeType, UTI, dialogTitle: 'Сохранить зарплату' };
+      let named = null;
+      try {
+        named = namedCopy(uri, r, ext, false);
+        await Sharing.shareAsync(named, opts);
+        return;
+      } catch {
+        // кириллица в имени не прошла — латиница, а в крайнем случае исходный временный файл
+      }
+      try {
+        named = namedCopy(uri, r, ext, true);
+      } catch {
+        named = uri;
+      }
+      await Sharing.shareAsync(named, opts);
+    },
+    [namedCopy]
+  );
   const exportPdf = useCallback(
     (p) => {
       const r = payReport(stateRef.current, p, calcRef.current);
       closeThen(async () => {
         try {
-          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current) });
-          await shareFile(uri, 'application/pdf', 'com.adobe.pdf');
+          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current, { stamp: exportStampRef.current }) });
+          await shareFile(uri, 'application/pdf', 'com.adobe.pdf', r, 'pdf');
         } catch (e) {
           Alert.alert('PDF не сохранён', String(e?.message || e));
         }
@@ -3917,10 +4039,13 @@ export default function App() {
     },
     [closeThen, shareFile]
   );
-  const exportPhoto = useCallback(async () => {
+  const exportPhoto = useCallback(async (p) => {
     try {
-      const uri = await captureRef(exportRef, { format: 'png', quality: 1, result: 'tmpfile' });
-      closeThen(() => shareFile(uri, 'image/png', 'public.png').catch((e) => Alert.alert('Фото не сохранено', String(e?.message || e))));
+      const r = payReport(stateRef.current, p, calcRef.current);
+      const uri = await captureRef(exportRef, { format: 'jpg', quality: 0.95, result: 'tmpfile' });
+      closeThen(() =>
+        shareFile(uri, 'image/jpeg', 'public.jpeg', r, 'jpg').catch((e) => Alert.alert('Фото не сохранено', String(e?.message || e)))
+      );
     } catch (e) {
       Alert.alert('Фото не сохранено', String(e?.message || e));
     }
@@ -4816,19 +4941,25 @@ export default function App() {
           onClose: closeSheet,
           body: (
             <>
-              <ExportCard r={r} accent={accent} viewRef={exportRef} />
+              <ExportCard r={r} accent={accent} viewRef={exportRef} stamp={exportStamp} />
+              <View style={styles.expToggle}>
+                <Text style={styles.expToggleT}>Печать</Text>
+                <Switch value={exportStamp} onValueChange={setExportStamp} />
+              </View>
               <View style={styles.calcBtns}>
                 <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPdf(exportP)}>
                   <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
                 </ScaleButton>
-                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={exportPhoto}>
+                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPhoto(exportP)}>
                   <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
                 </ScaleButton>
               </View>
               <ScaleButton style={styles.actBtn} onPress={closeSheet}>
                 <Text style={styles.actBtnTxt}>Отмена</Text>
               </ScaleButton>
-              <Text style={styles.hint}>Откроется «Поделиться»: «Сохранить в Файлы», «Сохранить изображение» или отправить.</Text>
+              <Text style={styles.hint}>
+                Файл: {exportFileName(r, 'pdf')} / .jpg. Откроется «Поделиться»: «Сохранить в Файлы», «Сохранить изображение» или отправить.
+              </Text>
             </>
           ),
         };
@@ -5706,7 +5837,7 @@ export default function App() {
   };
 
   const content = (
-    <View style={styles.root}>
+    <View style={styles.root} ref={SNAP_ROOT} collapsable={false}>
       <StatusBar style="light" />
       {state.custom?.bg ? (
         <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -6379,6 +6510,7 @@ const styles = StyleSheet.create({
   lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
   // мягкий верхний блик на всю ширину; форму даёт обрезка lqClip (без своих скруглений)
   lqHost: { zIndex: 5, overflow: 'visible' },
+  lqCanvas: { position: 'absolute' },
   lqDrop: {
     position: 'absolute',
     zIndex: 10,
@@ -6740,6 +6872,12 @@ const styles = StyleSheet.create({
   expDay: { color: 'rgba(235,235,245,0.7)', fontSize: 13, width: 78 },
   expT: { color: '#fff', fontSize: 14, fontWeight: '600' },
   expM: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 1 },
+  expPay: { color: 'rgba(235,235,245,0.8)', fontSize: 13, marginBottom: 10 },
+  expPayB: { color: '#fff', fontWeight: '700' },
+  // печать — в правом нижнем углу карточки, поверх итога (как на чеке)
+  expStamp: { alignSelf: 'flex-end', marginTop: -44, marginRight: 6, opacity: 0.95 },
+  expToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, marginBottom: 6 },
+  expToggleT: { color: '#fff', fontSize: 16, fontWeight: '600' },
   expA: { color: '#fff', fontSize: 14, fontWeight: '700' },
   expLine: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
   expNet: {
