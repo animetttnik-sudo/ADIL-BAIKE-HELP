@@ -1485,7 +1485,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       height: h,
       borderRadius: h / 2,
       opacity: on,
-      shadowOpacity: 0.45 * on,
+      shadowOpacity: 0.3 * on,
       transform: [{ translateX: pos.value * segW.value - (w - segW.value) / 2 }, { translateY: -(h - h0) / 2 }],
     };
   });
@@ -1546,9 +1546,11 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       {measured ? (
         <Animated.View pointerEvents="none" style={[styles.lqDrop, { top: 5, left: 5, height: h0 }, drop]}>
           <Animated.View style={[styles.lqClip, dropRad]}>
-            <BlurView intensity={22} tint="dark" style={StyleSheet.absoluteFill} />
+            {/* прозрачная линза: без размытия и заливки — видно всё, что под каплей */}
             <View style={styles.lqDropFill} />
-            <View style={styles.lqShine} />
+            <View style={[styles.lqHi, styles.lqHiTop1]} />
+            <View style={[styles.lqHi, styles.lqHiTop2]} />
+            <View style={[styles.lqHi, styles.lqHiBot]} />
             <Animated.View style={[styles.lqDropLabels, { height: h0 }, dropLabels]}>
               {labels.map((lab, i) => (
                 <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} />
@@ -6376,18 +6378,22 @@ const styles = StyleSheet.create({
   lqFringeR: { borderColor: 'rgba(255,70,90,0.45)', transform: [{ translateX: -1.2 }] },
   lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
   // мягкий верхний блик на всю ширину; форму даёт обрезка lqClip (без своих скруглений)
-  lqShine: { position: 'absolute', top: 0, left: 0, right: 0, height: '38%', backgroundColor: 'rgba(255,255,255,0.07)' },
   lqHost: { zIndex: 5, overflow: 'visible' },
   lqDrop: {
     position: 'absolute',
     zIndex: 10,
-    backgroundColor: 'rgba(28,28,32,0.35)',
+    // без сплошного фона: тень (iOS) строится по кромке, капля остаётся прозрачной
+    backgroundColor: 'transparent',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowRadius: 14,
-    elevation: 12,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 10,
   },
-  lqDropFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.10)' },
+  lqDropFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.05)' },
+  // мягкие блики: сверху два слабых слоя (плавный край), снизу — отражение
+  lqHi: { position: 'absolute', left: 0, right: 0 },
+  lqHiTop1: { top: 0, height: '30%', backgroundColor: 'rgba(255,255,255,0.05)' },
+  lqHiTop2: { top: 0, height: '16%', backgroundColor: 'rgba(255,255,255,0.05)' },
+  lqHiBot: { bottom: 0, height: '14%', backgroundColor: 'rgba(255,255,255,0.04)' },
   // подписи-линза по центру капли, размер — как у плашки в панели
   lqDropLabels: { position: 'absolute' },
   lqOutline: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 0.6, borderColor: 'rgba(0,0,0,0.55)' },
