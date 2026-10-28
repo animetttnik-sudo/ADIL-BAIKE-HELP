@@ -15,10 +15,17 @@ export function repeatShiftDraft(shifts, payday, fallbackDate, today) {
   const src = pool.reduce((a, b) => (b.date >= a.date ? b : a));
   const per = workPeriod(payday);
   const taken = new Set((shifts || []).filter((s) => s && typeof s.date === 'string').map((s) => s.date));
-  const inPer = list.filter((s) => s.date >= per.start && s.date <= per.end).map((s) => s.date).sort();
+  // последняя смена периода — любая (и из расчёта), чтобы не предлагать уже занятый день
+  const inPer = [...taken].filter((d) => d >= per.start && d <= per.end).sort();
   let date = fallbackDate;
   if (inPer.length) {
     let d = addDays(inPer[inPer.length - 1], 1);
+    while (d <= per.end && taken.has(d)) d = addDays(d, 1);
+    if (d <= per.end) date = d;
+  }
+  // запасная дата занята — первый свободный день периода (если есть)
+  if (taken.has(date)) {
+    let d = per.start;
     while (d <= per.end && taken.has(d)) d = addDays(d, 1);
     if (d <= per.end) date = d;
   }
