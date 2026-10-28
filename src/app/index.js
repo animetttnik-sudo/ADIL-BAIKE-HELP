@@ -102,6 +102,7 @@ import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
 import { repeatShiftDraft } from '../lib/repeatShift';
 import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/listView';
+import { paydayIndexFor, searchItems } from '../lib/search';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -3481,6 +3482,7 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
   const [addMenu, setAddMenu] = useState(null); // { x, y, w, h } кнопки «+» — меню открыто
+  const [find, setFind] = useState({ q: '', kind: 'expense' }); // «Поиск» из меню «+»
   const [menuPage, setMenuPage] = useState(0); // для какой вкладки меню (пункты не меняются, пока закрывается)
   const addBtnRef = useRef(null);
   // импорт из заметок: текст, разобранный результат, замена похожих старых, «все строки»
@@ -4684,6 +4686,17 @@ export default function App() {
     setSheet('shiftNotes');
   };
   const repeatDraft = menuPage === 1 && si != null ? repeatShiftDraft(state.shifts, PAYDAYS[si], newShiftDate(si), todayIso()) : null;
+  const openFind = (kind) => {
+    setAddMenu(null);
+    setFind((f) => ({ q: f.kind === kind ? f.q : '', kind }));
+    setSheet('find');
+  };
+  const findItem = {
+    icon: '⌕',
+    title: 'Поиск',
+    sub: 'по названию, месту или сумме',
+    onPress: () => openFind(menuPage === 1 ? 'shift' : 'expense'),
+  };
   const shiftAddItems = [
     {
       icon: '+',
@@ -4716,6 +4729,7 @@ export default function App() {
         openShiftNotes();
       },
     },
+    findItem,
   ];
   const addItems = [
     {
@@ -4736,6 +4750,7 @@ export default function App() {
         openNotes();
       },
     },
+    findItem,
   ];
   /** Сразу на нужную зарплату (без пружины через десятки страниц). */
   const jumpPayIdx = (k) => {
@@ -5960,6 +5975,64 @@ export default function App() {
                 Ноябрь» и «… зарплата 30 октября» не обязательны — каждая строка с датой попадёт под свою зарплату. Год —
                 ближайший к сегодняшнему дню. ✅ — уже оплачено.
               </Text>
+            </>
+          ),
+        };
+      }
+
+      case 'find': {
+        const isShift = find.kind === 'shift';
+        const res = searchItems(isShift ? state.shifts : state.expenses, find.q);
+        const go = (x) => {
+          const k = paydayIndexFor(isShift ? 'shift' : 'expense', x.date);
+          if (isShift) jumpShiftIdx(k);
+          else jumpPayIdx(k);
+          if (isShift) openShift(x.id);
+          else openExpense(x.id);
+        };
+        return {
+          title: isShift ? 'Поиск смен' : 'Поиск расходов',
+          onClose: closeSheet,
+          body: (
+            <>
+              <TextInput
+                style={[styles.input, { marginBottom: 16 }]}
+                value={find.q}
+                onChangeText={(t) => setFind((f) => ({ ...f, q: t }))}
+                placeholder={isShift ? 'ночь, касса, 2500…' : 'Вайфай, 1350…'}
+                placeholderTextColor="rgba(235,235,245,0.3)"
+                autoFocus
+                autoCorrect={false}
+                returnKeyType="search"
+                clearButtonMode="while-editing"
+                accessibilityLabel="Что найти"
+              />
+              {find.q.trim() && res.length === 0 ? (
+                <EmptyState icon="⌕" title="Ничего не нашлось" text="Попробуйте часть названия или сумму без пробелов." accent={accent} />
+              ) : null}
+              {res.map((x) => {
+                const noSum = x.amount == null || x.amount === '';
+                return (
+                  <ScaleButton key={x.id} style={styles.setItem} onPress={() => go(x)}>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <Text style={styles.setL} numberOfLines={1}>
+                        {x.title || (isShift ? 'Смена' : 'Без названия')}
+                        {x.place ? ` · ${x.place}` : ''}
+                      </Text>
+                      <Text style={styles.setS}>
+                        {fmtShort(x.date)} {x.date.slice(0, 4)}
+                        {!isShift ? (x.status === 'paid' ? ' · оплачено' : ' · не отмечено') : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.itemTitle}>{noSum ? '—' : money(x.amount)}</Text>
+                  </ScaleButton>
+                );
+              })}
+              {!find.q.trim() ? (
+                <Text style={[styles.hint, { textAlign: 'center' }]}>Ищет по всем зарплатам. Тап по найденному — открыть.</Text>
+              ) : res.length >= 40 ? (
+                <Text style={[styles.hint, { textAlign: 'center' }]}>Показаны 40 последних — уточните запрос.</Text>
+              ) : null}
             </>
           ),
         };
