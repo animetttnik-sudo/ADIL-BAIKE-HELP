@@ -17,12 +17,35 @@ import { useDerivedValue } from 'react-native-reanimated';
 
 export const REAL_GLASS_REFRACTION = true;
 
+/**
+ * Диагностика для строки в Настройках: что именно не работает на устройстве.
+ * Заполняется по ходу (импорт Skia, сборка шейдера, каждый снимок, монтирование холста, ошибки).
+ */
+export const GLASS_DIAG = {
+  skia: false,
+  skiaErr: '',
+  effect: false,
+  effectErr: '',
+  snaps: 0,
+  snapFails: 0,
+  last: '—',
+  lastAt: 0,
+  canvas: '—',
+  canvasErr: '',
+  ready: null, // () => число 0…1 (shared value плавного появления)
+  idle: '—',
+};
+const errText = (e) => String((e && (e.message || e)) || 'ошибка').slice(0, 120);
+
 let SK = null;
 try {
   // eslint-disable-next-line global-require
   SK = require('@shopify/react-native-skia');
-} catch {
+  GLASS_DIAG.skia = !!(SK && SK.Skia && SK.makeImageFromView);
+  if (!GLASS_DIAG.skia) GLASS_DIAG.skiaErr = 'нет Skia/makeImageFromView';
+} catch (e) {
   SK = null;
+  GLASS_DIAG.skiaErr = errText(e);
 }
 
 const SKSL = `
@@ -81,10 +104,13 @@ let EFFECT = null;
 if (SK && REAL_GLASS_REFRACTION) {
   try {
     EFFECT = SK.Skia.RuntimeEffect.Make(SKSL);
-  } catch {
+    if (!EFFECT) GLASS_DIAG.effectErr = 'RuntimeEffect.Make вернул null';
+  } catch (e) {
     EFFECT = null;
+    GLASS_DIAG.effectErr = errText(e);
   }
 }
+GLASS_DIAG.effect = !!EFFECT;
 
 /** Можно ли рисовать настоящее преломление на этом устройстве. */
 export const glassLensAvailable = !!(SK && EFFECT && REAL_GLASS_REFRACTION);
@@ -104,12 +130,22 @@ export async function snapshotView(ref) {
       }
     });
     const image = await SK.makeImageFromView(ref);
-    if (!image) return null;
+    GLASS_DIAG.lastAt = Date.now();
+    if (!image) {
+      GLASS_DIAG.snapFails += 1;
+      GLASS_DIAG.last = 'null';
+      return null;
+    }
     const win = Dimensions.get('window');
     const w = box && box.w > 0 ? box.w : win.width;
     const h = box && box.h > 0 ? box.h : win.height;
+    GLASS_DIAG.snaps += 1;
+    GLASS_DIAG.last = `ok ${image.width()}×${image.height()} @${Math.round(w)}×${Math.round(h)}`;
     return { image, ox: box ? box.ox : 0, oy: box ? box.oy : 0, w, h };
-  } catch {
+  } catch (e) {
+    GLASS_DIAG.snapFails += 1;
+    GLASS_DIAG.lastAt = Date.now();
+    GLASS_DIAG.last = 'ошибка: ' + errText(e);
     return null;
   }
 }
@@ -122,7 +158,10 @@ class Guard extends React.Component {
   static getDerivedStateFromError() {
     return { bad: true };
   }
-  componentDidCatch() {}
+  componentDidCatch(e) {
+    GLASS_DIAG.canvasErr = errText(e);
+    GLASS_DIAG.canvas = 'упал';
+  }
   render() {
     return this.state.bad ? null : this.props.children;
   }
@@ -158,7 +197,14 @@ function LensCanvas({ snap, cw, ch, geo, ready, style }) {
   });
   const { Canvas, Fill, Shader, ImageShader } = SK;
   return (
-    <Canvas style={[{ width: cw, height: ch }, style]} pointerEvents="none">
+    <Canvas
+      style={[{ width: cw, height: ch }, style]}
+      pointerEvents="none"
+      onLayout={(e) => {
+        const l = e.nativeEvent.layout;
+        GLASS_DIAG.canvas = `да ${Math.round(l.width)}×${Math.round(l.height)}`;
+      }}
+    >
       <Fill>
         <Shader source={EFFECT} uniforms={uniforms}>
           <ImageShader image={image} fit="none" x={0} y={0} width={iw} height={ih} tx="decal" ty="decal" />

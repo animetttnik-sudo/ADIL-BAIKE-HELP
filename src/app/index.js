@@ -103,7 +103,7 @@ import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
 import { liquidShape } from '../lib/liquid';
-import { GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
+import { GLASS_DIAG, GlassLens, glassLensAvailable, REAL_GLASS_REFRACTION, snapshotView } from '../ui/GlassLens';
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
@@ -1342,8 +1342,31 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   );
 });
 
-const onIdle = (fn) =>
-  typeof globalThis.requestIdleCallback === 'function' ? globalThis.requestIdleCallback(fn, { timeout: 400 }) : setTimeout(fn, 16);
+/** Скромная строка диагностики стекла дока (Настройки, внизу). Обновляется раз в секунду. */
+function GlassDiagLine() {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const d = GLASS_DIAG;
+  const yn = (b) => (b ? 'да' : 'нет');
+  const ago = d.lastAt ? `${Math.round((Date.now() - d.lastAt) / 1000)} с назад` : '';
+  let ready = '—';
+  try {
+    if (d.ready) ready = Number(d.ready()).toFixed(2);
+  } catch {
+    ready = '?';
+  }
+  const err = [d.skiaErr, d.effectErr, d.canvasErr].filter(Boolean).join(' / ') || '—';
+  return (
+    <Text style={styles.diagLine} onPress={() => SNAP_BUS.kick && SNAP_BUS.kick()}>
+      {`Стекло: флаг ${yn(REAL_GLASS_REFRACTION)} · Skia ${yn(d.skia)} · шейдер ${yn(d.effect)} · снимков ${d.snaps}` +
+        (d.snapFails ? ` (сбоев ${d.snapFails})` : '') +
+        ` · последний: ${d.last}${ago ? ', ' + ago : ''} · холст: ${d.canvas} · ready ${ready} · покой: ${d.idle} · ошибка: ${err}`}
+    </Text>
+  );
+}
 
 function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
   const n = labels.length;
@@ -1377,7 +1400,11 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   // после смены вкладки, после касаний/листания и после того как капля опустилась —
   // в момент нажатия ничего тяжёлого не происходит.
   const takeSnap = useCallback(() => {
-    if (!realLens || snapBusy.current || !SNAP_ROOT.current) return;
+    if (!realLens) return;
+    if (snapBusy.current || !SNAP_ROOT.current) {
+      GLASS_DIAG.idle = snapBusy.current ? 'снимок уже идёт' : 'нет корня';
+      return;
+    }
     snapBusy.current = true;
     measureHost();
     snapshotView(SNAP_ROOT)
@@ -1394,6 +1421,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       });
   }, [realLens, measureHost, lensReady, hasSnap]);
   const idleTimer = useRef(null);
+  const snapWhenIdleRef = useRef(() => {});
   const liquidRef = useRef(liquid);
   const pressRef = useRef(null);
   // отложенный снимок: после анимаций, в свободном кадре и только если капля опущена
@@ -1402,24 +1430,28 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       if (!realLens) return;
       clearTimeout(idleTimer.current);
       idleTimer.current = setTimeout(() => {
-        // InteractionManager убран из RN 0.88 — ждём свободного кадра JS, затем кадра отрисовки
-        onIdle(() => {
-          requestAnimationFrame(() => {
-            if (force || (liquidRef.current.value === 0 && pressRef.current.value === 0)) takeSnap();
-          });
+        // кадр отрисовки после паузы; капля должна быть опущена (пружина могла ещё не «досесть» —
+        // тогда пробуем ещё раз позже, а не теряем снимок навсегда)
+        requestAnimationFrame(() => {
+          const still = Math.abs(liquidRef.current.value) < 0.01 && Math.abs(pressRef.current.value) < 0.01;
+          GLASS_DIAG.idle = still ? 'снимаю' : 'жду покоя';
+          if (force || still) takeSnap();
+          else snapWhenIdleRef.current(400, false);
         });
       }, delay);
     },
     [realLens, takeSnap]
   );
+  snapWhenIdleRef.current = snapWhenIdle;
   useEffect(() => {
     if (!realLens) return undefined;
+    GLASS_DIAG.ready = () => lensReady.value;
     SNAP_BUS.kick = () => snapWhenIdle(1100, false); // после листания с инерцией
     return () => {
       SNAP_BUS.kick = null;
       clearTimeout(idleTimer.current);
     };
-  }, [realLens, snapWhenIdle]);
+  }, [realLens, snapWhenIdle, lensReady]);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -5393,6 +5425,7 @@ export default function App() {
                   </Pressable>
                 ))}
               </ItemCard>
+              <GlassDiagLine />
             </>
           ),
         };
@@ -6117,6 +6150,7 @@ function fmtRange(a, b) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#050507' },
+  diagLine: { color: 'rgba(255,255,255,0.32)', fontSize: 10, lineHeight: 14, marginTop: 14, paddingHorizontal: 4 },
   bgScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   blob: { position: 'absolute', width: 280, height: 280, borderRadius: 140, opacity: 0.28 },
   blobA: { top: -70, right: -50 },
