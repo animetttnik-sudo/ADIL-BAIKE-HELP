@@ -6609,7 +6609,7 @@ const styles = StyleSheet.create({
   rowSep: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
   whenCol: { width: 38, alignItems: 'center' },
   whenNum: { color: '#fff', fontSize: 20, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  whenDow: { color: 'rgba(235,235,245,0.45)', fontSize: 11, fontWeight: '600', marginTop: -1 },
+  whenDow: { color: 'rgba(235,235,245,0.55)', fontSize: 11, fontWeight: '600', marginTop: -1 },
   itemTitleDim: { color: 'rgba(235,235,245,0.55)' },
   amtDim: { color: 'rgba(235,235,245,0.3)' },
   cardFoot: {
@@ -6946,7 +6946,7 @@ const styles = StyleSheet.create({
   },
   mid: { flex: 1, minWidth: 0 },
   itemTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  meta: { color: 'rgba(235,235,245,0.4)', fontSize: 12, marginTop: 2 },
+  meta: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 2 },
   amt: { color: '#fff', fontSize: 16, fontWeight: '600', marginRight: 6 },
   calcBadge: {
     alignSelf: 'flex-start',
@@ -7239,7 +7239,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   setL: { color: '#fff', fontSize: 16 },
-  setS: { color: 'rgba(235,235,245,0.42)', fontSize: 12, marginTop: 2 },
+  setS: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 2 },
 
 
   anRow: {
