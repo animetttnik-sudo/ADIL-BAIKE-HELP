@@ -107,6 +107,8 @@ import { GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
+// касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
+const SNAP_BUS = { kick: null };
 import { appKeys, fmtSummary, makeBackup, parseBackup, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
@@ -1370,17 +1372,17 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       // нет замера — останется прежний
     }
   }, [hostX, hostY]);
-  // Снимаем только саму панель (маленький View, а не весь экран) и только в покое:
-  // её содержимое меняется лишь при смене вкладки, поэтому снимок в кэше остаётся верным,
-  // и в момент нажатия ничего тяжёлого не происходит.
+  // Снимок ЭКРАНА (под стеклом панели снимок одной панели пуст — iOS не рисует glass/blur
+  // в снимках, поэтому преломлять было нечего). Снимаем только в покое и держим в кэше:
+  // после смены вкладки, после касаний/листания и после того как капля опустилась —
+  // в момент нажатия ничего тяжёлого не происходит.
   const takeSnap = useCallback(() => {
-    if (!realLens || snapBusy.current || !hostRef.current) return;
+    if (!realLens || snapBusy.current || !SNAP_ROOT.current) return;
     snapBusy.current = true;
-    snapshotView(hostRef)
+    measureHost();
+    snapshotView(SNAP_ROOT)
       .then((snap) => {
-        if (!snap) return;
-        hostX.value = snap.ox;
-        hostY.value = snap.oy;
+        if (!snap || !snap.image || snap.image.width() < 2 || snap.image.height() < 2) return;
         setLensSnap(snap);
         if (!hasSnap.value) {
           hasSnap.value = 1;
@@ -1390,7 +1392,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .finally(() => {
         snapBusy.current = false;
       });
-  }, [realLens, hostX, hostY, lensReady, hasSnap]);
+  }, [realLens, measureHost, lensReady, hasSnap]);
   const idleTimer = useRef(null);
   const liquidRef = useRef(liquid);
   const pressRef = useRef(null);
@@ -1410,7 +1412,14 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     },
     [realLens, takeSnap]
   );
-  useEffect(() => () => clearTimeout(idleTimer.current), []);
+  useEffect(() => {
+    if (!realLens) return undefined;
+    SNAP_BUS.kick = () => snapWhenIdle(1100, false); // после листания с инерцией
+    return () => {
+      SNAP_BUS.kick = null;
+      clearTimeout(idleTimer.current);
+    };
+  }, [realLens, snapWhenIdle]);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -1568,14 +1577,13 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   );
 
   // Нажатие: подъём капли идёт сам по себе, без ожидания снимка. Здесь — только лёгкий замер
-  // положения панели; если снимка ещё нет, он делается ПОСЛЕ подъёма и проявляется плавно
-  // (до этого капля — обычная прозрачная линза без преломления).
+  // положения панели; если снимка ещё нет (самое первое касание) — капля обычная прозрачная линза,
+  // снимок сделается в покое и преломление проявится плавно.
   useAnimatedReaction(
     () => (liquid.value > 0.04 ? (liquid.value > 0.97 ? 2 : 1) : 0),
     (st, was) => {
       if (!realLens || st === was) return;
       if (st === 1 && was === 0) scheduleOnRN(measureHost);
-      else if (st === 2 && !hasSnap.value) scheduleOnRN(snapWhenIdle, 60, true);
       else if (st === 0) scheduleOnRN(snapWhenIdle, 500, false); // капля опустилась — обновить кэш в покое
     }
   );
@@ -1657,8 +1665,6 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       h: h0 * sh.ry,
       cx: hostX.value + 5 + pos.value * segW.value + segW.value / 2,
       cy: hostY.value + 5 + h0 / 2,
-      ox: hostX.value,
-      oy: hostY.value,
       on: Math.min(1, Math.max(0, liquid.value)),
     };
   }, [liquid, pos, vel, segW, hostX, hostY, h0]);
@@ -5940,7 +5946,7 @@ export default function App() {
   };
 
   const content = (
-    <View style={styles.root} ref={SNAP_ROOT} collapsable={false}>
+    <View style={styles.root} ref={SNAP_ROOT} collapsable={false} onTouchEnd={() => SNAP_BUS.kick && SNAP_BUS.kick()}>
       <StatusBar style="light" />
       {state.custom?.bg ? (
         <View style={StyleSheet.absoluteFill} pointerEvents="none">

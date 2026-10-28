@@ -56,23 +56,23 @@ half4 main(float2 xy) {
   // мягкий сглаженный край ровно по форме капли (1.5 пт)
   float edge = 1.0 - smoothstep(-1.5, 0.0, d);
   if (edge <= 0.0) { return half4(0.0); }
-  float band = clamp(hb.y * 0.5, 7.0, 20.0);
+  float band = clamp(hb.y * 0.8, 10.0, 28.0); // широкая полоса преломления — эффект виден
   float k = clamp(1.0 + d / band, 0.0, 1.0); // 0 — внутри, 1 — у кромки
   float e = 0.75;
   float2 g = float2(sdCap(p + float2(e, 0.0), hb) - sdCap(p - float2(e, 0.0), hb),
                     sdCap(p + float2(0.0, e), hb) - sdCap(p - float2(0.0, e), hb));
   float2 n = g / max(length(g), 0.0001);
-  float2 base = p / (1.0 + 0.08 * uOn);
-  float bend = k * k * band * 1.6 * uOn;
+  float2 base = p / (1.0 + 0.25 * uOn); // увеличение ~1.25×
+  float bend = k * k * band * 1.9 * uOn;
   float2 c = uCenter + base;
-  half4 cr = sampleAt(c + n * bend * 0.9);
+  half4 cr = sampleAt(c + n * bend * 0.84);
   half4 cg = sampleAt(c + n * bend);
-  half4 cb = sampleAt(c + n * bend * 1.12);
+  half4 cb = sampleAt(c + n * bend * 1.2);
   float sa = max(max(cr.a, cg.a), cb.a); // цвета снимка — premultiplied
   half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.12 * uOn * sa);
   // середина прозрачная (видно живой экран и подписи), преломление — только в полосе у кромки:
   // снимок неподвижен, поэтому в центре он дал бы «призраки» старой плашки при перетаскивании
-  float a = smoothstep(0.15, 0.75, k) * edge * uReady * uOn;
+  float a = smoothstep(0.0, 0.5, k) * edge * uReady * uOn;
   return half4(col * a, sa * a);
 }
 `;
