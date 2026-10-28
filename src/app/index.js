@@ -33,8 +33,8 @@ import {
     Platform,
     Pressable,
     StyleSheet,
-    Text,
-    TextInput,
+    Text as RNText,
+    TextInput as RNTextInput,
     View,
 } from 'react-native';
 import 'react-native-gesture-handler';
@@ -175,6 +175,19 @@ import {
   upcomingPayday,
   withShortage,
 } from '../lib/shifts';
+
+/**
+ * Крупный шрифт iOS (Dynamic Type): растём до размера «очень крупный» (×1.35),
+ * дальше — нет, иначе карточки, док и кнопки с фиксированной высотой разваливаются.
+ */
+const FONT_MAX = 1.35;
+const SEG_FONT_MAX = 1.2; // подписи капсул и дока — высота капсулы фиксирована
+function Text(props) {
+  return <RNText maxFontSizeMultiplier={FONT_MAX} {...props} />;
+}
+function TextInput(props) {
+  return <RNTextInput maxFontSizeMultiplier={FONT_MAX} {...props} />;
+}
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
@@ -344,7 +357,7 @@ function Meter({ value, color }) {
 function Stat({ k, v, tone }) {
   return (
     <View style={styles.stat3}>
-      <Text style={styles.k} numberOfLines={1}>
+      <Text style={styles.k} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
         {k}
       </Text>
       <Text
@@ -1342,10 +1355,14 @@ function SegLabel({ label, index, pos, fontSize }) {
   }));
   return (
     <View style={styles.seg} pointerEvents="none">
-      <Text style={[styles.segTxt, fontSize && { fontSize }]} numberOfLines={1}>
+      <Text style={[styles.segTxt, fontSize && { fontSize }]} numberOfLines={1} maxFontSizeMultiplier={SEG_FONT_MAX}>
         {label}
       </Text>
-      <Animated.Text style={[styles.segTxt, styles.segTxtOn, styles.segTxtAbs, fontSize && { fontSize }, on]} numberOfLines={1}>
+      <Animated.Text
+        style={[styles.segTxt, styles.segTxtOn, styles.segTxtAbs, fontSize && { fontSize }, on]}
+        numberOfLines={1}
+        maxFontSizeMultiplier={SEG_FONT_MAX}
+      >
         {label}
       </Animated.Text>
     </View>
