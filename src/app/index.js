@@ -53,7 +53,6 @@ import Animated, {
     FadeIn,
     FadeOut,
     interpolate,
-    interpolateColor,
     LayoutAnimationConfig,
     LinearTransition,
     useAnimatedKeyboard,
@@ -95,7 +94,6 @@ import {
     hasCounts,
     itemTotal,
     ownPay,
-    shiftTitle,
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
@@ -116,7 +114,6 @@ import {
   MONTHS,
   MONTHS_R,
   DOW,
-  pad,
   iso,
   parse,
   addDays,
@@ -125,12 +122,10 @@ import {
   money,
   uid,
   todayIso,
-  allPaydays,
   PAYDAYS,
   paydayOnOrBefore,
   workPeriod,
   paydaysInMonth,
-  periodsTouchingMonth,
   defaultState,
   seedMonth,
   seedPaydays,
@@ -161,7 +156,6 @@ import {
   dayTotals,
   mentorMark,
   mentorOf,
-  netForPayday,
   shiftRole,
   shiftTime,
   shortTone,
@@ -3358,8 +3352,8 @@ function newShiftDate(k) {
 export default function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState(0);
-  const [viewY, setViewY] = useState(INIT_Y);
-  const [viewM, setViewM] = useState(INIT_M);
+  const [viewY] = useState(INIT_Y);
+  const [viewM] = useState(INIT_M);
   const [sheet, setSheet] = useState(null);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({});
@@ -3851,38 +3845,6 @@ export default function App() {
     afterClose.current = null;
     if (fn) fn();
   }, []);
-
-  const goMonth = (delta) => {
-    let m = viewM + delta;
-    let y = viewY;
-    if (m < 0) {
-      m = 11;
-      y--;
-    }
-    if (m > 11) {
-      m = 0;
-      y++;
-    }
-    // досеиваем в том же обновлении, что и смену месяца → один кадр, без «допрыгивания»
-    patch((p) => seedMonth(p, y, m));
-    setViewM(m);
-    setViewY(y);
-  };
-
-  const expensesForPayday = useCallback(
-    (p) => {
-      if (!state) return [];
-      return expensesInPeriod(state.expenses, p);
-    },
-    [state]
-  );
-  const earnedForPayday = useCallback(
-    (p) => {
-      if (!state) return 0;
-      return netForPayday(state.shifts, p, carryOf(state, p));
-    },
-    [state]
-  );
 
   const accent = useMemo(() => {
     const h = state?.settings?.hue ?? 145;
@@ -6150,7 +6112,6 @@ export default function App() {
 }
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
-const ORDINALS = ['Первая', 'Вторая', 'Третья'];
 /** «12–25 сентября» или «29 сентября – 12 октября». */
 function fmtRange(a, b) {
   const da = parse(a);

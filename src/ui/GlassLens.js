@@ -45,7 +45,6 @@ const errText = (e) => String((e && (e.message || e)) || 'ошибка').slice(0
 
 let SK = null;
 try {
-  // eslint-disable-next-line global-require
   SK = require('@shopify/react-native-skia');
   GLASS_DIAG.skia = !!(SK && SK.Skia && SK.makeImageFromView);
   if (!GLASS_DIAG.skia) GLASS_DIAG.skiaErr = 'нет Skia/makeImageFromView';
