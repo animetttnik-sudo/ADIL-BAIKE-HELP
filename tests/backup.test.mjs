@@ -93,3 +93,14 @@ test('копия битого сохранения не попадает в пе
   assert.equal(brokenKey('zp_app_v1'), 'broken_zp_app_v1');
   assert.equal(isAppKey2(brokenKey('zp_app_v1')), false);
 });
+
+test('копия «до вставки» не попадает в копии и не удаляется вставкой', async () => {
+  const { PRE_PASTE_KEY, isAppKey, restorePlan, makeBackup, parseBackup } = await import('../src/lib/backup.js');
+  assert.equal(isAppKey(PRE_PASTE_KEY), false);
+  const plan = restorePlan({ zp_app_v1: '{}' }, ['zp_app_v1', 'zp_old', PRE_PASTE_KEY]);
+  assert.ok(!plan.remove.includes(PRE_PASTE_KEY));
+  const t = makeBackup([['zp_app_v1', '{"shifts":[],"expenses":[]}'], [PRE_PASTE_KEY, 'x']]);
+  const r = parseBackup(t);
+  assert.ok(r.ok);
+  assert.deepEqual(Object.keys(r.data), ['zp_app_v1']);
+});

@@ -108,7 +108,7 @@ import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, snapshotView } f
 const SNAP_ROOT = { current: null };
 // касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
 const SNAP_BUS = { kick: null };
-import { appKeys, fmtSummary, makeBackup, parseBackup, restorePlan, summarize } from '../lib/backup';
+import { appKeys, fmtSummary, makeBackup, parseBackup, PRE_PASTE_KEY, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
   ANCHOR,
@@ -3976,6 +3976,62 @@ export default function App() {
       Alert.alert('Не получилось скопировать', String(err?.message || err));
     }
   }, []);
+  // копия перед последней вставкой (для «Вернуть как было»): { summary, createdAt } или null
+  const [prePaste, setPrePaste] = useState(null);
+  useEffect(() => {
+    AsyncStorage.getItem(PRE_PASTE_KEY)
+      .then((t) => {
+        const r = t ? parseBackup(t) : null;
+        if (r?.ok) setPrePaste({ summary: r.summary, createdAt: r.createdAt });
+      })
+      .catch(noop);
+  }, []);
+  // записать копию в хранилище (zp_* ключи), прочитать заново в память
+  const applyBackupData = useCallback(
+    async (data) => {
+      // отложенная запись расчёта не должна перезаписать вставленное
+      if (calcTimer.current) clearTimeout(calcTimer.current);
+      calcTimer.current = null;
+      calcPending.current = null;
+      const { set, remove } = restorePlan(data, await AsyncStorage.getAllKeys());
+      await AsyncStorage.multiSet(set);
+      if (remove.length) await AsyncStorage.multiRemove(remove);
+      await loadAll(); // перечитать в память — без перезапуска
+    },
+    [loadAll]
+  );
+  const undoPaste = useCallback(async () => {
+    let r;
+    try {
+      const t = await AsyncStorage.getItem(PRE_PASTE_KEY);
+      r = t ? parseBackup(t) : null;
+    } catch {
+      r = null;
+    }
+    if (!r?.ok) {
+      setPrePaste(null);
+      return Alert.alert('Нечего возвращать', 'Копии данных до вставки нет.');
+    }
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
+    Alert.alert('Вернуть как было?', `Данные до последней вставки: ${fmtSummary(r.summary)}.\n\nТекущие данные будут заменены ими.`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Вернуть',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await applyBackupData(r.data);
+            await AsyncStorage.removeItem(PRE_PASTE_KEY).catch(noop);
+            setPrePaste(null);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
+            closeThen(() => setToast({ k: Date.now(), text: `Данные возвращены · ${fmtSummary(r.summary)}` }));
+          } catch (err) {
+            Alert.alert('Не получилось вернуть', String(err?.message || err));
+          }
+        },
+      },
+    ]);
+  }, [applyBackupData, closeThen]);
   const pasteBackup = useCallback(async () => {
     let text;
     try {
@@ -4007,14 +4063,18 @@ export default function App() {
           style: 'destructive',
           onPress: async () => {
             try {
-              // отложенная запись расчёта не должна перезаписать вставленное
-              if (calcTimer.current) clearTimeout(calcTimer.current);
-              calcTimer.current = null;
-              calcPending.current = null;
-              const { set, remove } = restorePlan(r.data, await AsyncStorage.getAllKeys());
-              await AsyncStorage.multiSet(set);
-              if (remove.length) await AsyncStorage.multiRemove(remove);
-              await loadAll(); // перечитать в память — без перезапуска
+              // сначала — копия того, что есть сейчас (чтобы вставку можно было отменить)
+              const pend = calcPending.current;
+              if (pend) await AsyncStorage.setItem(CALC_KEY, JSON.stringify(pend));
+              const keys = appKeys(await AsyncStorage.getAllKeys());
+              const entries = keys.length ? await AsyncStorage.multiGet(keys) : [];
+              const before = makeBackup(entries);
+              const pb = parseBackup(before);
+              if (pb.ok) {
+                await AsyncStorage.setItem(PRE_PASTE_KEY, before);
+                setPrePaste({ summary: pb.summary, createdAt: pb.createdAt });
+              }
+              await applyBackupData(r.data);
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
               closeThen(() => setToast({ k: Date.now(), text: `Данные перенесены · ${fmtSummary(r.summary)}` }));
             } catch (err) {
@@ -4024,7 +4084,7 @@ export default function App() {
         },
       ]
     );
-  }, [loadAll, closeThen]);
+  }, [applyBackupData, closeThen]);
   const undoToast = useCallback(() => {
     const prev = toast?.undo;
     setToast(null);
@@ -5443,6 +5503,11 @@ export default function App() {
               <ScaleButton style={styles.actBtn} onPress={pasteBackup}>
                 <Text style={styles.actBtnTxt}>Вставить данные</Text>
               </ScaleButton>
+              {prePaste && (
+                <ScaleButton style={styles.actBtn} onPress={undoPaste}>
+                  <Text style={styles.actBtnTxt}>Вернуть как было до вставки</Text>
+                </ScaleButton>
+              )}
               <Text style={styles.hint}>
                 Версии приложения (через dev-сервер и опубликованная) хранят данные отдельно. Чтобы перенести: в версии с
                 данными нажмите «Скопировать все данные», затем откройте другую версию → ⚙ → «Перенос данных» →

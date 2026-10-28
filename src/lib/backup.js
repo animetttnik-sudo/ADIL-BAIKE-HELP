@@ -120,3 +120,9 @@ export function restorePlan(data, existingKeys) {
   const remove = appKeys(existingKeys).filter((k) => !(k in data));
   return { set, remove };
 }
+
+/**
+ * Копия данных, какими они были перед последней «Вставить данные» — чтобы вставку можно было отменить.
+ * Ключ без префикса zp_: сам не попадает в копии и не удаляется при вставке.
+ */
+export const PRE_PASTE_KEY = 'backup_before_paste';
