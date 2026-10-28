@@ -1250,6 +1250,26 @@ const APressable = Animated.createAnimatedComponent(Pressable);
  * ломает BlurView/GlassView на iOS). Небольшая задержка pressIn, чтобы кнопки
  * не сжимались, когда палец просто начинает скролл.
  */
+/** Пустой список: коротко, что здесь будет, и одна понятная кнопка. */
+function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' }) {
+  return (
+    <ItemCard style={styles.emptyCard}>
+      {icon ? (
+        <View style={styles.emptyIcon}>
+          <Text style={[styles.emptyIconTxt, { color: accent }]}>{icon}</Text>
+        </View>
+      ) : null}
+      <Text style={styles.emptyTitle}>{title}</Text>
+      {text ? <Text style={styles.emptyText}>{text}</Text> : null}
+      {action && onAction ? (
+        <ScaleButton style={styles.emptyBtn} onPress={onAction}>
+          <Text style={[styles.emptyBtnTxt, { color: accent }]}>{action}</Text>
+        </ScaleButton>
+      ) : null}
+    </ItemCard>
+  );
+}
+
 function ScaleButton({ onPress, style, children }) {
   const scale = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({
@@ -1801,7 +1821,12 @@ function AnalysisView({ state, accent }) {
         />
       </View>
       {ks.length === 0 ? (
-        <Text style={styles.empty}>Пока нет данных</Text>
+        <EmptyState
+          icon="▤"
+          title="Пока нечего анализировать"
+          text="Когда появятся смены с суммой или оплаченные расходы, здесь будут итоги по месяцам."
+          accent={accent}
+        />
       ) : (
         <>
           <ItemCard style={[styles.listCard, styles.padCard]}>
@@ -2953,7 +2978,7 @@ const PayCard = memo(function PayCard({ payday, t, short, mentor, accent }) {
   );
 });
 
-const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, arc }) {
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, onAdd, arc }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2969,9 +2994,14 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
           <View>
             <PayCard payday={payday} t={t} short={short} mentor={mentor} accent={accent} />
             {list.length === 0 ? (
-              <ItemCard>
-                <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
-              </ItemCard>
+              <EmptyState
+                icon="✓"
+                title="Расходов пока нет"
+                text="Впишите, что нужно оплатить с этой зарплаты, — сумма к остатку посчитается сама."
+                action="Добавить расход"
+                onAction={onAdd}
+                accent={accent}
+              />
             ) : (
               list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
             )}
@@ -3169,7 +3199,7 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
   );
 };
 
-const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry, onExport }) {
+const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry, onExport, onAdd }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -3191,9 +3221,14 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
               </ScaleButton>
             ) : null}
             {list.length === 0 ? (
-              <ItemCard>
-                <Text style={styles.empty}>Смен к этой зарплате нет — «+» вверху</Text>
-              </ItemCard>
+              <EmptyState
+                icon="☾"
+                title="Смен пока нет"
+                text={`Отметьте смены с ${fmtShort(workPeriod(payday).start)} по ${fmtShort(workPeriod(payday).end)} — из них сложится эта зарплата.`}
+                action="Добавить смену"
+                onAction={onAdd}
+                accent={accent}
+              />
             ) : (
               list.map((s, i) => (
                 <ShiftCard
@@ -4315,11 +4350,11 @@ export default function App() {
   }, [closeThen, shareFile]);
 
   const payPageProps = useMemo(
-    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, arc }),
+    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, onAdd: () => openExpense(null), arc }),
     [accent, openExpense, toggleStatus, returnExpenseNow, arc]
   );
   const shiftPageProps = useMemo(
-    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry, onExport: openExportMenu }),
+    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry, onExport: openExportMenu, onAdd: () => openShift(null) }),
     [accent, openShift, openCalcOn, openCarry, openExportMenu]
   );
 
@@ -6731,7 +6766,30 @@ const styles = StyleSheet.create({
   },
   totalL: { color: 'rgba(235,235,245,0.5)' },
   totalV: { color: '#ffd60a', fontWeight: '700' },
-  empty: { color: 'rgba(235,235,245,0.4)', textAlign: 'center', padding: 18, fontSize: 14 },
+  empty: { color: 'rgba(235,235,245,0.4)', textAlign: 'center', padding: 16, fontSize: 14 },
+  emptyCard: { alignItems: 'center', paddingVertical: 24, paddingHorizontal: 24 },
+  emptyIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  emptyIconTxt: { fontSize: 20, fontWeight: '600' },
+  emptyTitle: { color: '#fff', fontSize: 17, fontWeight: '600', textAlign: 'center' },
+  emptyText: { color: 'rgba(235,235,245,0.6)', fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 4 },
+  emptyBtn: {
+    marginTop: 16,
+    minHeight: 44,
+    paddingHorizontal: 24,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyBtnTxt: { fontSize: 16, fontWeight: '600' },
 
   dock: {
     position: 'absolute',
