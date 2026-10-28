@@ -103,7 +103,7 @@ import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
 import { liquidShape } from '../lib/liquid';
-import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, REAL_GLASS_REFRACTION, snapshotView } from '../ui/GlassLens';
+import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
@@ -1342,47 +1342,6 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   );
 });
 
-/** Скромная строка диагностики стекла дока (Настройки, внизу). Обновляется раз в секунду. */
-function GlassDiagLine() {
-  const [, tick] = useState(0);
-  const lastTap = useRef(0);
-  useEffect(() => {
-    const t = setInterval(() => tick((x) => x + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-  const d = GLASS_DIAG;
-  const yn = (b) => (b ? 'да' : 'нет');
-  const ago = d.lastAt ? `${Math.round((Date.now() - d.lastAt) / 1000)} с назад` : '';
-  let ready = '—';
-  try {
-    if (d.ready) ready = Number(d.ready()).toFixed(2);
-  } catch {
-    ready = '?';
-  }
-  const err = [d.skiaErr, d.effectErr, d.canvasErr].filter(Boolean).join(' / ') || '—';
-  const tint = GLASS_TINT.value > 0.5;
-  // один тап — переснять в покое; двойной — отладочная подсветка холста (красная рамка и выборка)
-  const onPress = () => {
-    const now = Date.now();
-    if (now - lastTap.current < 400) {
-      GLASS_TINT.value = GLASS_TINT.value > 0.5 ? 0 : 1;
-      lastTap.current = 0;
-      tick((x) => x + 1);
-      return;
-    }
-    lastTap.current = now;
-    if (SNAP_BUS.kick) SNAP_BUS.kick();
-  };
-  return (
-    <Text style={styles.diagLine} onPress={onPress}>
-      {`Стекло: флаг ${yn(REAL_GLASS_REFRACTION)} · Skia ${yn(d.skia)} · шейдер ${yn(d.effect)} · связка ${d.bind} · снимков ${d.snaps}` +
-        (d.snapFails ? ` (сбоев ${d.snapFails})` : '') +
-        ` · последний: ${d.last}${ago ? ', ' + ago : ''} · холст: ${d.canvas} · ready ${ready} · покой: ${d.idle} · ошибка: ${err}` +
-        `\nuniforms ${d.geo} · пересчётов на UI за удержание: ${d.ticks} · подсветка: ${tint ? 'вкл' : 'выкл'}`}
-    </Text>
-  );
-}
-
 function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
   const n = labels.length;
   const isLiquid = glass; // «жидкая» плашка — только у дока
@@ -1724,33 +1683,6 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       uDebug: GLASS_TINT.value,
     };
   }, [snapK, lensW, lensH, h0, n, height]);
-  // диагностика: живые uniforms при подъёме капли и сколько раз они пересчитались на UI-потоке
-  const uTicks = useSharedValue(0);
-  useAnimatedReaction(
-    () => lensUniforms.value,
-    () => {
-      if (liquid.value > 0.04) uTicks.value += 1;
-    }
-  );
-  const recordGeo = useCallback((u, ticks, phase) => {
-    const r = (x) => Math.round(x);
-    GLASS_DIAG.geo =
-      `${phase}: капля ${r(u.uCenter[0])},${r(u.uCenter[1])} ${r(u.uSize[0])}×${r(u.uSize[1])} пт · ` +
-      `панель ${r(u.uBar[0])},${r(u.uBar[1])} ${r(u.uBar[2])}×${r(u.uBar[3])} · начало снимка ${r(u.uOrigin[0])},${r(u.uOrigin[1])} · ` +
-      `масштаб ${u.uScale.toFixed(2)} · снимок ${r(u.uImg[0])}×${r(u.uImg[1])} · холст ${r(u.uCanvas[0])}×${r(u.uCanvas[1])}`;
-    GLASS_DIAG.ticks = ticks;
-  }, []);
-  useAnimatedReaction(
-    () => (liquid.value > 0.9 ? 1 : liquid.value < 0.04 ? 0 : -1),
-    (st, was) => {
-      if (!realLens || st === -1 || st === was) return;
-      if (st === 1) scheduleOnRN(recordGeo, lensUniforms.value, uTicks.value, 'подъём');
-      else if (was === 1 || was === -1) {
-        scheduleOnRN(recordGeo, lensUniforms.value, uTicks.value, 'отпуск');
-        uTicks.value = 0;
-      }
-    }
-  );
   const lensPos = useAnimatedStyle(() => {
     const sh = liquidShape(liquid.value, pos.value, vel.value);
     return { left: (segW.value * sh.rx - lensW) / 2, top: (h0 * sh.ry - lensH) / 2, opacity: lensReady.value };
@@ -5476,7 +5408,6 @@ export default function App() {
                   </Pressable>
                 ))}
               </ItemCard>
-              <GlassDiagLine />
             </>
           ),
         };
@@ -6201,7 +6132,6 @@ function fmtRange(a, b) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#050507' },
-  diagLine: { color: 'rgba(255,255,255,0.32)', fontSize: 10, lineHeight: 14, marginTop: 14, paddingHorizontal: 4 },
   bgScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   blob: { position: 'absolute', width: 280, height: 280, borderRadius: 140, opacity: 0.28 },
   blobA: { top: -70, right: -50 },
