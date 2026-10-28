@@ -202,6 +202,8 @@ const spring = { damping: 28, stiffness: 220, mass: 0.85, overshootClamping: tru
 const softSpring = { damping: 28, stiffness: 190, overshootClamping: true };
 const capSpring = { damping: 26, stiffness: 180, mass: 0.9, overshootClamping: true };
 // Док (Liquid Glass): плашка едет пружиной с перелётом и «жидко» возвращается в твёрдое состояние
+// пассивное (в покое) перемещение плашки дока по тапу — плавно, без перелёта
+const passiveMove = { duration: 280, easing: Easing.bezier(0.25, 0.1, 0.25, 1) };
 const liquidPosSpring = { damping: 15, stiffness: 210, mass: 0.85 };
 const liquidOnSpring = { damping: 16, stiffness: 320, mass: 0.7 };
 const liquidOffSpring = { damping: 9, stiffness: 240, mass: 0.75 };
@@ -1391,14 +1393,16 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   useEffect(() => {
     if (target.value !== value) {
       target.value = value;
-      pos.value = withSpring(value, capSpring);
+      pos.value = isLiquid ? withTiming(value, passiveMove) : withSpring(value, capSpring);
     }
-  }, [value, pos, target]);
+  }, [value, pos, target, isLiquid]);
 
   const gesture = useMemo(() => {
-    const pick = (p, v = 0) => {
+    const pick = (p, v = 0, active = true) => {
       'worklet';
-      pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
+      // покой (простой тап) — ровное смещение без пружины; пружина — только после удержания/перетаскивания
+      if (isLiquid && !active) pos.value = withTiming(p, passiveMove);
+      else pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
       if (isLiquid) liquid.value = withSpring(0, liquidOffSpring);
       if (p !== target.value) {
         target.value = p;
@@ -1422,7 +1426,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         try {
           const w = segW.value;
           if (!ok || w <= 0) return;
-          pick(Math.max(0, Math.min(n - 1, Math.floor((e.x - 5) / w))));
+          pick(Math.max(0, Math.min(n - 1, Math.floor((e.x - 5) / w))), 0, liquid.value > 0.05);
         } catch (err) {
           wErr(err);
         }
