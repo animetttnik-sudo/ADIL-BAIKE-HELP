@@ -33,7 +33,6 @@ import {
     Platform,
     Pressable,
     StyleSheet,
-    Switch,
     Text,
     TextInput,
     View,
@@ -2978,7 +2977,7 @@ function Stamp({ r, size = 132 }) {
   );
 }
 
-const ExportCard = function ExportCard({ r, accent, viewRef, stamp = true }) {
+const ExportCard = function ExportCard({ r, accent, viewRef }) {
   return (
     <View ref={viewRef} collapsable={false} style={styles.expCard}>
       <Text style={styles.expTitle}>{r.title}</Text>
@@ -3026,7 +3025,7 @@ const ExportCard = function ExportCard({ r, accent, viewRef, stamp = true }) {
         <Text style={[styles.expNetV, { color: r.netValue < 0 ? '#ff453a' : accent }]}>{r.net}</Text>
       </View>
       {r.surplus ? <Text style={styles.expM}>Излишек {r.surplus} — не в зарплату.</Text> : null}
-      {stamp ? <Stamp r={r} /> : null}
+      <Stamp r={r} />
     </View>
   );
 };
@@ -3999,9 +3998,6 @@ export default function App() {
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
   // ── Экспорт зарплаты: PDF (expo-print) / Фото (снимок карточки) → системное «Поделиться / Сохранить»
   const [exportP, setExportP] = useState(null);
-  const [exportStamp, setExportStamp] = useState(true); // «Печать» на PDF/фото, по умолчанию — да
-  const exportStampRef = useRef(true);
-  exportStampRef.current = exportStamp;
   const exportRef = useRef(null);
   const openExportMenu = useCallback((p) => {
     Haptics.selectionAsync();
@@ -4045,7 +4041,7 @@ export default function App() {
       const r = payReport(stateRef.current, p, calcRef.current);
       closeThen(async () => {
         try {
-          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current, { stamp: exportStampRef.current }) });
+          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current) });
           await shareFile(uri, 'application/pdf', 'com.adobe.pdf', r, 'pdf');
         } catch (e) {
           Alert.alert('PDF не сохранён', String(e?.message || e));
@@ -4956,11 +4952,7 @@ export default function App() {
           onClose: closeSheet,
           body: (
             <>
-              <ExportCard r={r} accent={accent} viewRef={exportRef} stamp={exportStamp} />
-              <View style={styles.expToggle}>
-                <Text style={styles.expToggleT}>Печать</Text>
-                <Switch value={exportStamp} onValueChange={setExportStamp} />
-              </View>
+              <ExportCard r={r} accent={accent} viewRef={exportRef} />
               <View style={styles.calcBtns}>
                 <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPdf(exportP)}>
                   <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
@@ -6891,8 +6883,6 @@ const styles = StyleSheet.create({
   expPayB: { color: '#fff', fontWeight: '700' },
   // печать — в правом нижнем углу карточки, поверх итога (как на чеке)
   expStamp: { alignSelf: 'flex-end', marginTop: -44, marginRight: 6, opacity: 0.95 },
-  expToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, marginBottom: 6 },
-  expToggleT: { color: '#fff', fontSize: 16, fontWeight: '600' },
   expA: { color: '#fff', fontSize: 14, fontWeight: '700' },
   expLine: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
   expNet: {

@@ -224,8 +224,7 @@ const esc = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 /** HTML для expo-print (A4, тёмный акцент как в приложении, но на белом — для печати). */
-export function reportHtml(r, accent = '#30d158', opts = {}) {
-  const stamp = opts.stamp !== false;
+export function reportHtml(r, accent = '#30d158') {
   const rows = r.rows
     .map(
       (x) => `
@@ -262,7 +261,7 @@ export function reportHtml(r, accent = '#30d158', opts = {}) {
   <table>${rows}</table>
   <table class="tot">${lines}</table>
   <div class="net"><span>К выплате</span><span>${esc(r.net)}</span></div>
-  ${stamp ? `<div class="stamp">${stampSvg(r)}</div>` : ''}
+  <div class="stamp">${stampSvg(r)}</div>
   ${r.surplus ? `<div class="foot">Излишек ${esc(r.surplus)} — не в зарплату.</div>` : ''}
   <div class="foot">ADIL BAIKE HELP · «Смены»</div>
 </body></html>`;

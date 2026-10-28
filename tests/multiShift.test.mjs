@@ -195,7 +195,8 @@ test('экспорт: дата выдачи в отчёте и имени фай
   assert.ok(html.includes(`Дата выдачи: <b>${r.payout}</b>`));
   assert.ok(html.includes(r.periodDates));
   assert.ok(html.includes('<svg') && html.includes('>Р</text>') && STAMP_APP.length > 0);
-  assert.ok(!reportHtml(r, '#30d158', { stamp: false }).includes('<svg'));
+  // печать всегда есть, отключить нельзя
+  assert.ok(reportHtml(r, '#30d158', { stamp: false }).includes('<svg'));
   const k = stampSpec(r);
   assert.ok(k.rotate <= -8 && k.rotate >= -12);
   assert.equal(k.date, r.payout);
