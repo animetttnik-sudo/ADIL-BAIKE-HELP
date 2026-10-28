@@ -38,6 +38,9 @@ import {
     View,
 } from 'react-native';
 import 'react-native-gesture-handler';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import { captureRef } from 'react-native-view-shot';
 import {
     Gesture,
     GestureDetector,
@@ -56,6 +59,7 @@ import Animated, {
     useAnimatedKeyboard,
     useAnimatedReaction,
     useAnimatedStyle, useReducedMotion, useSharedValue,
+    withDelay,
     withSequence,
     withSpring,
     withTiming
@@ -95,6 +99,8 @@ import {
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
+import { payReport, reportHtml } from '../lib/payExport';
+import { liquidShape } from '../lib/liquid';
 import { appKeys, fmtSummary, makeBackup, parseBackup, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
@@ -124,11 +130,27 @@ import {
   paydayForDate,
   normalizeApp,
 } from '../lib/periods';
-import { CALC_TITLES, calcDayAdj, isLinkedShift, syncCalcShifts, withCalcDayAdj } from '../lib/link';
+import {
+  CALC_TITLES,
+  calcDayAdj,
+  calcKey,
+  calcPayForDay,
+  calcSlots,
+  calcTargetFor,
+  compareKeys,
+  isLinkedShift,
+  keyDate,
+  keySlot,
+  linkKey,
+  nextSlot,
+  syncCalcShifts,
+  withCalcDayAdj,
+} from '../lib/link';
 import {
   adjOf,
   carryDue,
   carryOf,
+  dayTotals,
   mentorMark,
   mentorOf,
   netForPayday,
@@ -174,6 +196,11 @@ function displayStatus(e) {
 const spring = { damping: 28, stiffness: 220, mass: 0.85, overshootClamping: true };
 const softSpring = { damping: 28, stiffness: 190, overshootClamping: true };
 const capSpring = { damping: 26, stiffness: 180, mass: 0.9, overshootClamping: true };
+// Док (Liquid Glass): плашка едет пружиной с перелётом и «жидко» возвращается в твёрдое состояние
+const liquidPosSpring = { damping: 15, stiffness: 210, mass: 0.85 };
+const liquidOnSpring = { damping: 16, stiffness: 320, mass: 0.7 };
+const liquidOffSpring = { damping: 9, stiffness: 240, mass: 0.75 };
+
 const SHEET_IN = { duration: 320, easing: Easing.out(Easing.cubic) };
 const SHEET_OUT = { duration: 220, easing: Easing.in(Easing.cubic) };
 const BACK_IN = { duration: 240 };
@@ -1048,16 +1075,42 @@ const CARD_EXIT = () => {
  * Отдельная стеклянная карточка расхода. Горизонтальный свайп отдан листанию зарплат,
  * поэтому: тап по карточке — изменить (там же «Удалить расход»), кнопка — статус.
  */
-const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, arc }) {
+/**
+ * Нажатие на строку: подсветка — ровным слоем на ВСЮ карточку (по её скруглению), а не на часть строки;
+ * удержание — меню строки (onMenu: «Изменить» / «Рассчитать» / «Удалить» / «Отмена»).
+ */
+function useRowPress(id, onEdit, onMenu) {
+  const [down, setDown] = useState(false);
+  const edit = useCallback(() => onEdit(id), [id, onEdit]);
+  const menu = useCallback(() => {
+    setDown(false);
+    if (onMenu) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+      onMenu(id);
+    }
+  }, [id, onMenu]);
+  const props = {
+    onPress: edit,
+    onLongPress: onMenu ? menu : undefined,
+    delayLongPress: 450,
+    onPressIn: () => setDown(true),
+    onPressOut: () => setDown(false),
+  };
+  const hi = <View pointerEvents="none" style={[styles.rowHi, down && styles.rowHiOn]} />;
+  return { props, hi };
+}
+
+const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, onMenu, arc }) {
   const st = displayStatus(item);
   const id = item.id;
-  const edit = useCallback(() => onEdit(id), [id, onEdit]);
+  const { props: pressProps, hi } = useRowPress(id, onEdit, onMenu);
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       {/* стекло не кладём прямо в вид с layout-анимациями — между ними обычный View */}
       <View collapsable={false}>
       <Glass style={styles.eCard} intensity={34}>
-        <Pressable style={({ pressed }) => [styles.itemPress, pressed && styles.rowPressed]} onPress={edit}>
+        {hi}
+        <Pressable style={styles.itemPress} {...pressProps}>
           <View style={styles.whenCol}>
             <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
             <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
@@ -1099,9 +1152,9 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
  * «Убрать день»); у смены из «Расчёта» бейдж «из расчёта ›» открывает расчёт этого дня.
  * Недостача не уменьшает сумму смены — отдельная красная строка.
  */
-const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
+const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, onMenu, accent, dayTotal }) {
   const id = item.id;
-  const edit = useCallback(() => onEdit(id), [id, onEdit]);
+  const { props: pressProps, hi } = useRowPress(id, onEdit, onMenu);
   const noSum = item.amount == null || item.amount === '';
   const short = shortageOf(item);
   const plus = surplusOf(item);
@@ -1111,7 +1164,8 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       <View collapsable={false}>
       <Glass style={styles.eCard} intensity={34}>
-        <Pressable style={({ pressed }) => [styles.itemPress, pressed && styles.rowPressed]} onPress={edit}>
+        {hi}
+        <Pressable style={styles.itemPress} {...pressProps}>
           <View style={styles.whenCol}>
             <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
             <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
@@ -1122,7 +1176,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
               {item.place ? <Text style={styles.placeTxt}> · {item.place}</Text> : null}
             </Text>
             {linked ? (
-              <Pressable hitSlop={8} style={styles.calcBadge} onPress={() => onCalc(item.calcDate || item.date)}>
+              <Pressable hitSlop={8} style={styles.calcBadge} onPress={() => onCalc(linkKey(item))}>
                 <Text style={[styles.calcBadgeTxt, { color: accent }]}>∑ из расчёта ›</Text>
               </Pressable>
             ) : (
@@ -1157,6 +1211,15 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent }) {
         </Pressable>
       </Glass>
       </View>
+      {dayTotal ? (
+        <View style={styles.dayTotalRow}>
+          <Text style={styles.dayTotalL} numberOfLines={1}>
+            За день {fmtShort(item.date)} · {dayTotal.count} {plural(dayTotal.count, 'смена', 'смены', 'смен')}
+            {dayTotal.net !== dayTotal.amount ? ` · чистыми ${money(dayTotal.net)}` : ''}
+          </Text>
+          <Text style={[styles.dayTotalV, { color: accent }]}>{money(dayTotal.amount)}</Text>
+        </View>
+      ) : null}
     </Animated.View>
   );
 });
@@ -1211,6 +1274,35 @@ function SegLabel({ label, index, pos, fontSize }) {
 }
 
 /**
+ * Подпись внутри «линзы» жидкой плашки: стоит на своём месте капсулы (сдвинута на −pos), увеличена
+ * (как стекло увеличивает у края) и с красно-синей бахромой ±1 пт — приближение преломления.
+ */
+function LensLabel({ label, index, pos, segW, liquid, fontSize }) {
+  const st = useAnimatedStyle(() => {
+    const sh = liquidShape(liquid.value, pos.value, 0);
+    return {
+      width: segW.value,
+      // увеличение подписи под стеклом (линза ещё и тянется вместе с плашкой)
+      transform: [{ translateX: (index - pos.value) * segW.value }, { scale: sh.lens }],
+    };
+  });
+  const fz = fontSize && { fontSize };
+  return (
+    <Animated.View style={[styles.lqLab, st]}>
+      <Text style={[styles.segTxt, styles.lqTxtR, styles.segTxtAbs, fz]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={[styles.segTxt, styles.lqTxtB, styles.segTxtAbs, fz]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={[styles.segTxt, styles.segTxtOn, fz]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Animated.View>
+  );
+}
+
+/**
  * Сегмент-капсула (док и переключатели). Всё движение — на UI-потоке:
  * тап/свайп → плашка сразу едет пружиной (shared value), и только потом
  * через scheduleOnRN сообщаем JS (onChange). Жесты создаются один раз и
@@ -1253,6 +1345,11 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
 
 function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
   const n = labels.length;
+  const isLiquid = glass; // «жидкая» плашка — только у дока
+  const liquid = useSharedValue(0);
+  const vel = useSharedValue(0);
+  const lastPos = useSharedValue(value);
+  const lastT = useSharedValue(0);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -1275,9 +1372,10 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   }, [value, pos, target]);
 
   const gesture = useMemo(() => {
-    const pick = (p) => {
+    const pick = (p, v = 0) => {
       'worklet';
-      pos.value = withSpring(p, capSpring);
+      pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
+      if (isLiquid) liquid.value = withSpring(0, liquidOffSpring);
       if (p !== target.value) {
         target.value = p;
         // контент вкладок стартует в этом же кадре UI-потока, JS — следом
@@ -1290,6 +1388,8 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onBegin(() => {
         try {
           press.value = withTiming(1, { duration: 90 });
+          // удержание (дольше 160 мс) — плашка «разжижается»
+          if (isLiquid) liquid.value = withDelay(160, withSpring(1, liquidOnSpring));
         } catch (err) {
           wErr(err);
         }
@@ -1323,6 +1423,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onStart(() => {
         try {
           press.value = withTiming(1, { duration: 90 });
+          if (isLiquid) liquid.value = withSpring(1, liquidOnSpring);
         } catch (err) {
           wErr(err);
         }
@@ -1331,6 +1432,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         try {
           const w = Math.max(segW.value, 1);
           pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
+          if (isLiquid) vel.value = e.velocityX / w;
         } catch (err) {
           wErr(err);
         }
@@ -1338,7 +1440,8 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onEnd((e) => {
         try {
           const projected = pos.value + e.velocityX / 5000;
-          pick(Math.max(0, Math.min(n - 1, Math.round(projected))));
+          pick(Math.max(0, Math.min(n - 1, Math.round(projected))), isLiquid ? e.velocityX / Math.max(segW.value, 1) : 0);
+          vel.value = 0;
         } catch (err) {
           wErr(err);
         }
@@ -1346,17 +1449,53 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onFinalize(() => {
         try {
           press.value = withTiming(0, { duration: 160 });
+          // отпустили — пружиной с перелётом обратно в твёрдое стекло
+          if (isLiquid) liquid.value = withSpring(0, liquidOffSpring);
         } catch (err) {
           wErr(err);
         }
       });
     return Gesture.Race(pan, tap);
-  }, [n, pos, target, drag0, press, segW, commit, onPickUI]);
+  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel]);
 
-  const ind = useAnimatedStyle(() => ({
-    width: segW.value,
-    transform: [{ translateX: pos.value * segW.value }, { scale: 1 + press.value * 0.04 }],
-  }));
+  // скорость плашки и при пружине после отпускания (сегментов/с) — для растяжения по ходу
+  useAnimatedReaction(
+    () => pos.value,
+    (p) => {
+      if (!isLiquid) return;
+      const now = Date.now();
+      const dt = Math.max(1, now - lastT.value) / 1000;
+      if (dt < 0.2) vel.value = vel.value * 0.6 + ((p - lastPos.value) / dt) * 0.4;
+      else vel.value = 0;
+      lastPos.value = p;
+      lastT.value = now;
+    }
+  );
+
+  const ind = useAnimatedStyle(() => {
+    if (!isLiquid) {
+      return {
+        width: segW.value,
+        transform: [{ translateX: pos.value * segW.value }, { scale: 1 + press.value * 0.04 }],
+      };
+    }
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    return {
+      width: segW.value,
+      transform: [{ translateX: pos.value * segW.value }, { scaleX: sh.sx }, { scaleY: sh.sy }],
+    };
+  });
+  // «жидкий» слой плашки: ярче кромка, блик и цветная бахрома по краю (видны только при удержании)
+  const liquidLayer = useAnimatedStyle(() => ({ opacity: Math.min(1, Math.max(0, liquid.value)) }));
+  // линза: увеличенные подписи под плашкой (обрезаны по её форме), только при удержании
+  const lens = useAnimatedStyle(() => {
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    return {
+      width: segW.value,
+      opacity: Math.min(1, Math.max(0, liquid.value * 1.4)),
+      transform: [{ translateX: pos.value * segW.value }, { scaleX: sh.sx }, { scaleY: sh.sy }],
+    };
+  });
 
   const Wrap = glass ? Glass : View;
   return (
@@ -1376,13 +1515,31 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         >
           {/* плашку рисуем только после замера ширины — без «прыжка» */}
           {measured && (
-            <Animated.View pointerEvents="none" style={[styles.segInd, { borderRadius: (height - 10) / 2 }, ind]}>
+            <Animated.View
+              pointerEvents="none"
+              style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: (height - 10) / 2 }, ind]}
+            >
               <View style={styles.segIndEdge} />
+              {isLiquid ? (
+                <Animated.View style={[StyleSheet.absoluteFill, liquidLayer]}>
+                  <View style={[styles.lqFringe, styles.lqFringeR, { borderRadius: (height - 10) / 2 }]} />
+                  <View style={[styles.lqFringe, styles.lqFringeB, { borderRadius: (height - 10) / 2 }]} />
+                  <View style={[styles.lqRim, { borderRadius: (height - 10) / 2 }]} />
+                  <View style={[styles.lqShine, { borderTopLeftRadius: (height - 10) / 2, borderTopRightRadius: (height - 10) / 2 }]} />
+                </Animated.View>
+              ) : null}
             </Animated.View>
           )}
           {labels.map((lab, i) => (
             <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
           ))}
+          {measured && isLiquid ? (
+            <Animated.View pointerEvents="none" style={[styles.lqLens, { borderRadius: (height - 10) / 2 }, lens]}>
+              {labels.map((lab, i) => (
+                <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} />
+              ))}
+            </Animated.View>
+          ) : null}
         </View>
       </GestureDetector>
     </Wrap>
@@ -1526,9 +1683,15 @@ function blankDay(prefs) {
  * Новый день расчёта. Если на эту дату есть смена с отметкой наставника (из заметки «+300») —
  * «Наставник» уже включён, роль и время — как у этой смены.
  */
-function seedDay(prefs, shifts, date) {
-  const d = blankDay(prefs);
-  const m = (shifts || []).find((s) => s && s.date === date && !isLinkedShift(s) && mentorMark(s));
+function seedDay(prefs, shifts, key, days) {
+  const date = keyDate(key);
+  let d = blankDay(prefs);
+  // 2-я и дальше смена дня: роль как у 1-й, время — другое (день ↔ ночь)
+  const first = keySlot(key) > 1 ? days && days[date] : null;
+  if (first) d = { ...d, role: first.role || d.role, time: first.time === 'day' ? 'night' : 'day' };
+  const m = (shifts || []).find(
+    (s) => s && s.date === date && !isLinkedShift(s) && mentorMark(s) && (!first || shiftTime(s) === d.time)
+  );
   if (!m) return d;
   return { ...d, mentor: true, role: shiftRole(m) || d.role, time: shiftTime(m) || d.time };
 }
@@ -2208,16 +2371,16 @@ function CalcUsageList({ day, rates }) {
 }
 
 /** «Сохранённые расчёты» — в шторке; тап по дню — открыть его. */
-function CalcSavedList({ calc, date, accent, onPick }) {
+function CalcSavedList({ calc, date: cur, accent, onPick }) {
   const saved = useMemo(
     () =>
       Object.keys(calc.days)
         .filter((d) => hasCounts(calc.days[d].counts))
-        .sort((a, b) => b.localeCompare(a))
+        .sort((a, b) => compareKeys(b, a))
         .map((d) => {
           const x = calc.days[d];
           const r = computeCalc(x.counts, calc.rates, x.staff, !!x.gap);
-          return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
+          return { key: d, date: keyDate(d), slot: keySlot(d), role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
         }),
     [calc.days, calc.rates]
   );
@@ -2226,19 +2389,20 @@ function CalcSavedList({ calc, date, accent, onPick }) {
     <View>
       {saved.map((x) => (
         <ScaleButton
-          key={x.date}
-          style={[styles.setItem, x.date === date && { borderColor: accent }]}
-          onPress={() => onPick(x.date)}
+          key={x.key}
+          style={[styles.setItem, x.key === cur && { borderColor: accent }]}
+          onPress={() => onPick(x.key)}
         >
           <View>
             <Text style={styles.setL}>
               {fmtShort(x.date)} {x.date.slice(0, 4)}
+              {x.slot > 1 ? ` · смена ${x.slot}` : ''}
             </Text>
             <Text style={styles.setS}>
               {roleLabel(x.role, x.time)} · {x.positions} поз.
             </Text>
           </View>
-          <Text style={[styles.itemTitle, x.date === date && { color: accent }]}>{money(x.pay)}</Text>
+          <Text style={[styles.itemTitle, x.key === cur && { color: accent }]}>{money(x.pay)}</Text>
         </ScaleButton>
       ))}
       <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
@@ -2249,6 +2413,7 @@ function CalcSavedList({ calc, date, accent, onPick }) {
 const CalcView = memo(function CalcView({
   calc, date, day, accent, linkedShift, manualOnDate, adj, onAdj, scrollRef, scrollY, scrollTop,
   onPatchDay, onRole, onTime, onOpenRates, onReset, onShowShift, onOpenSection,
+  slots = [1], slot = 1, onSlot, onAddSlot, dayTotal,
 }) {
 
   // ── ввод с клавиатуры: Далее / ↑ идут по списку сверху вниз, как строки в Excel
@@ -2329,11 +2494,11 @@ const CalcView = memo(function CalcView({
     () =>
       Object.keys(calc.days)
         .filter((d) => hasCounts(calc.days[d].counts))
-        .sort((a, b) => b.localeCompare(a))
+        .sort((a, b) => compareKeys(b, a))
         .map((d) => {
           const x = calc.days[d];
           const r = computeCalc(x.counts, calc.rates, x.staff, !!x.gap);
-          return { date: d, role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
+          return { key: d, date: keyDate(d), slot: keySlot(d), role: x.role, time: x.time, pay: ownPay(r, calc.rates, x), positions: r.positions };
         }),
     [calc.days, calc.rates]
   );
@@ -2341,8 +2506,25 @@ const CalcView = memo(function CalcView({
 
   return (
     <>
+      {slots.length > 1 ? (
+        <View style={styles.slotRow}>
+          <SegmentCapsule
+            key={slots.join(',')}
+            value={Math.max(0, slots.indexOf(slot))}
+            labels={slots.map((n) => `Смена ${n}`)}
+            height={42}
+            onChange={(i) => onSlot(slots[i])}
+          />
+          {dayTotal ? (
+            <Text style={styles.slotTotal}>
+              За день {fmtShort(date)} · {dayTotal.count} {plural(dayTotal.count, 'смена', 'смены', 'смен')} ·{' '}
+              <Text style={{ color: accent, fontWeight: '700' }}>{money(dayTotal.amount)}</Text>
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
       <Glass style={styles.balance} intensity={42}>
-        <Text style={styles.period}>Моя зарплата</Text>
+        <Text style={styles.period}>{slots.length > 1 ? `Моя зарплата · смена ${slot}` : 'Моя зарплата'}</Text>
         <Text style={styles.paySub}>
           {roleLabel(day.role, day.time)} · {fmtShort(date)}
         </Text>
@@ -2432,6 +2614,9 @@ const CalcView = memo(function CalcView({
             </View>
             <Text style={styles.chevMini}>›</Text>
           </Pressable>
+          <ScaleButton style={[styles.actBtn, { marginTop: 0, marginBottom: 10 }]} onPress={onAddSlot}>
+            <Text style={[styles.actBtnTxt, { color: accent }]}>＋ Ещё смена за этот день</Text>
+          </ScaleButton>
         </Animated.View>
       )}
       <Animated.View style={styles.calcBtns} layout={ROW_LAYOUT}>
@@ -2469,13 +2654,15 @@ const CalcView = memo(function CalcView({
           icon="🗂"
           title="Сохранённые расчёты"
           big={fmtNum(saved.length)}
-          sub={saved.length ? `последний ${fmtShort(saved[0].date)}` : 'пока нет'}
+          sub={saved.length ? `последний ${fmtShort(saved[0].date)}${saved[0].slot > 1 ? ` · смена ${saved[0].slot}` : ''}` : 'пока нет'}
           onPress={() => onOpenSection('calcSaved')}
         />
       </Animated.View>
 
       <Animated.View layout={ROW_LAYOUT}>
-        <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
+        <Text style={[styles.hint, { textAlign: 'center' }]}>
+          Расчёт сохраняется автоматически по дате. Закрыли две смены за день — «Ещё смена за этот день».
+        </Text>
       </Animated.View>
     </>
   );
@@ -2546,7 +2733,7 @@ const PayCard = memo(function PayCard({ payday, t, short, mentor, accent }) {
   );
 });
 
-const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, arc }) {
+const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, mentor, accent, onEdit, onToggle, onReturn, onMenu, arc }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2566,7 +2753,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                 <Text style={styles.empty}>Расходов к этой зарплате нет — «+» вверху</Text>
               </ItemCard>
             ) : (
-              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
+              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} onMenu={onMenu} arc={arc} />)
             )}
             <Text style={[styles.hint, styles.pageHint]}>
               Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
@@ -2664,7 +2851,57 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
   );
 });
 
-const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry }) {
+/** Карточка закрытой зарплаты для «Фото» (снимок этого View) — тот же текст, что в PDF. */
+const ExportCard = function ExportCard({ r, accent, viewRef }) {
+  return (
+    <View ref={viewRef} collapsable={false} style={styles.expCard}>
+      <Text style={styles.expTitle}>{r.title}</Text>
+      <Text style={styles.expSub}>
+        {r.period} · {r.count} {plural(r.count, 'смена', 'смены', 'смен')}
+      </Text>
+      {r.rows.map((x) => (
+        <View key={x.id}>
+          <View style={styles.expRow}>
+            <Text style={styles.expDay}>{x.day}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.expT} numberOfLines={1}>
+                {x.title}
+                {x.place ? ` · ${x.place}` : ''}
+                {x.calc && x.calc.slot > 1 ? ` · смена ${x.calc.slot}` : ''}
+              </Text>
+              <Text style={styles.expM} numberOfLines={2}>
+                {x.hours} ч · {x.source}
+                {x.notes.length ? ` · ${x.notes.join(' · ')}` : ''}
+              </Text>
+            </View>
+            <Text style={styles.expA}>{x.amount}</Text>
+          </View>
+          {x.dayTotal ? (
+            <View style={[styles.expRow, styles.expDayTot]}>
+              <Text style={[styles.expM, { flex: 1 }]}>За день · {x.dayTotal.count} смены</Text>
+              <Text style={styles.expA}>{x.dayTotal.amount}</Text>
+            </View>
+          ) : null}
+        </View>
+      ))}
+      <View style={{ marginTop: 10 }}>
+        {r.lines.map(([k, v]) => (
+          <View key={k} style={styles.expLine}>
+            <Text style={styles.expM}>{k}</Text>
+            <Text style={styles.expT}>{v}</Text>
+          </View>
+        ))}
+      </View>
+      <View style={[styles.expNet, { borderColor: accent }]}>
+        <Text style={styles.expNetK}>К выплате</Text>
+        <Text style={[styles.expNetV, { color: r.netValue < 0 ? '#ff453a' : accent }]}>{r.net}</Text>
+      </View>
+      {r.surplus ? <Text style={styles.expM}>Излишек {r.surplus} — не в зарплату.</Text> : null}
+    </View>
+  );
+};
+
+const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onMenu, onCarry, onExport }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
     const a = Math.min(1, Math.abs(d));
@@ -2673,18 +2910,35 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
     };
   });
   const t = useMemo(() => shiftTotals(list, carry), [list, carry]);
+  const days = useMemo(() => dayTotals(list), [list]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
             <ShiftSumCard payday={payday} t={t} accent={accent} onCarry={onCarry} />
+            {list.length ? (
+              <ScaleButton style={[styles.actBtn, { marginTop: 0, marginBottom: 10 }]} onPress={() => onExport && onExport(payday)}>
+                <Text style={[styles.actBtnTxt, { color: accent }]}>Сохранить зарплату · PDF / Фото</Text>
+              </ScaleButton>
+            ) : null}
             {list.length === 0 ? (
               <ItemCard>
                 <Text style={styles.empty}>Смен к этой зарплате нет — «+» вверху</Text>
               </ItemCard>
             ) : (
-              list.map((s) => <ShiftCard key={s.id} item={s} onEdit={onEdit} onCalc={onCalc} accent={accent} />)
+              list.map((s, i) => (
+                <ShiftCard
+                  key={s.id}
+                  item={s}
+                  onEdit={onEdit}
+                  onCalc={onCalc}
+                  onMenu={onMenu}
+                  accent={accent}
+                  // итог дня — под последней сменой дня, где смен 2 и больше
+                  dayTotal={days[s.date] && list[i + 1]?.date !== s.date ? days[s.date] : null}
+                />
+              ))
             )}
             <Text style={[styles.hint, styles.pageHint]}>Листайте вбок — другие зарплаты</Text>
           </View>
@@ -2881,10 +3135,18 @@ export default function App() {
   const [calc, setCalc] = useState(null);
   const calcRef = useRef(null);
   calcRef.current = calc;
-  const [calcDate, setCalcDate] = useState(todayIso);
+  const [calcDate, setCalcDateRaw] = useState(todayIso);
+  // номер смены дня в «Расчёте» (1 — первая; 2+ — «Ещё смена за этот день»)
+  const [calcSlot, setCalcSlot] = useState(1);
+  const setCalcDate = useCallback((d) => {
+    setCalcDateRaw(d);
+    setCalcSlot(1);
+  }, []);
+  const calcKeyNow = calcKey(calcDate, calcSlot);
   const [calcItem, setCalcItem] = useState(null);
-  const calcDateRef = useRef(calcDate);
-  calcDateRef.current = calcDate;
+  const [rowMenu, setRowMenu] = useState(null); // { kind: 'exp' | 'shift', id } — меню строки по удержанию
+  const calcDateRef = useRef(calcKeyNow);
+  calcDateRef.current = calcKeyNow;
   const calcTimer = useRef(null);
   const calcPending = useRef(null);
 
@@ -2926,7 +3188,7 @@ export default function App() {
     (fn, prefs) => {
       const date = calcDateRef.current;
       patchCalc((p) => {
-        const d = p.days[date] || seedDay(p.prefs, stateRef.current?.shifts, date);
+        const d = p.days[date] || seedDay(p.prefs, stateRef.current?.shifts, date, p.days);
         const nd = fn(d);
         if (nd === d && !prefs) return p;
         return {
@@ -3078,8 +3340,35 @@ export default function App() {
     []
   );
   const calcDay = useMemo(
-    () => (calc ? calc.days[calcDate] || seedDay(calc.prefs, state?.shifts, calcDate) : null),
-    [calc, calcDate, state?.shifts]
+    () => (calc ? calc.days[calcKeyNow] || seedDay(calc.prefs, state?.shifts, calcKeyNow, calc.days) : null),
+    [calc, calcKeyNow, state?.shifts]
+  );
+  const calcSlotList = useMemo(() => {
+    const l = calc ? calcSlots(calc.days, calcDate) : [1];
+    return l.includes(calcSlot) ? l : [...l, calcSlot].sort((a, b) => a - b);
+  }, [calc, calcDate, calcSlot]);
+  /** Итог дня в «Расчёте» — только если за дату посчитано 2 смены и больше. */
+  const calcDayTotal = useMemo(() => {
+    if (!calc) return null;
+    const keys = Object.keys(calc.days).filter((k) => keyDate(k) === calcDate && hasCounts(calc.days[k].counts));
+    if (keys.length < 2) return null;
+    return { count: keys.length, amount: keys.reduce((a, k) => a + calcPayForDay(calc.days[k], calc.rates), 0) };
+  }, [calc, calcDate]);
+  /** «Ещё смена за этот день»: новый расчёт той же даты (роль — как у 1-й, время — другое). */
+  const addCalcSlot = useCallback(
+    (date) => {
+      Haptics.selectionAsync();
+      const d = typeof date === 'string' ? date : calcDateRef.current.slice(0, 10);
+      const c = calcRef.current;
+      const n = c ? nextSlot(c.days, d) : 2;
+      const k = calcKey(d, n);
+      patchCalc((p) =>
+        p.days[k] ? p : { ...p, days: { ...p.days, [k]: { ...seedDay(p.prefs, stateRef.current?.shifts, k, p.days), updated: Date.now() } } }
+      );
+      setCalcDateRaw(d);
+      setCalcSlot(n);
+    },
+    [patchCalc]
   );
 
 
@@ -3327,6 +3616,8 @@ export default function App() {
     const l = state?.settings?.light ?? 54;
     return `hsl(${h}, 72%, ${l}%)`;
   }, [state?.settings?.hue, state?.settings?.light]);
+  const accentRef = useRef(accent);
+  accentRef.current = accent;
 
   const openExpense = useCallback((id) => {
     const st = stateRef.current;
@@ -3531,10 +3822,10 @@ export default function App() {
       if (!s) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       if (isLinkedShift(s)) {
-        const date = s.calcDate || s.date;
+        const date = linkKey(s);
         Alert.alert(
           'Смена из расчёта',
-          `Она считается по «Расчёту» за ${fmtShort(date)}. Чтобы убрать смену, сбросьте этот расчёт.`,
+          `Она считается по «Расчёту» за ${fmtShort(keyDate(date))}${keySlot(date) > 1 ? ` (смена ${keySlot(date)})` : ''}. Чтобы убрать смену, сбросьте этот расчёт.`,
           [
             { text: 'Отмена', style: 'cancel' },
             {
@@ -3569,21 +3860,88 @@ export default function App() {
     [patch, patchCalc]
   );
 
-  /** Открыть «Расчёт» на дате связанной смены. */
-  const openCalcOn = useCallback((date) => {
+  /** Открыть «Расчёт» на дате (и номере смены дня) связанной смены; key — calcKey или просто дата. */
+  const openCalcOn = useCallback((key) => {
     Haptics.selectionAsync();
-    setCalcDate(date);
+    setCalcDateRaw(keyDate(key));
+    setCalcSlot(keySlot(key));
     goPage(2);
   }, [goPage]);
 
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
+  // ── Экспорт зарплаты: PDF (expo-print) / Фото (снимок карточки) → системное «Поделиться / Сохранить»
+  const [exportP, setExportP] = useState(null);
+  const exportRef = useRef(null);
+  const openExportMenu = useCallback((p) => {
+    Haptics.selectionAsync();
+    setExportP(p);
+    setSheet('export');
+  }, []);
+  const shareFile = useCallback(async (uri, mimeType, UTI) => {
+    if (!(await Sharing.isAvailableAsync())) {
+      Alert.alert('Не получилось', 'На этом устройстве нельзя поделиться файлом.');
+      return;
+    }
+    await Sharing.shareAsync(uri, { mimeType, UTI, dialogTitle: 'Сохранить зарплату' });
+  }, []);
+  const exportPdf = useCallback(
+    (p) => {
+      const r = payReport(stateRef.current, p, calcRef.current);
+      closeThen(async () => {
+        try {
+          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current) });
+          await shareFile(uri, 'application/pdf', 'com.adobe.pdf');
+        } catch (e) {
+          Alert.alert('PDF не сохранён', String(e?.message || e));
+        }
+      });
+    },
+    [closeThen, shareFile]
+  );
+  const exportPhoto = useCallback(async () => {
+    try {
+      const uri = await captureRef(exportRef, { format: 'png', quality: 1, result: 'tmpfile' });
+      closeThen(() => shareFile(uri, 'image/png', 'public.png').catch((e) => Alert.alert('Фото не сохранено', String(e?.message || e))));
+    } catch (e) {
+      Alert.alert('Фото не сохранено', String(e?.message || e));
+    }
+  }, [closeThen, shareFile]);
+
+  /** Меню строки (долгое нажатие): «Изменить» / «Рассчитать» / «Удалить» / «Отмена». */
+  const openExpenseMenu = useCallback((id) => {
+    setRowMenu({ kind: 'exp', id });
+    setSheet('rowMenu');
+  }, []);
+  const openShiftMenu = useCallback((id) => {
+    setRowMenu({ kind: 'shift', id });
+    setSheet('rowMenu');
+  }, []);
+  /** «Рассчитать» для конкретной смены: её расчёт, а у пустой — свободный расчёт этой даты с её ролью/временем. */
+  const calcShiftNow = useCallback(
+    (id) => {
+      const s = stateRef.current?.shifts.find((x) => x.id === id);
+      const c = calcRef.current;
+      if (!s || !c) return;
+      const tg = calcTargetFor(s, c.days);
+      if (tg.seed) {
+        patchCalc((p) => {
+          const cur = p.days[tg.key];
+          if (cur && hasCounts(cur.counts)) return p;
+          const base = cur || seedDay(p.prefs, stateRef.current?.shifts, tg.key, p.days);
+          return { ...p, days: { ...p.days, [tg.key]: { ...base, ...tg.seed, updated: Date.now() } } };
+        });
+      }
+      openCalcOn(tg.key);
+    },
+    [patchCalc, openCalcOn]
+  );
   const payPageProps = useMemo(
-    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, arc }),
-    [accent, openExpense, toggleStatus, returnExpenseNow, arc]
+    () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, onMenu: openExpenseMenu, arc }),
+    [accent, openExpense, toggleStatus, returnExpenseNow, openExpenseMenu, arc]
   );
   const shiftPageProps = useMemo(
-    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onCarry: openCarry }),
-    [accent, openShift, openCalcOn, openCarry]
+    () => ({ accent, onEdit: openShift, onCalc: openCalcOn, onMenu: openShiftMenu, onCarry: openCarry, onExport: openExportMenu }),
+    [accent, openShift, openCalcOn, openShiftMenu, openCarry, openExportMenu]
   );
 
   if (!state) {
@@ -3608,25 +3966,31 @@ export default function App() {
     setSheet(null);
   };
   const resetCalc = () => {
-    const date = calcDate;
+    const date = calcKeyNow;
+    const n = calcSlot;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    Alert.alert('Сбросить расчёт?', `Все подсчёты за ${fmtShort(date)} будут удалены, смена «из расчёта» уберётся из «Смен».`, [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Сбросить',
-        style: 'destructive',
-        onPress: () =>
-          patchCalc((p) => {
-            if (!p.days[date]) return p;
-            const days = { ...p.days };
-            delete days[date];
-            return { ...p, days };
-          }),
-      },
-    ]);
+    Alert.alert(
+      'Сбросить расчёт?',
+      `Все подсчёты за ${fmtShort(calcDate)}${n > 1 ? ` (смена ${n})` : ''} будут удалены, смена «из расчёта» уберётся из «Смен».`,
+      [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Сбросить',
+          style: 'destructive',
+          onPress: () => {
+            patchCalc((p) => {
+              if (!p.days[date]) return p;
+              const days = { ...p.days };
+              delete days[date];
+              return { ...p, days };
+            });
+            if (n > 1) setCalcSlot(1);
+          },
+        },
+      ]
+    );
   };
-  const linkedOnCalcDate =
-    state.shifts.find((s) => isLinkedShift(s) && (s.calcDate || s.date) === calcDate) || null;
+  const linkedOnCalcDate = state.shifts.find((s) => isLinkedShift(s) && linkKey(s) === calcKeyNow) || null;
   const manualOnCalcDate = state.shifts.some(
     (s) => !isLinkedShift(s) && s.date === calcDate && s.amount != null && s.amount !== ''
   );
@@ -4453,6 +4817,83 @@ export default function App() {
         };
       }
 
+      case 'export': {
+        if (!exportP) return { title: '', onClose: closeSheet, body: null };
+        const r = payReport(state, exportP, calc);
+        return {
+          title: 'Сохранить зарплату',
+          onClose: closeSheet,
+          body: (
+            <>
+              <ExportCard r={r} accent={accent} viewRef={exportRef} />
+              <View style={styles.calcBtns}>
+                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPdf(exportP)}>
+                  <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
+                </ScaleButton>
+                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={exportPhoto}>
+                  <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
+                </ScaleButton>
+              </View>
+              <ScaleButton style={styles.actBtn} onPress={closeSheet}>
+                <Text style={styles.actBtnTxt}>Отмена</Text>
+              </ScaleButton>
+              <Text style={styles.hint}>Откроется «Поделиться»: «Сохранить в Файлы», «Сохранить изображение» или отправить.</Text>
+            </>
+          ),
+        };
+      }
+
+      case 'rowMenu': {
+        const isShift = rowMenu?.kind === 'shift';
+        const it = rowMenu
+          ? (isShift ? state.shifts : state.expenses).find((x) => x.id === rowMenu.id)
+          : null;
+        if (!it) return { title: '', onClose: closeSheet, body: null };
+        const linkedIt = isShift && isLinkedShift(it);
+        const head = `${fmtShort(it.date)}, ${DOW[parse(it.date).getDay()]} · ${it.title || (isShift ? 'Смена' : 'Без названия')}${
+          it.amount != null && it.amount !== '' ? ` · ${money(it.amount)}` : ''
+        }`;
+        const id = it.id;
+        const acts = [
+          ['Изменить', isShift ? 'сумма, недостача, место' : 'сумма, название, дата', () => closeThen(() => (isShift ? openShift(id) : openExpense(id)))],
+          isShift
+            ? ['Рассчитать', linkedIt ? 'открыть расчёт этой смены' : 'посчитать эту смену по позициям', () => closeThen(() => calcShiftNow(id))]
+            : ['Рассчитать', 'смену за этот день — в «Расчёте»', () => closeThen(() => openCalcOn(it.date))],
+          ['Удалить', linkedIt ? 'смена из расчёта — сбросить расчёт' : 'с подтверждением', () => closeThen(() => (isShift ? confirmDeleteShift(id) : confirmDeleteExpense(id))), true],
+        ];
+        return {
+          title: isShift ? 'Смена' : 'Расход',
+          onClose: closeSheet,
+          body: (
+            <>
+              <Text style={styles.menuHead} numberOfLines={2}>
+                {head}
+              </Text>
+              <ItemCard style={styles.listCard}>
+                {acts.map(([t, sub, fn, danger], i) => (
+                  <Pressable
+                    key={t}
+                    style={({ pressed }) => [styles.lRow, i < acts.length - 1 && styles.lRowSep, pressed && styles.rowPressed]}
+                    onPress={() => {
+                      Haptics.selectionAsync();
+                      fn();
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.lTitle, danger && { color: '#ff453a' }]}>{t}</Text>
+                      <Text style={styles.lSub}>{sub}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </ItemCard>
+              <ScaleButton style={styles.actBtn} onPress={closeSheet}>
+                <Text style={styles.actBtnTxt}>Отмена</Text>
+              </ScaleButton>
+            </>
+          ),
+        };
+      }
+
       case 'add':
         return {
           title: 'Добавить',
@@ -4549,7 +4990,8 @@ export default function App() {
       case 'shift': {
         if (form.linked) {
           const sh = state.shifts.find((x) => x.id === editId);
-          const d = sh ? sh.calcDate || sh.date : form.date;
+          const dk = sh ? linkKey(sh) : form.date;
+          const d = keyDate(dk);
           const kShort = fieldKb('shortage', ['shortage'], form.surplus ? 'Излишек' : 'Недостача');
           return {
             title: 'Смена из расчёта',
@@ -4590,9 +5032,20 @@ export default function App() {
 
                 <ScaleButton
                   style={[styles.actBtn, { backgroundColor: accent }]}
-                  onPress={() => closeThen(() => openCalcOn(d))}
+                  onPress={() => closeThen(() => openCalcOn(dk))}
                 >
                   <Text style={[styles.actBtnTxt, styles.onAccent]}>Открыть в «Расчёте»</Text>
+                </ScaleButton>
+                <ScaleButton
+                  style={styles.actBtn}
+                  onPress={() =>
+                    closeThen(() => {
+                      addCalcSlot(d);
+                      goPage(2);
+                    })
+                  }
+                >
+                  <Text style={[styles.actBtnTxt, { color: accent }]}>＋ Рассчитать ещё смену за этот день</Text>
                 </ScaleButton>
               </>
             ),
@@ -5176,11 +5629,12 @@ export default function App() {
           body: (
             <CalcSavedList
               calc={calc}
-              date={calcDate}
+              date={calcKeyNow}
               accent={accent}
-              onPick={(d) => {
+              onPick={(k) => {
                 Haptics.selectionAsync();
-                setCalcDate(d);
+                setCalcDateRaw(keyDate(k));
+                setCalcSlot(keySlot(k));
                 setSheet(null);
               }}
             />
@@ -5416,7 +5870,12 @@ export default function App() {
                     accent={accent}
                     linkedShift={linkedOnCalcDate}
                     manualOnDate={manualOnCalcDate}
-                    adj={calcDayAdj(state.shifts, calcDate, calcDay.time)}
+                    adj={calcDayAdj(state.shifts, calcKeyNow, calcDay.time)}
+                    slots={calcSlotList}
+                    slot={calcSlot}
+                    onSlot={setCalcSlot}
+                    onAddSlot={addCalcSlot}
+                    dayTotal={calcDayTotal}
                     onAdj={onCalcAdj}
                     scrollRef={mainScroll}
                     scrollY={mainScrollY}
@@ -5655,6 +6114,7 @@ const styles = StyleSheet.create({
     minHeight: 66,
     paddingRight: 10,
     borderRadius: 22,
+    overflow: 'hidden',
   },
   amtPaid: { color: 'rgba(235,235,245,0.6)' },
   eFoot: {
@@ -5969,6 +6429,17 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.24)',
   },
+  // твёрдое стекло плашки дока: чуть плотнее и с яркой кромкой
+  segIndSolid: { backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.42)' },
+  lqRim: { ...StyleSheet.absoluteFillObject, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.75)' },
+  lqFringe: { ...StyleSheet.absoluteFillObject, borderWidth: 1.5 },
+  lqFringeR: { borderColor: 'rgba(255,70,90,0.45)', transform: [{ translateX: -1.2 }] },
+  lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
+  lqShine: { position: 'absolute', top: 1, left: 10, right: 10, height: '42%', backgroundColor: 'rgba(255,255,255,0.12)' },
+  lqLens: { position: 'absolute', top: 5, left: 5, bottom: 5, overflow: 'hidden' },
+  lqLab: { position: 'absolute', top: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
+  lqTxtR: { color: 'rgba(255,80,100,0.55)', transform: [{ translateX: -1 }] },
+  lqTxtB: { color: 'rgba(90,170,255,0.55)', transform: [{ translateX: 1 }] },
   segIndEdge: {
     position: 'absolute',
     top: 0,
@@ -6291,6 +6762,43 @@ const styles = StyleSheet.create({
   bigPayWord: { fontSize: 38, letterSpacing: -1, lineHeight: 62 },
   calcMeta: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
   calcSegs: { flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 6 },
+  slotRow: { marginBottom: 10 },
+  slotTotal: { color: 'rgba(235,235,245,0.7)', fontSize: 14, textAlign: 'center', marginTop: 8 },
+  dayTotalRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, paddingTop: 6, paddingBottom: 2 },
+  expCard: { backgroundColor: 'rgb(22,22,28)', borderRadius: 22, padding: 16, marginBottom: 12 },
+  expTitle: { color: '#fff', fontSize: 22, fontWeight: '700' },
+  expSub: { color: 'rgba(235,235,245,0.6)', fontSize: 13, marginTop: 2, marginBottom: 10 },
+  expRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingVertical: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.12)',
+  },
+  expDayTot: { backgroundColor: 'rgba(255,255,255,0.05)', paddingHorizontal: 8, borderRadius: 8 },
+  expDay: { color: 'rgba(235,235,245,0.7)', fontSize: 13, width: 78 },
+  expT: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  expM: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 1 },
+  expA: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  expLine: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
+  expNet: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 4,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  expNetK: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  expNetV: { fontSize: 22, fontWeight: '800' },
+  rowHi: { ...StyleSheet.absoluteFillObject, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.09)', opacity: 0 },
+  rowHiOn: { opacity: 1 },
+  menuHead: { color: 'rgba(235,235,245,0.6)', fontSize: 14, textAlign: 'center', marginBottom: 12 },
+  dayTotalL: { flex: 1, color: 'rgba(235,235,245,0.7)', fontSize: 13 },
+  dayTotalV: { fontSize: 15, fontWeight: '700' },
   calcBtns: { flexDirection: 'row', gap: 10 },
   checkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
   checkBox: {

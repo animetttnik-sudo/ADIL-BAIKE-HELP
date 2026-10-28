@@ -78,12 +78,31 @@ export function shiftRole(s) {
   return null;
 }
 
-/** Смены зарплаты p, по дате. */
+const TIME_ORDER = { day: 0, night: 1 };
+/** Смены зарплаты p, по дате; в один день — сначала дневная, потом ночная. */
 export function shiftsInPeriod(shifts, p) {
   const per = workPeriod(p);
   return (shifts || [])
     .filter((s) => s && s.date >= per.start && s.date <= per.end)
-    .sort((a, b) => a.date.localeCompare(b.date));
+    .sort((a, b) => a.date.localeCompare(b.date) || (TIME_ORDER[shiftTime(a)] ?? 2) - (TIME_ORDER[shiftTime(b)] ?? 2));
+}
+
+/**
+ * Итог дня: в один день может быть несколько смен (две закрытые смены, день + ночь).
+ * → { [date]: { count, amount, net } } — только дни, где смен 2 и больше (для строки «За день» в «Сменах»).
+ * amount — сумма смен, net — чистыми (как shiftNet: + наставник − недостача − потерянная премия).
+ */
+export function dayTotals(list) {
+  const by = {};
+  for (const s of list || []) {
+    if (!s || !s.date) continue;
+    const d = (by[s.date] = by[s.date] || { count: 0, amount: 0, net: 0 });
+    d.count += 1;
+    d.amount += shiftAmount(s);
+    d.net += shiftNet(s);
+  }
+  for (const k of Object.keys(by)) if (by[k].count < 2) delete by[k];
+  return by;
 }
 
 /**

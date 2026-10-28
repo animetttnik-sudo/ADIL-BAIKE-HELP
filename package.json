@@ -18,7 +18,9 @@
     "expo-image": "~58.0.16",
     "expo-image-picker": "~58.0.10",
     "expo-linking": "~58.0.14",
+    "expo-print": "~58.0.8",
     "expo-router": "~58.0.25",
+    "expo-sharing": "~58.0.21",
     "expo-splash-screen": "~58.0.11",
     "expo-sqlite": "~58.0.13",
     "expo-status-bar": "~58.0.4",
@@ -33,11 +35,14 @@
     "react-native-reanimated": "4.7.1",
     "react-native-safe-area-context": "~5.10.1",
     "react-native-screens": "~4.30.0",
+    "react-native-view-shot": "6.1.1",
     "react-native-web": "^0.21.4",
     "react-native-worklets": "0.13.0"
   },
   "devDependencies": {
     "@types/react": "~19.3.0",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~58.0.4",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -47,7 +52,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs",
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs tests/multiShift.test.mjs tests/liquid.test.mjs",
     "publish": "npm test && npx eas-cli@latest update --branch main --message \"$(git log -1 --pretty=%s)\" --environment production --platform all --non-interactive"
   },
   "private": true
