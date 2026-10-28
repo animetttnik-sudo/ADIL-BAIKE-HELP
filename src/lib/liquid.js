@@ -3,6 +3,7 @@
  *  liquid 0…1 — палец держит/ведёт по доку; pos — дробная позиция; vel — скорость (сегментов/с).
  *  Покой (liquid 0, pos целый): 1 × 1. Удержание: ×1.12. Движение: тянется по ходу (до +35 %),
  *  сплющивается по высоте (сохраняя «объём»); перелёт пружины даёт тот же эффект при отпускании.
+ *  sx/sy — масштаб подписей-линзы (как раньше), rx/ry — размер приподнятой капли над доком.
  */
 export function liquidShape(liquid, pos, vel) {
   'worklet';
@@ -12,5 +13,14 @@ export function liquidShape(liquid, pos, vel) {
   const speed = Math.min(1, Math.abs(vel) / 6) * Math.min(1, frac * 8);
   const stretch = Math.min(0.35, frac * 0.45 + speed * 0.22);
   const grow = 1 + 0.12 * l;
-  return { sx: grow * (1 + stretch), sy: grow * (1 - stretch * 0.4), lens: 1 + 0.16 * l };
+  // «капля» над панелью: размеры приподнятой линзы относительно плашки (ширина/высота),
+  // заметно выше панели (×1.55 высоты плашки ≈ ×1.3 высоты дока) и чуть тянется по ходу
+  const raise = 1 + 0.55 * l;
+  return {
+    sx: grow * (1 + stretch),
+    sy: grow * (1 - stretch * 0.4),
+    lens: 1 + 0.16 * l,
+    rx: (1 + 0.18 * l) * (1 + stretch),
+    ry: raise * (1 - stretch * 0.3),
+  };
 }

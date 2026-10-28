@@ -41,3 +41,16 @@ test('на вкладке старая скорость не оставляет 
   close(s.sx, 1);
   close(s.sy, 1);
 });
+
+test('капля над панелью: в покое совпадает с плашкой, при удержании выше дока (64 пт) и шире', () => {
+  const h0 = 54; // плашка в доке высотой 64
+  const rest = liquidShape(0, 1, 0);
+  close(rest.rx, 1);
+  close(rest.ry, 1);
+  const on = liquidShape(1, 1, 0);
+  assert.ok(h0 * on.ry >= 64 * 1.25 && h0 * on.ry <= 64 * 1.4, `высота капли ${h0 * on.ry}`);
+  assert.ok(on.rx > 1.1);
+  const drag = liquidShape(1, 0.5, 5);
+  assert.ok(drag.rx > on.rx, 'тянется по ходу');
+  assert.ok(drag.ry < on.ry && h0 * drag.ry > 64, 'сплющивается, но остаётся над панелью');
+});

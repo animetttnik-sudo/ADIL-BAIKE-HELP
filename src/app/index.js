@@ -1479,26 +1479,48 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         transform: [{ translateX: pos.value * segW.value }, { scale: 1 + press.value * 0.04 }],
       };
     }
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    // в покое — твёрдая плашка в панели; при удержании её заменяет капля над панелью
     return {
       width: segW.value,
-      transform: [{ translateX: pos.value * segW.value }, { scaleX: sh.sx }, { scaleY: sh.sy }],
+      opacity: 1 - Math.min(1, Math.max(0, liquid.value)),
+      transform: [{ translateX: pos.value * segW.value }],
     };
   });
-  // «жидкий» слой плашки: ярче кромка, блик и цветная бахрома по краю (видны только при удержании)
-  const liquidLayer = useAnimatedStyle(() => ({ opacity: Math.min(1, Math.max(0, liquid.value)) }));
-  // линза: увеличенные подписи под плашкой (обрезаны по её форме), только при удержании
-  const lens = useAnimatedStyle(() => {
+  // капля (приподнятая линза) над панелью: настоящие размеры, а не scale — кромка не искажается
+  const h0 = height - 10;
+  const drop = useAnimatedStyle(() => {
     const sh = liquidShape(liquid.value, pos.value, vel.value);
+    const w = segW.value * sh.rx;
+    const h = h0 * sh.ry;
+    const on = Math.min(1, Math.max(0, liquid.value * 1.5));
+    return {
+      width: w,
+      height: h,
+      borderRadius: h / 2,
+      opacity: on,
+      shadowOpacity: 0.45 * on,
+      transform: [{ translateX: pos.value * segW.value - (w - segW.value) / 2 }, { translateY: -(h - h0) / 2 }],
+    };
+  });
+  const dropRad = useAnimatedStyle(() => {
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    return { borderRadius: (h0 * sh.ry) / 2 };
+  });
+  // подписи внутри капли — те же, что раньше (масштаб sx/sy вокруг центра плашки)
+  const dropLabels = useAnimatedStyle(() => {
+    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    const w = segW.value * sh.rx;
+    const h = h0 * sh.ry;
     return {
       width: segW.value,
-      opacity: Math.min(1, Math.max(0, liquid.value * 1.4)),
-      transform: [{ translateX: pos.value * segW.value }, { scaleX: sh.sx }, { scaleY: sh.sy }],
+      left: (w - segW.value) / 2,
+      top: (h - h0) / 2,
+      transform: [{ scaleX: sh.sx }, { scaleY: sh.sy }],
     };
   });
 
   const Wrap = glass ? Glass : View;
-  return (
+  const capsule = (
     <Wrap
       style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
       intensity={50}
@@ -1517,33 +1539,42 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
           {measured && (
             <Animated.View
               pointerEvents="none"
-              style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: (height - 10) / 2 }, ind]}
+              style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: h0 / 2 }, ind]}
             >
               <View style={styles.segIndEdge} />
-              {isLiquid ? (
-                // все слои кромки — внутри обёртки той же формы, что и плашка (обрезаются по ней)
-                <Animated.View style={[styles.lqClip, { borderRadius: (height - 10) / 2 }, liquidLayer]}>
-                  <View style={styles.lqShine} />
-                  <View style={[styles.lqFringe, styles.lqFringeR, { borderRadius: (height - 10) / 2 }]} />
-                  <View style={[styles.lqFringe, styles.lqFringeB, { borderRadius: (height - 10) / 2 }]} />
-                  <View style={[styles.lqRim, { borderRadius: (height - 10) / 2 }]} />
-                </Animated.View>
-              ) : null}
             </Animated.View>
           )}
           {labels.map((lab, i) => (
             <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
           ))}
-          {measured && isLiquid ? (
-            <Animated.View pointerEvents="none" style={[styles.lqLens, { borderRadius: (height - 10) / 2 }, lens]}>
+        </View>
+      </GestureDetector>
+    </Wrap>
+  );
+  if (!isLiquid) return capsule;
+  return (
+    <View style={styles.lqHost}>
+      {capsule}
+      {/* капля — отдельный слой над панелью (панель её не обрезает), с тенью под собой */}
+      {measured ? (
+        <Animated.View pointerEvents="none" style={[styles.lqDrop, { top: 5, left: 5, height: h0 }, drop]}>
+          <Animated.View style={[styles.lqClip, dropRad]}>
+            <BlurView intensity={22} tint="dark" style={StyleSheet.absoluteFill} />
+            <View style={styles.lqDropFill} />
+            <View style={styles.lqShine} />
+            <Animated.View style={[styles.lqDropLabels, { height: h0 }, dropLabels]}>
               {labels.map((lab, i) => (
                 <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} />
               ))}
             </Animated.View>
-          ) : null}
-        </View>
-      </GestureDetector>
-    </Wrap>
+            <Animated.View style={[styles.lqFringe, styles.lqFringeR, dropRad]} />
+            <Animated.View style={[styles.lqFringe, styles.lqFringeB, dropRad]} />
+            <Animated.View style={[styles.lqRim, dropRad]} />
+            <Animated.View style={[styles.lqOutline, dropRad]} />
+          </Animated.View>
+        </Animated.View>
+      ) : null}
+    </View>
   );
 }
 
@@ -6409,7 +6440,7 @@ const styles = StyleSheet.create({
     gap: 10,
     alignItems: 'center',
   },
-  capsuleWrap: { flex: 1 },
+  capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
   segCap: {
     borderRadius: 32,
     overflow: 'hidden',
@@ -6440,7 +6471,20 @@ const styles = StyleSheet.create({
   lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
   // мягкий верхний блик на всю ширину; форму даёт обрезка lqClip (без своих скруглений)
   lqShine: { position: 'absolute', top: 0, left: 0, right: 0, height: '38%', backgroundColor: 'rgba(255,255,255,0.07)' },
-  lqLens: { position: 'absolute', top: 5, left: 5, bottom: 5, overflow: 'hidden' },
+  lqHost: { zIndex: 5, overflow: 'visible' },
+  lqDrop: {
+    position: 'absolute',
+    zIndex: 10,
+    backgroundColor: 'rgba(28,28,32,0.35)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 14,
+    elevation: 12,
+  },
+  lqDropFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.10)' },
+  // подписи-линза по центру капли, размер — как у плашки в панели
+  lqDropLabels: { position: 'absolute' },
+  lqOutline: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 0.6, borderColor: 'rgba(0,0,0,0.55)' },
   lqLab: { position: 'absolute', top: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
   lqTxtR: { color: 'rgba(255,80,100,0.55)', transform: [{ translateX: -1 }] },
   lqTxtB: { color: 'rgba(90,170,255,0.55)', transform: [{ translateX: 1 }] },
