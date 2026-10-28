@@ -173,6 +173,7 @@ import {
   shiftPayday,
   shiftsInPeriod,
   shiftTotals,
+  shiftForecast,
   shortageOf,
   bonusLossOf,
   upcomingPayday,
@@ -2986,6 +2987,7 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
   const per = workPeriod(payday);
   const minus = t.short; // недостача по сменам; излишек не считается, депонирование — отдельной строкой
   const bad = minus > 0;
+  const fc = shiftForecast(t);
   return (
     <Glass style={styles.balance} intensity={42}>
       <View>
@@ -3030,6 +3032,17 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
         с суммой {t.withSum} · из расчёта {t.fromCalc}
         {t.shortCount ? ` · с недостачей ${t.shortCount}` : ''}
       </Text>
+      {fc.avg > 0 ? (
+        <Text style={styles.calcMeta} numberOfLines={2}>
+          в среднем {money(fc.avg)} за смену
+          {fc.forecast !== null ? (
+            <Text style={styles.calcMetaStrong}>
+              {` · прогноз ≈ ${fc.forecast < 0 ? '−' : ''}${money(Math.abs(fc.forecast))}`}
+            </Text>
+          ) : null}
+          {fc.forecast !== null ? ` (ещё ${fc.left} ${plural(fc.left, 'смена', 'смены', 'смен')} без суммы)` : ''}
+        </Text>
+      ) : null}
       {t.carry || t.mentor || t.surplus || t.bonusLoss ? (
         <Text style={styles.calcMeta}>
           {[
@@ -6993,6 +7006,7 @@ const styles = StyleSheet.create({
   bigPay: { fontSize: 52, fontWeight: '800', letterSpacing: -1.6, marginTop: 10 },
   bigPayWord: { fontSize: 38, letterSpacing: -1, lineHeight: 62 },
   calcMeta: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2, fontWeight: '500' },
+  calcMetaStrong: { color: 'rgba(235,235,245,0.8)', fontWeight: '600' },
   calcSegs: { flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 6 },
   slotRow: { marginBottom: 10 },
   slotTotal: { color: 'rgba(235,235,245,0.7)', fontSize: 14, textAlign: 'center', marginTop: 8 },

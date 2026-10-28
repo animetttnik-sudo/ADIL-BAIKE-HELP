@@ -118,3 +118,21 @@ test('досев страниц «Смен»: заготовки появляю�
   assert.equal(shiftsInPeriod(seeded.shifts, P).length, 14); // режим «работа» — все дни
   assert.equal(seedShiftPaydays(seeded, [P]), seeded);
 });
+
+import { shiftForecast, shiftTotals as shiftTotals2 } from '../src/lib/shifts.js';
+
+test('средняя за смену и прогноз к выплате', () => {
+  const t = shiftTotals2([
+    { date: '2026-10-01', title: 'ночь касса', amount: 2000 },
+    { date: '2026-10-02', title: 'ночь касса', amount: 1000, shortage: 100 },
+    { date: '2026-10-03', title: 'ночь касса', amount: null, mentor: 300 },
+    { date: '2026-10-04', title: 'ночь касса', amount: null },
+  ]);
+  const f = shiftForecast(t);
+  assert.equal(f.avg, 1500);
+  assert.equal(f.left, 2);
+  // net = 3000 + 300 − 100 = 3200; без наставника 2900; + 2 × 1500
+  assert.equal(f.forecast, 5900);
+  assert.equal(shiftForecast(shiftTotals2([{ date: '2026-10-01', amount: 500 }])).forecast, null);
+  assert.deepEqual(shiftForecast(shiftTotals2([])), { avg: 0, left: 0, forecast: null });
+});

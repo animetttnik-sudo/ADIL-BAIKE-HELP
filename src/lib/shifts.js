@@ -193,3 +193,20 @@ export function shiftPagerRange(shifts, anchor = ANCHOR) {
   const lo = Math.max(0, PAYDAYS.indexOf(first));
   return { lo, hi: PAYDAYS.length - 1 };
 }
+
+/**
+ * Средняя сумма смены и прогноз к выплате по итогам shiftTotals:
+ *  avg      — заработано / смен с суммой (0 — сумм ещё нет);
+ *  left     — смен без суммы;
+ *  forecast — к выплате, если оставшиеся смены выйдут как средняя
+ *             (их наставник уже в net и войдёт в сумму смены — вычитаем, чтобы не считать дважды);
+ *             null — прогнозировать не из чего или все суммы уже есть.
+ */
+export function shiftForecast(t) {
+  const withSum = Number(t?.withSum) || 0;
+  const count = Number(t?.count) || 0;
+  const avg = withSum > 0 ? Math.round((Number(t.earned) || 0) / withSum) : 0;
+  const left = Math.max(0, count - withSum);
+  const forecast = avg > 0 && left > 0 ? Math.round(t.net - (Number(t.mentor) || 0) + left * avg) : null;
+  return { avg, left, forecast };
+}
