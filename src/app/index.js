@@ -4520,6 +4520,12 @@ export default function App() {
     const amount = Number(form.amount) || 0;
     const title = (form.title || '').trim();
     const { date } = form;
+    // пустой расход (ни суммы, ни названия) не сохраняем — подсказываем, что вписать
+    if (!amount && !title) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
+      setForm((f) => ({ ...f, err: 'Впишите сумму или за что этот расход' }));
+      return;
+    }
     patch((prev) => {
       const expenses = [...prev.expenses];
       if (editId) {
@@ -5442,12 +5448,18 @@ export default function App() {
                     style={styles.bigInput}
                     keyboardType="number-pad"
                     value={form.amount}
-                    onChangeText={(t) => setForm((f) => ({ ...f, amount: t.replace(/[^0-9]/g, '') }))}
+                    onChangeText={(t) => setForm((f) => ({ ...f, err: null, amount: t.replace(/[^0-9]/g, '') }))}
+                    maxLength={9}
                     placeholder="0"
                     placeholderTextColor="rgba(235,235,245,0.25)"
                   />
                   <Text style={styles.bigUnit}>сом</Text>
                 </View>
+                {form.err ? (
+                  <Text style={styles.fieldErr} accessibilityLiveRegion="polite">
+                    {form.err}
+                  </Text>
+                ) : null}
                 {kAmt.bar}
               </View>
               <View style={styles.field}>
@@ -5456,7 +5468,7 @@ export default function App() {
                   {...kTitle.props}
                   style={styles.input}
                   value={form.title}
-                  onChangeText={(t) => setForm((f) => ({ ...f, title: t }))}
+                  onChangeText={(t) => setForm((f) => ({ ...f, err: null, title: t }))}
                   placeholder="Вайфай, ремонт…"
                   placeholderTextColor="rgba(235,235,245,0.3)"
                 />
@@ -5567,6 +5579,7 @@ export default function App() {
                     keyboardType="number-pad"
                     value={form.amount}
                     onChangeText={(t) => setForm((f) => ({ ...f, amount: t.replace(/[^0-9]/g, '') }))}
+                    maxLength={9}
                     placeholder="—"
                     placeholderTextColor="rgba(235,235,245,0.25)"
                   />
@@ -6671,6 +6684,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   amtPaid: { color: 'rgba(235,235,245,0.6)' },
+  fieldErr: { color: '#ff6961', fontSize: 13, marginTop: 8 },
   due: { color: '#ff9f0a', fontWeight: '600' },
   eFoot: {
     flexDirection: 'row',
