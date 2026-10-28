@@ -101,6 +101,7 @@ import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
 import { repeatShiftDraft } from '../lib/repeatShift';
+import { dueLabel } from '../lib/listView';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -1111,6 +1112,7 @@ function useRowPress(id, onEdit) {
 
 const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn, arc }) {
   const st = displayStatus(item);
+  const due = dueLabel(item, todayIso()); // «не оплачено» / «к оплате сегодня» — срок наступил
   const id = item.id;
   const { props: pressProps, hi } = useRowPress(id, onEdit);
   return (
@@ -1123,7 +1125,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
           style={styles.itemPress}
           {...pressProps}
           accessibilityRole="button"
-          accessibilityLabel={`${item.title || 'Без названия'}, ${fmtShort(item.date)}, ${money(item.amount)} сом${st === 'paid' ? ', оплачено' : ''}`}
+          accessibilityLabel={`${item.title || 'Без названия'}, ${fmtShort(item.date)}, ${money(item.amount)} сом${st === 'paid' ? ', оплачено' : due ? `, ${due}` : ''}`}
           accessibilityHint="Изменить расход"
         >
           <View style={styles.whenCol}>
@@ -1137,6 +1139,10 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
             {st === 'paid' ? (
               <Text style={[styles.meta, styles.good]} numberOfLines={1}>
                 оплачено
+              </Text>
+            ) : due ? (
+              <Text style={[styles.meta, styles.due]} numberOfLines={1}>
+                {due}
               </Text>
             ) : null}
             {item.movedFrom ? (
@@ -1246,11 +1252,6 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
 });
 
 const APressable = Animated.createAnimatedComponent(Pressable);
-/**
- * Кнопка с «нажатием» — только scale (без opacity: прозрачность родителя
- * ломает BlurView/GlassView на iOS). Небольшая задержка pressIn, чтобы кнопки
- * не сжимались, когда палец просто начинает скролл.
- */
 /** Пустой список: коротко, что здесь будет, и одна понятная кнопка. */
 function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' }) {
   return (
@@ -1271,6 +1272,11 @@ function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' })
   );
 }
 
+/**
+ * Кнопка с «нажатием» — только scale (без opacity: прозрачность родителя
+ * ломает BlurView/GlassView на iOS). Небольшая задержка pressIn, чтобы кнопки
+ * не сжимались, когда палец просто начинает скролл.
+ */
 function ScaleButton({ onPress, style, children }) {
   const scale = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({
@@ -6501,6 +6507,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   amtPaid: { color: 'rgba(235,235,245,0.6)' },
+  due: { color: '#ff9f0a', fontWeight: '600' },
   eFoot: {
     flexDirection: 'row',
     justifyContent: 'space-between',
