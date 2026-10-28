@@ -43,8 +43,9 @@ float sdCap(float2 p, float2 b) {
 }
 
 half4 sampleAt(float2 screenPt) {
-  // точки экрана → пиксели снимка; за краями снимка — его край (без чёрной «пустоты»)
-  float2 px = clamp((screenPt - uOrigin) * uScale, float2(0.5), uImg - float2(0.5));
+  // точки экрана → пиксели снимка панели; вне снимка — прозрачно (там видно живой экран)
+  float2 px = (screenPt - uOrigin) * uScale;
+  if (px.x < 0.0 || px.y < 0.0 || px.x > uImg.x || px.y > uImg.y) { return half4(0.0); }
   return image.eval(px);
 }
 
@@ -67,11 +68,12 @@ half4 main(float2 xy) {
   half4 cr = sampleAt(c + n * bend * 0.9);
   half4 cg = sampleAt(c + n * bend);
   half4 cb = sampleAt(c + n * bend * 1.12);
-  half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.12 * uOn);
+  float sa = max(max(cr.a, cg.a), cb.a); // цвета снимка — premultiplied
+  half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.12 * uOn * sa);
   // середина прозрачная (видно живой экран и подписи), преломление — только в полосе у кромки:
   // снимок неподвижен, поэтому в центре он дал бы «призраки» старой плашки при перетаскивании
   float a = smoothstep(0.15, 0.75, k) * edge * uReady * uOn;
-  return half4(col * a, a);
+  return half4(col * a, sa * a);
 }
 `;
 
@@ -136,10 +138,13 @@ function LensCanvas({ snap, cw, ch, geo, ready, style }) {
   const iw = image.width();
   const ih = image.height();
   const scale = iw / Math.max(1, snap.w);
-  const ox = snap.ox;
-  const oy = snap.oy;
+  const ox0 = snap.ox;
+  const oy0 = snap.oy;
   const uniforms = useDerivedValue(() => {
     const g = geo();
+    // начало снимка — живое положение снятого View (если geo его даёт), иначе — замер при съёмке
+    const ox = g.ox !== undefined ? g.ox : ox0;
+    const oy = g.oy !== undefined ? g.oy : oy0;
     return {
       uCanvas: [cw, ch],
       uSize: [g.w, g.h],
@@ -156,7 +161,7 @@ function LensCanvas({ snap, cw, ch, geo, ready, style }) {
     <Canvas style={[{ width: cw, height: ch }, style]} pointerEvents="none">
       <Fill>
         <Shader source={EFFECT} uniforms={uniforms}>
-          <ImageShader image={image} fit="none" x={0} y={0} width={iw} height={ih} tx="clamp" ty="clamp" />
+          <ImageShader image={image} fit="none" x={0} y={0} width={iw} height={ih} tx="decal" ty="decal" />
         </Shader>
       </Fill>
     </Canvas>

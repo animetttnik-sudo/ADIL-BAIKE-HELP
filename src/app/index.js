@@ -204,6 +204,8 @@ const capSpring = { damping: 26, stiffness: 180, mass: 0.9, overshootClamping: t
 // Док (Liquid Glass): плашка едет пружиной с перелётом и «жидко» возвращается в твёрдое состояние
 // пассивное (в покое) перемещение плашки дока по тапу — плавно, без перелёта
 const passiveMove = { duration: 280, easing: Easing.bezier(0.25, 0.1, 0.25, 1) };
+// подлёт капли от выбранной вкладки к пальцу при удержании
+const grabSpring = { damping: 17, stiffness: 200, mass: 0.85 };
 const liquidPosSpring = { damping: 15, stiffness: 210, mass: 0.85 };
 const liquidOnSpring = { damping: 16, stiffness: 320, mass: 0.7 };
 const liquidOffSpring = { damping: 9, stiffness: 240, mass: 0.75 };
@@ -1338,6 +1340,9 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   );
 });
 
+const onIdle = (fn) =>
+  typeof globalThis.requestIdleCallback === 'function' ? globalThis.requestIdleCallback(fn, { timeout: 400 }) : setTimeout(fn, 16);
+
 function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
   const n = labels.length;
   const isLiquid = glass; // «жидкая» плашка — только у дока
@@ -1351,13 +1356,11 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const hostX = useSharedValue(0);
   const hostY = useSharedValue(0);
   const [lensSnap, setLensSnap] = useState(null);
-  const lensReady = useSharedValue(0); // преломление проявляется плавно, когда свежий снимок готов
+  const lensReady = useSharedValue(0); // преломление проявляется плавно, когда снимок готов
+  const hasSnap = useSharedValue(0);
   const [segWJs, setSegWJs] = useState(0);
   const snapBusy = useRef(false);
-  const takeSnap = useCallback(() => {
-    if (!realLens || snapBusy.current) return;
-    snapBusy.current = true;
-    lensReady.value = 0; // старый снимок не показываем — он уже не совпадает с экраном
+  const measureHost = useCallback(() => {
     try {
       hostRef.current?.measureInWindow?.((x, y) => {
         hostX.value = x;
@@ -1366,22 +1369,60 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     } catch {
       // нет замера — останется прежний
     }
-    snapshotView(SNAP_ROOT)
+  }, [hostX, hostY]);
+  // Снимаем только саму панель (маленький View, а не весь экран) и только в покое:
+  // её содержимое меняется лишь при смене вкладки, поэтому снимок в кэше остаётся верным,
+  // и в момент нажатия ничего тяжёлого не происходит.
+  const takeSnap = useCallback(() => {
+    if (!realLens || snapBusy.current || !hostRef.current) return;
+    snapBusy.current = true;
+    snapshotView(hostRef)
       .then((snap) => {
         if (!snap) return;
+        hostX.value = snap.ox;
+        hostY.value = snap.oy;
         setLensSnap(snap);
-        lensReady.value = withDelay(32, withTiming(1, { duration: 200 }));
+        if (!hasSnap.value) {
+          hasSnap.value = 1;
+          lensReady.value = withTiming(1, { duration: 220 });
+        }
       })
       .finally(() => {
         snapBusy.current = false;
       });
-  }, [realLens, hostX, hostY, lensReady]);
+  }, [realLens, hostX, hostY, lensReady, hasSnap]);
+  const idleTimer = useRef(null);
+  const liquidRef = useRef(liquid);
+  const pressRef = useRef(null);
+  // отложенный снимок: после анимаций, в свободном кадре и только если капля опущена
+  const snapWhenIdle = useCallback(
+    (delay = 450, force = false) => {
+      if (!realLens) return;
+      clearTimeout(idleTimer.current);
+      idleTimer.current = setTimeout(() => {
+        // InteractionManager убран из RN 0.88 — ждём свободного кадра JS, затем кадра отрисовки
+        onIdle(() => {
+          requestAnimationFrame(() => {
+            if (force || (liquidRef.current.value === 0 && pressRef.current.value === 0)) takeSnap();
+          });
+        });
+      }, delay);
+    },
+    [realLens, takeSnap]
+  );
+  useEffect(() => () => clearTimeout(idleTimer.current), []);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
   const target = useSharedValue(value);
   const drag0 = useSharedValue(0);
   const press = useSharedValue(0);
+  pressRef.current = press;
+  // капля «идёт за пальцем»: от позиции выбранной вкладки (from) к пальцу (fingerP) по пружине grab 0→1
+  const follow = useSharedValue(0);
+  const grab = useSharedValue(0);
+  const from = useSharedValue(value);
+  const fingerP = useSharedValue(value);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const commit = useCallback((p) => {
@@ -1398,8 +1439,15 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   }, [value, pos, target, isLiquid]);
 
   const gesture = useMemo(() => {
+    const fingerAt = (x) => {
+      'worklet';
+      const w = Math.max(segW.value, 1);
+      return Math.max(-0.08, Math.min(n - 0.92, (x - 5) / w - 0.5));
+    };
     const pick = (p, v = 0, active = true) => {
       'worklet';
+      follow.value = 0;
+      grab.value = 0;
       // покой (простой тап) — ровное смещение без пружины; пружина — только после удержания/перетаскивания
       if (isLiquid && !active) pos.value = withTiming(p, passiveMove);
       else pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
@@ -1413,11 +1461,18 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     };
     const tap = Gesture.Tap()
       .maxDuration(5000)
-      .onBegin(() => {
+      .onBegin((e) => {
         try {
           press.value = withTiming(1, { duration: 90 });
-          // удержание (дольше 160 мс) — плашка «разжижается»
-          if (isLiquid) liquid.value = withDelay(160, withSpring(1, liquidOnSpring));
+          // удержание (дольше 160 мс) — плашка «разжижается» и по пружине едет под палец
+          if (isLiquid) {
+            liquid.value = withDelay(160, withSpring(1, liquidOnSpring));
+            from.value = pos.value;
+            fingerP.value = fingerAt(e.x);
+            grab.value = 0;
+            follow.value = 1;
+            grab.value = withDelay(160, withSpring(1, grabSpring));
+          }
         } catch (err) {
           wErr(err);
         }
@@ -1441,9 +1496,10 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     const pan = Gesture.Pan()
       .activeOffsetX([-8, 8])
       .failOffsetY([-14, 14])
-      .onBegin(() => {
+      .onBegin((e) => {
         try {
           drag0.value = pos.value;
+          if (isLiquid) fingerP.value = fingerAt(e.x);
         } catch (err) {
           wErr(err);
         }
@@ -1451,7 +1507,16 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onStart(() => {
         try {
           press.value = withTiming(1, { duration: 90 });
-          if (isLiquid) liquid.value = withSpring(1, liquidOnSpring);
+          if (isLiquid) {
+            liquid.value = withSpring(1, liquidOnSpring);
+            if (!follow.value) {
+              from.value = pos.value;
+              grab.value = 0;
+              follow.value = 1;
+            }
+            // уже было удержание — продолжаем текущую пружину; иначе сразу тянемся к пальцу
+            grab.value = withSpring(1, grabSpring);
+          }
         } catch (err) {
           wErr(err);
         }
@@ -1459,8 +1524,12 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onUpdate((e) => {
         try {
           const w = Math.max(segW.value, 1);
-          pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
-          if (isLiquid) vel.value = e.velocityX / w;
+          if (isLiquid) {
+            fingerP.value = fingerAt(e.x); // позицию капли считает реакция ниже (с подлётом к пальцу)
+            vel.value = e.velocityX / w;
+          } else {
+            pos.value = Math.max(-0.08, Math.min(n - 0.92, drag0.value + e.translationX / w));
+          }
         } catch (err) {
           wErr(err);
         }
@@ -1477,6 +1546,10 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onFinalize(() => {
         try {
           press.value = withTiming(0, { duration: 160 });
+          // палец отпущен, а вкладку никто не выбрал (жест не распознан) — осесть на ближайшей к пальцу
+          if (isLiquid && follow.value) {
+            pick(Math.max(0, Math.min(n - 1, Math.round(fingerP.value))), 0, liquid.value > 0.05);
+          }
           // отпустили — пружиной с перелётом обратно в твёрдое стекло
           if (isLiquid) liquid.value = withSpring(0, liquidOffSpring);
         } catch (err) {
@@ -1484,16 +1557,33 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         }
       });
     return Gesture.Race(pan, tap);
-  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel]);
+  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel, follow, grab, from, fingerP]);
 
-  // снимок экрана — только когда капля действительно поднимается (удержание / перетаскивание),
-  // а не на каждый быстрый тап по вкладке
+  // пока палец на панели: капля = путь от выбранной вкладки к пальцу (grab — пружина подлёта)
   useAnimatedReaction(
-    () => liquid.value > 0.04,
-    (up, was) => {
-      if (realLens && up && !was) scheduleOnRN(takeSnap);
+    () => (follow.value ? from.value + (fingerP.value - from.value) * grab.value : null),
+    (p) => {
+      if (p !== null && follow.value) pos.value = p;
     }
   );
+
+  // Нажатие: подъём капли идёт сам по себе, без ожидания снимка. Здесь — только лёгкий замер
+  // положения панели; если снимка ещё нет, он делается ПОСЛЕ подъёма и проявляется плавно
+  // (до этого капля — обычная прозрачная линза без преломления).
+  useAnimatedReaction(
+    () => (liquid.value > 0.04 ? (liquid.value > 0.97 ? 2 : 1) : 0),
+    (st, was) => {
+      if (!realLens || st === was) return;
+      if (st === 1 && was === 0) scheduleOnRN(measureHost);
+      else if (st === 2 && !hasSnap.value) scheduleOnRN(snapWhenIdle, 60, true);
+      else if (st === 0) scheduleOnRN(snapWhenIdle, 500, false); // капля опустилась — обновить кэш в покое
+    }
+  );
+  // вкладка / размеры / шрифт поменялись — заранее переснять панель в покое
+  const labelsKey = labels.join('|');
+  useEffect(() => {
+    if (measured && segWJs > 0) snapWhenIdle(500, false);
+  }, [value, measured, segWJs, labelsKey, fontSize, snapWhenIdle]);
 
   // скорость плашки и при пружине после отпускания (сегментов/с) — для растяжения по ходу
   useAnimatedReaction(
@@ -1567,6 +1657,8 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       h: h0 * sh.ry,
       cx: hostX.value + 5 + pos.value * segW.value + segW.value / 2,
       cy: hostY.value + 5 + h0 / 2,
+      ox: hostX.value,
+      oy: hostY.value,
       on: Math.min(1, Math.max(0, liquid.value)),
     };
   }, [liquid, pos, vel, segW, hostX, hostY, h0]);
