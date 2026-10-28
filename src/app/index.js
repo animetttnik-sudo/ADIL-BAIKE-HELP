@@ -109,10 +109,6 @@ import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg'
 import { liquidShape } from '../lib/liquid';
 import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
 
-/** Корневой View экрана — его снимок преломляет капля дока (Skia). */
-const SNAP_ROOT = { current: null };
-// касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
-const SNAP_BUS = { kick: null };
 import { appKeys, fmtSummary, makeBackup, parseBackup, PRE_PASTE_KEY, restorePlan, summarize } from '../lib/backup';
 import {
   KEY,
@@ -179,6 +175,11 @@ import {
   upcomingPayday,
   withShortage,
 } from '../lib/shifts';
+
+/** Корневой View экрана — его снимок преломляет капля дока (Skia). */
+const SNAP_ROOT = { current: null };
+// касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
+const SNAP_BUS = { kick: null };
 
 // expo-glass-effect — опционально
 let GlassView = null;
@@ -2144,14 +2145,13 @@ function KeyBarHost({ scope }) {
   // стекло панели создаётся только когда клавиатура уже встала (панель на экране и видна),
   // каждый показ — новый key; пока его нет, видна лёгкая подложка с кромкой
   const [glassKey, setGlassKey] = useState(0);
-  const [glassOn, setGlassOn] = useState(false);
+  const [glassOn, setGlassOn] = useState(() => !!Keyboard.isVisible?.()); // клавиатура уже открыта — сразу стекло
   useEffect(() => {
     const a = Keyboard.addListener('keyboardDidShow', () => {
       setGlassKey((k) => k + 1);
       setGlassOn(true);
     });
     const b = Keyboard.addListener('keyboardWillHide', () => setGlassOn(false));
-    if (Keyboard.isVisible()) setGlassOn(true);
     return () => {
       a.remove();
       b.remove();
