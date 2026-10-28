@@ -150,11 +150,14 @@ export const paydayForDate = (date) => workPeriod(paydayOnOrBefore(addDays(date,
  * только добавляются недостающие пустые поля. Тот же объект, если всё на месте.
  */
 export function normalizeApp(raw) {
-  if (!raw || typeof raw !== 'object') return defaultState();
-  const arr = (v) => (Array.isArray(v) ? v : []);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaultState();
+  // записи без даты (битые/обрезанные) ломали экран целиком — пропускаем только их
+  const okItem = (x) => !!x && typeof x === 'object' && typeof x.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(x.date);
+  const arr = (v) => (Array.isArray(v) ? v.filter(okItem) : []);
+  const clean = (v) => Array.isArray(v) && v.every(okItem);
   const ok =
-    Array.isArray(raw.expenses) &&
-    Array.isArray(raw.shifts) &&
+    clean(raw.expenses) &&
+    clean(raw.shifts) &&
     Array.isArray(raw.removed) &&
     raw.settings && typeof raw.settings === 'object' &&
     raw.custom && typeof raw.custom === 'object';
@@ -165,9 +168,15 @@ export function normalizeApp(raw) {
     custom: { bg: null, ...(raw.custom || {}) },
     expenses: arr(raw.expenses),
     shifts: arr(raw.shifts),
-    removed: arr(raw.removed),
+    removed: Array.isArray(raw.removed) ? raw.removed : [],
   };
 }
+
+/**
+ * Куда отложить сохранение, которое не удалось прочитать (битый JSON), прежде чем приложение
+ * начнёт писать поверх. Ключ без префикса zp_ — в «Перенос данных» не попадает и при вставке не удаляется.
+ */
+export const brokenKey = (key) => `broken_${key}`;
 
 /** Досеять месяцы, которые задевают периоды этих зарплат ([p, p+13]). Тот же объект, если ничего не добавилось. */
 export function seedPaydays(state, paydays) {

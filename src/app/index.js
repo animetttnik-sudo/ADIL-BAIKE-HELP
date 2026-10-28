@@ -137,6 +137,7 @@ import {
   seedShiftPaydays,
   paydayForDate,
   normalizeApp,
+  brokenKey,
 } from '../lib/periods';
 import {
   CALC_TITLES,
@@ -3620,11 +3621,24 @@ export default function App() {
   const loadAll = useCallback(async () => {
     {
       let loaded;
+      let readFailed = false; // хранилище не прочиталось — не затирать его стартовыми данными
+      let raw = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          raw = await AsyncStorage.getItem(KEY);
+          readFailed = false;
+          break;
+        } catch {
+          readFailed = true; // временный сбой чтения — пробуем ещё раз
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
       try {
-        const raw = await AsyncStorage.getItem(KEY);
         loaded = raw ? normalizeApp(JSON.parse(raw)) : defaultState();
       } catch {
+        // битый JSON: сначала откладываем его копию (в broken_zp_app_v1), потом работаем дальше
         loaded = defaultState();
+        await AsyncStorage.setItem(brokenKey(KEY), raw).catch(() => {});
       }
       // досеиваем стартовый месяц и месяцы вокруг сегодняшней зарплаты до первого рендера
       const today = todayIso();
@@ -3644,15 +3658,17 @@ export default function App() {
       shiftPos.value = s0;
       shiftCur.value = s0;
       let calcLoaded;
+      let rawC = null;
       try {
-        const rawC = await AsyncStorage.getItem(CALC_KEY);
+        rawC = await AsyncStorage.getItem(CALC_KEY);
         calcLoaded = normalizeCalc(rawC ? JSON.parse(rawC) : null);
       } catch {
         calcLoaded = normalizeCalc(null);
+        if (rawC) await AsyncStorage.setItem(brokenKey(CALC_KEY), rawC).catch(() => {});
       }
       // сразу связываем расчёт со сменами (и узнаём смены от старой кнопки)
       const linked = syncCalcShifts(seeded, calcLoaded, paydayForDate, uid);
-      if (linked !== loaded) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
+      if (linked !== loaded && !readFailed) AsyncStorage.setItem(KEY, JSON.stringify(linked)).catch(() => {});
       setCalc(calcLoaded);
       setPi(p0);
       setSi(s0);

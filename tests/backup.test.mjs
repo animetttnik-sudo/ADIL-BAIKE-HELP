@@ -75,3 +75,21 @@ test('summarize без данных и склонения', () => {
   assert.equal(plural(24, ['a', 'b', 'c']), 'b');
   assert.equal(plural(0, ['a', 'b', 'c']), 'c');
 });
+
+import { normalizeApp as normApp, brokenKey } from '../src/lib/periods.js';
+import { isAppKey as isAppKey2 } from '../src/lib/backup.js';
+
+test('normalizeApp: целые данные — тот же объект; битые записи без даты пропускаются', () => {
+  const good = { settings: {}, custom: {}, removed: [], expenses: [{ id: 'a', date: '2026-10-02', amount: 5 }], shifts: [{ id: 's', date: '2026-10-02#2'.slice(0, 10) }] };
+  assert.equal(normApp(good), good);
+  const bad = { ...good, expenses: [null, { id: 'x' }, ...good.expenses, 5], shifts: [{ date: 7 }, ...good.shifts] };
+  const n = normApp(bad);
+  assert.deepEqual(n.expenses.map((e) => e.id), ['a']);
+  assert.deepEqual(n.shifts.map((e) => e.id), ['s']);
+  assert.ok(normApp([]).expenses.length > 0); // массив вместо объекта — стартовое состояние
+});
+
+test('копия битого сохранения не попадает в перенос данных и не удаляется при вставке', () => {
+  assert.equal(brokenKey('zp_app_v1'), 'broken_zp_app_v1');
+  assert.equal(isAppKey2(brokenKey('zp_app_v1')), false);
+});
