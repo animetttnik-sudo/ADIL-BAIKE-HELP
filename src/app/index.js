@@ -873,7 +873,16 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
 
   return (
     <GestureDetector gesture={gesture}>
-      <View collapsable={false} style={styles.sBtnHit}>
+      <View
+        collapsable={false}
+        style={styles.sBtnHit}
+        accessible
+        accessibilityRole="checkbox"
+        accessibilityLabel="Оплачено"
+        accessibilityState={{ checked: status === 'paid' }}
+        accessibilityHint="Отметить или снять отметку оплаты"
+        onAccessibilityTap={toggle}
+      >
         <Animated.View style={[styles.sBtn, btnStyle]}>
           <View style={styles.sBtnEdge} pointerEvents="none" />
           <Animated.View style={[styles.sRing, ringStyle]} />
@@ -1106,7 +1115,13 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
       <View collapsable={false}>
       <Glass style={styles.eCard} intensity={34}>
         {hi}
-        <Pressable style={styles.itemPress} {...pressProps}>
+        <Pressable
+          style={styles.itemPress}
+          {...pressProps}
+          accessibilityRole="button"
+          accessibilityLabel={`${item.title || 'Без названия'}, ${fmtShort(item.date)}, ${money(item.amount)} сом${st === 'paid' ? ', оплачено' : ''}`}
+          accessibilityHint="Изменить расход"
+        >
           <View style={styles.whenCol}>
             <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
             <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
@@ -1127,7 +1142,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
                   {item.moves > 1 ? ` · ${item.moves}×` : ''}
                 </Text>
                 {onReturn ? (
-                  <Pressable hitSlop={8} style={styles.returnBtn} onPress={() => onReturn(id)}>
+                  <Pressable hitSlop={12} style={styles.returnBtn} accessibilityRole="button" accessibilityLabel="Вернуть на прошлую зарплату" onPress={() => onReturn(id)}>
                     <Text style={styles.returnTxt}>вернуть</Text>
                   </Pressable>
                 ) : null}
@@ -1161,7 +1176,13 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
       <View collapsable={false}>
       <Glass style={styles.eCard} intensity={34}>
         {hi}
-        <Pressable style={styles.itemPress} {...pressProps}>
+        <Pressable
+          style={styles.itemPress}
+          {...pressProps}
+          accessibilityRole="button"
+          accessibilityLabel={`${item.title || 'Смена'}, ${fmtShort(item.date)}, ${noSum ? 'без суммы' : `${money(item.amount)} сом`}${short ? `, недостача ${money(short)}` : ''}`}
+          accessibilityHint="Изменить смену"
+        >
           <View style={styles.whenCol}>
             <Text style={styles.whenNum}>{fmtDay(item.date)}</Text>
             <Text style={styles.whenDow}>{DOW[parse(item.date).getDay()]}</Text>
@@ -1172,7 +1193,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
               {item.place ? <Text style={styles.placeTxt}> · {item.place}</Text> : null}
             </Text>
             {linked ? (
-              <Pressable hitSlop={8} style={styles.calcBadge} onPress={() => onCalc(linkKey(item))}>
+              <Pressable hitSlop={12} style={styles.calcBadge} accessibilityRole="button" accessibilityLabel="Открыть расчёт этой смены" onPress={() => onCalc(linkKey(item))}>
                 <Text style={[styles.calcBadgeTxt, { color: accent }]}>∑ из расчёта ›</Text>
               </Pressable>
             ) : (
