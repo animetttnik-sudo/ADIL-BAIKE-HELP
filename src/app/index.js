@@ -1174,7 +1174,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
               </View>
             ) : null}
           </View>
-          <Text style={[styles.amt, st === 'paid' && styles.amtPaid]}>{money(item.amount)}</Text>
+          <Text style={[styles.amt, st === 'paid' && styles.amtPaid]} numberOfLines={1}>{money(item.amount)}</Text>
         </Pressable>
         <StatusButton id={id} status={st === 'paid' ? 'paid' : null} onToggle={onToggle} arc={arc} />
       </Glass>
@@ -1248,7 +1248,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
               </Text>
             ) : null}
           </View>
-          <Text style={[styles.amt, noSum && styles.amtDim]}>{noSum ? '—' : money(item.amount)}</Text>
+          <Text style={[styles.amt, noSum && styles.amtDim]} numberOfLines={1}>{noSum ? '—' : money(item.amount)}</Text>
           <Text style={styles.chevMini}>›</Text>
         </Pressable>
       </Glass>
