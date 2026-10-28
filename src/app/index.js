@@ -97,6 +97,7 @@ import {
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
+import { monthAvg, monthStats } from '../lib/analysis';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -1777,19 +1778,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
 const AN_RANGES = [3, 6, 0];
 function AnalysisView({ state, accent }) {
   const [range, setRange] = useState(6);
-  const M = {};
-  const get = (k) => M[k] || (M[k] = { e: 0, s: 0 });
-  // заработано за месяц — чистыми, после недостачи
-  state.shifts.forEach((x) => {
-    get(x.date.slice(0, 7)).e += shiftNet(x);
-  });
-  // депонирование — в месяц последнего дня смен этой зарплаты
-  Object.keys(state.carry || {}).forEach((p) => {
-    get(workPeriod(p).end.slice(0, 7)).e -= carryDue(carryOf(state, p));
-  });
-  state.expenses.forEach((x) => {
-    if (displayStatus(x) === 'paid') get(x.date.slice(0, 7)).s += Number(x.amount) || 0;
-  });
+  const M = useMemo(() => monthStats(state, (x) => displayStatus(x) === 'paid'), [state]);
   let ks = Object.keys(M).sort();
   if (range) ks = ks.slice(-range);
   const mx = Math.max(1, ...ks.map((k) => Math.max(M[k].e, M[k].s)));
@@ -1847,6 +1836,7 @@ function AnalysisView({ state, accent }) {
                 </View>
                 <Text style={styles.lSub}>
                   заработано {money(M[k].e)} · оплачено {money(M[k].s)}
+                  {M[k].n ? ` · ${M[k].n} ${plural(M[k].n, 'смена', 'смены', 'смен')}, в среднем ${money(monthAvg(M[k]))}` : ''}
                 </Text>
               </View>
             ))}
