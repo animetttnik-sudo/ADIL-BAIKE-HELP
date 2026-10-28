@@ -287,3 +287,11 @@ test('«Вернуть»: перенос обратно на прошлую за
   assert.equal(r.state.expenses[0].date, '2026-10-20');
   assert.equal(uncarryInState({ expenses: [e] }, 'r').state.expenses[0], e);
 });
+
+test('зарплаты идут и после 2028 года (приложение не «застревает» на последней)', () => {
+  assert.ok(PAYDAYS[PAYDAYS.length - 1] >= '2035-12-01');
+  assert.equal(paydayOf('2030-06-15') > '2030-06-01', true);
+  for (let i = 1; i < PAYDAYS.length; i++) {
+    assert.equal((Date.parse(PAYDAYS[i]) - Date.parse(PAYDAYS[i - 1])) / 864e5, 14);
+  }
+});

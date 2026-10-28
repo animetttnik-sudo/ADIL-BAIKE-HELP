@@ -40,7 +40,8 @@ export function allPaydays(fromY, toY) {
   }
   return list;
 }
-export const PAYDAYS = allPaydays(2025, 2028);
+// запас на годы вперёд: после последней зарплаты списка приложение «застревало» на ней
+export const PAYDAYS = allPaydays(2025, 2035);
 
 export function paydayOnOrBefore(dateStr) {
   let last = PAYDAYS[0];
