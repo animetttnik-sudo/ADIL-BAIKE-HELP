@@ -101,7 +101,7 @@ import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
 import { repeatShiftDraft } from '../lib/repeatShift';
-import { dueLabel } from '../lib/listView';
+import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/listView';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
@@ -1252,6 +1252,33 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
 });
 
 const APressable = Animated.createAnimatedComponent(Pressable);
+/** Быстрый фильтр списка страницы: «Все · Не оплачено (N)». */
+function FilterChips({ options, value, onChange, accent }) {
+  return (
+    <View style={styles.fChips} accessibilityRole="tablist">
+      {options.map((o) => {
+        const on = o.k === value;
+        return (
+          <Pressable
+            key={o.k}
+            hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: on }}
+            onPress={() => {
+              if (on) return;
+              Haptics.selectionAsync().catch(noop);
+              onChange(o.k);
+            }}
+            style={[styles.fChip, on && { backgroundColor: 'rgba(255,255,255,0.16)', borderColor: accent }]}
+          >
+            <Text style={[styles.fChipTxt, on && styles.fChipTxtOn]}>{o.label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 /** Пустой список: коротко, что здесь будет, и одна понятная кнопка. */
 function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' }) {
   return (
@@ -2994,6 +3021,9 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
     };
   });
   const t = useMemo(() => paydayTotals(list, earned), [list, earned]);
+  const [flt, setFlt] = useState('all');
+  const fc = filterCounts(list, 'expenses');
+  const shown = useMemo(() => filterExpenses(list, flt), [list, flt]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
@@ -3010,7 +3040,24 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                 accent={accent}
               />
             ) : (
-              list.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
+              <>
+                {fc.show || flt !== 'all' ? (
+                  <FilterChips
+                    value={flt}
+                    onChange={setFlt}
+                    accent={accent}
+                    options={[
+                      { k: 'all', label: `Все · ${fc.total}` },
+                      { k: 'unpaid', label: `Не оплачено · ${fc.part}` },
+                    ]}
+                  />
+                ) : null}
+                {shown.length === 0 ? (
+                  <EmptyState icon="✓" title="Всё оплачено" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
+                ) : (
+                  shown.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
+                )}
+              </>
             )}
             <Text style={[styles.hint, styles.pageHint]}>
               Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
@@ -3216,6 +3263,9 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
   });
   const t = useMemo(() => shiftTotals(list, carry), [list, carry]);
   const days = useMemo(() => dayTotals(list), [list]);
+  const [flt, setFlt] = useState('all');
+  const fc = filterCounts(list, 'shifts');
+  const shown = useMemo(() => filterShifts(list, flt), [list, flt]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
       <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
@@ -3237,17 +3287,34 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
                 accent={accent}
               />
             ) : (
-              list.map((s, i) => (
-                <ShiftCard
-                  key={s.id}
-                  item={s}
-                  onEdit={onEdit}
-                  onCalc={onCalc}
-                  accent={accent}
-                  // итог дня — под последней сменой дня, где смен 2 и больше
-                  dayTotal={days[s.date] && list[i + 1]?.date !== s.date ? days[s.date] : null}
-                />
-              ))
+              <>
+                {fc.show || flt !== 'all' ? (
+                  <FilterChips
+                    value={flt}
+                    onChange={setFlt}
+                    accent={accent}
+                    options={[
+                      { k: 'all', label: `Все · ${fc.total}` },
+                      { k: 'nosum', label: `Без суммы · ${fc.part}` },
+                    ]}
+                  />
+                ) : null}
+                {shown.length === 0 ? (
+                  <EmptyState icon="✓" title="У всех смен есть сумма" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
+                ) : (
+                  shown.map((s, i) => (
+                    <ShiftCard
+                      key={s.id}
+                      item={s}
+                      onEdit={onEdit}
+                      onCalc={onCalc}
+                      accent={accent}
+                      // итог дня — под последней сменой дня, где смен 2 и больше
+                      dayTotal={flt === 'all' && days[s.date] && shown[i + 1]?.date !== s.date ? days[s.date] : null}
+                    />
+                  ))
+                )}
+              </>
             )}
             <Text style={[styles.hint, styles.pageHint]}>Листайте вбок — другие зарплаты</Text>
           </View>
@@ -6789,6 +6856,18 @@ const styles = StyleSheet.create({
   totalL: { color: 'rgba(235,235,245,0.5)' },
   totalV: { color: '#ffd60a', fontWeight: '700' },
   empty: { color: 'rgba(235,235,245,0.4)', textAlign: 'center', padding: 16, fontSize: 14 },
+  fChips: { flexDirection: 'row', gap: 8, marginBottom: 8, paddingHorizontal: 4 },
+  fChip: {
+    height: 32,
+    paddingHorizontal: 16,
+    borderRadius: 16,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  fChipTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 13, fontWeight: '600' },
+  fChipTxtOn: { color: '#fff' },
   emptyCard: { alignItems: 'center', paddingVertical: 24, paddingHorizontal: 24 },
   emptyIcon: {
     width: 44,
