@@ -213,6 +213,7 @@ const SHEET_OUT = { duration: 220, easing: Easing.in(Easing.cubic) };
 const BACK_IN = { duration: 240 };
 
 /** Ошибка внутри ворклета не должна ронять приложение: глотаем и пишем в лог JS. */
+const noop = () => {};
 const logWorkletErr = (m) => console.warn('[worklet] ' + m);
 function wErr(err) {
   'worklet';
@@ -549,7 +550,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
   }, [open, ty, back]);
 
   const show = () => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     initial.current = value;
     ty.value = SCREEN_H;
     back.value = 0;
@@ -590,7 +591,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
               <Pressable
                 hitSlop={10}
                 onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
                   hide();
                 }}
               >
@@ -610,7 +611,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
                     key={t}
                     style={[styles.chip, styles.wheelChip, on && { backgroundColor: accent }]}
                     onPress={() => {
-                      Haptics.selectionAsync();
+                      Haptics.selectionAsync().catch(noop);
                       onChange(v);
                     }}
                   >
@@ -1240,7 +1241,7 @@ function ScaleButton({ onPress, style, children }) {
         scale.value = withTiming(1, { duration: 140 });
       }}
       onPress={() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
         onPress?.();
       }}
       style={[style, anim]}
@@ -1437,7 +1438,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const commit = useCallback((p) => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     onChangeRef.current(p);
   }, []);
 
@@ -2144,7 +2145,7 @@ function CheckRow({ checked, label, amount, accent, onToggle, right }) {
     <Pressable
       style={styles.checkRow}
       onPress={() => {
-        Haptics.selectionAsync();
+        Haptics.selectionAsync().catch(noop);
         s.value = withSequence(withTiming(0.86, { duration: 70 }), withSpring(1, capSpring));
         onToggle();
       }}
@@ -2184,7 +2185,7 @@ const CalcAdjRow = memo(function CalcAdjRow({ value, date, onChange, accent, reg
               accessibilityLabel={on ? 'Излишек' : 'Недостача'}
               style={[styles.adjMiniBtn, plus === on && styles.adjBtnMinus]}
               onPress={() => {
-                Haptics.selectionAsync();
+                Haptics.selectionAsync().catch(noop);
                 setPlusLocal(on);
                 if (n) onChange(on ? -n : n);
               }}
@@ -2279,7 +2280,7 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
     const i = CALC_ORDER.indexOf(id);
     const nextId = i < 0 ? null : CALC_ORDER[i + dir];
     if (nextId && inputs.current.get(nextId)) {
-      Haptics.selectionAsync();
+      Haptics.selectionAsync().catch(noop);
       inputs.current.get(nextId).focus();
     } else if (dir > 0) {
       Keyboard.dismiss();
@@ -2367,7 +2368,7 @@ function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
         return;
       }
       if (r.index === idx) return;
-      Haptics.selectionAsync();
+      Haptics.selectionAsync().catch(noop);
       const it = CALC_ITEMS[idx];
       ghostSeq.current += 1;
       const k = ghostSeq.current;
@@ -2422,7 +2423,7 @@ function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
   };
   const addPlus = () => {
     if (!quickCanPlus(draft)) return;
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     setDraft(draft + '+');
     inputRef.current?.focus();
   };
@@ -2677,7 +2678,7 @@ const CalcView = memo(function CalcView({
     const i = list.indexOf(id);
     const nextId = i < 0 ? null : list[i + dir];
     if (nextId && inputs.current.get(nextId)) {
-      Haptics.selectionAsync();
+      Haptics.selectionAsync().catch(noop);
       inputs.current.get(nextId).focus();
     } else if (dir > 0) {
       Keyboard.dismiss();
@@ -3487,13 +3488,13 @@ export default function App() {
   sheetNow.current = sheet;
   const calcBack = useRef(null);
   const openCalcItem = useCallback((id) => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     calcBack.current = sheetNow.current === 'calcPos' ? 'calcPos' : null;
     setCalcItem(id);
     setSheet('calcItem');
   }, []);
   const openCalcSection = useCallback((key) => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     calcBack.current = null;
     setSheet(key);
   }, []);
@@ -3609,7 +3610,7 @@ export default function App() {
   /** «Ещё смена за этот день»: новый расчёт той же даты (роль — как у 1-й, время — другое). */
   const addCalcSlot = useCallback(
     (date) => {
-      Haptics.selectionAsync();
+      Haptics.selectionAsync().catch(noop);
       const d = typeof date === 'string' ? date : calcDateRef.current.slice(0, 10);
       const c = calcRef.current;
       const n = c ? nextSlot(c.days, d) : 2;
@@ -3887,7 +3888,7 @@ export default function App() {
   /** Недостача с прошлой зарплаты — на уровне зарплаты p (тап по «Недостаче» в большой карточке). */
   const openCarry = useCallback((p) => {
     const v = carryOf(stateRef.current, p);
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     setEditId(null);
     setForm({ carryP: p, carry: v ? String(Math.abs(v)) : '', surplus: v < 0 });
     setSheet('carry');
@@ -3917,7 +3918,7 @@ export default function App() {
       const { prev, next } = carryInState(st, id);
       if (!prev) return;
       patch((p) => carryInState(p, id).state);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
       setToast({ k: Date.now(), text: `Перенесено на ${fmtShort(next.date)}`, undo: prev });
     },
     [patch]
@@ -3930,7 +3931,7 @@ export default function App() {
       const { prev, next } = uncarryInState(st, id);
       if (!prev) return;
       patch((p) => uncarryInState(p, id).state);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
       setToast({ k: Date.now(), text: `Возвращено на ${fmtShort(next.date)}`, undo: prev });
     },
     [patch]
@@ -4018,7 +4019,7 @@ export default function App() {
     setToast(null);
     if (!prev) return;
     patch((p) => undoCarry(p, prev));
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
   }, [toast, patch]);
   // выбор в веере: 0 ✓, 1 → перенести, 2 без отметки
   const onArcPick = useCallback(
@@ -4037,7 +4038,7 @@ export default function App() {
 
   const confirmDeleteExpense = useCallback(
     (id) => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
       Alert.alert('Удалить расход?', '', [
         { text: 'Отмена', style: 'cancel' },
         {
@@ -4055,7 +4056,7 @@ export default function App() {
     (id) => {
       const s = stateRef.current.shifts.find((x) => x.id === id);
       if (!s) return;
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
       if (isLinkedShift(s)) {
         const date = linkKey(s);
         Alert.alert(
@@ -4097,7 +4098,7 @@ export default function App() {
 
   /** Открыть «Расчёт» на дате (и номере смены дня) связанной смены; key — calcKey или просто дата. */
   const openCalcOn = useCallback((key) => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     setCalcDateRaw(keyDate(key));
     setCalcSlot(keySlot(key));
     goPage(2);
@@ -4108,7 +4109,7 @@ export default function App() {
   const [exportP, setExportP] = useState(null);
   const exportRef = useRef(null);
   const openExportMenu = useCallback((p) => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     setExportP(p);
     setSheet('export');
   }, []);
@@ -4197,13 +4198,13 @@ export default function App() {
       ...p,
       rates: Object.fromEntries(RATE_FIELDS.map(([k]) => [k, rateNum(fr[k])])),
     }));
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     setSheet(null);
   };
   const resetCalc = () => {
     const date = calcKeyNow;
     const n = calcSlot;
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
     Alert.alert(
       'Сбросить расчёт?',
       `Все подсчёты за ${fmtShort(calcDate)}${n > 1 ? ` (смена ${n})` : ''} будут удалены, смена «из расчёта» уберётся из «Смен».`,
@@ -4231,7 +4232,7 @@ export default function App() {
   );
   /** Перейти в «Смены» на страницу зарплаты связанной смены. */
   const showCalcShift = () => {
-    Haptics.selectionAsync();
+    Haptics.selectionAsync().catch(noop);
     const k = PAYDAYS.indexOf(shiftPayday(calcDate));
     goPage(1);
     if (k >= 0) requestAnimationFrame(() => jumpShiftIdx(k));
@@ -4257,7 +4258,7 @@ export default function App() {
       }
       return { ...prev, expenses };
     });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     setSheet(null);
   };
 
@@ -4304,7 +4305,7 @@ export default function App() {
       }
       return { ...prev, shifts, removed };
     });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     // смена ушла в другую зарплату — показать её там
     const k = PAYDAYS.indexOf(shiftPayday(date));
     if (page === 1 && k >= 0 && k !== siRef.current) closeThen(() => jumpShiftIdx(k));
@@ -4316,7 +4317,7 @@ export default function App() {
     const id = editId;
     const v = adjFromForm(form);
     patch((prev) => ({ ...prev, shifts: prev.shifts.map((x) => (x.id === id ? withShortage(x, v) : x)) }));
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     setSheet(null);
   };
 
@@ -4325,7 +4326,7 @@ export default function App() {
     const v = adjFromForm(form, 'carry');
     if (!p) return setSheet(null);
     patch((prev) => withCarry(prev, p, v));
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     setSheet(null);
   };
 
@@ -4336,7 +4337,7 @@ export default function App() {
     });
     if (!res.canceled && res.assets?.[0]?.uri) {
       patch((p) => ({ ...p, custom: { ...p.custom, bg: res.assets[0].uri } }));
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(noop);
     }
   };
 
@@ -4361,7 +4362,7 @@ export default function App() {
     const nid = `kb-f-${sheet}-${key}`;
     const focus = (k) => {
       if (!k || !formRefs.current[k]) return;
-      Haptics.selectionAsync();
+      Haptics.selectionAsync().catch(noop);
       formRefs.current[k].focus();
     };
     return {
@@ -4515,7 +4516,7 @@ export default function App() {
             const replace = impReplace;
             const changed = pv.lines.filter((r) => r.kind !== 'same' && r.kind !== 'keep').map((r) => r.plan.payday);
             patch((p) => seedMonth(applyImport(p, blocks, uid, planId, undefined, { replace }), viewY, viewM));
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
             // к зарплате с изменениями: ближайшая с сегодняшней, иначе последняя
             const cur = paydayOnOrBefore(todayIso());
             const ps = [...new Set(changed)].sort();
@@ -4550,7 +4551,7 @@ export default function App() {
           <Pressable
             style={({ pressed }) => [styles.warnCard, pressed && styles.rowPressed]}
             onPress={() => {
-              Haptics.selectionAsync();
+              Haptics.selectionAsync().catch(noop);
               setSheet('cleanup');
             }}
           >
@@ -4603,7 +4604,7 @@ export default function App() {
               <Pressable
                 style={[styles.lRow, styles.lRowSep]}
                 onPress={() => {
-                  Haptics.selectionAsync();
+                  Haptics.selectionAsync().catch(noop);
                   setImpReplace((v) => !v);
                 }}
               >
@@ -4718,7 +4719,7 @@ export default function App() {
                 hitSlop={6}
                 style={[styles.adjBtn, plus === on && styles.adjBtnMinus]}
                 onPress={() => {
-                  Haptics.selectionAsync();
+                  Haptics.selectionAsync().catch(noop);
                   setForm((f) => ({ ...f, surplus: on }));
                 }}
               >
@@ -4785,7 +4786,7 @@ export default function App() {
           onPress: () => {
             const clear = impClear;
             patch((p) => applyShiftImport(p, P, uid, { clear }));
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
             // к зарплате с изменениями: ближайшая с сегодняшней, иначе последняя
             const up = upcomingPayday(todayIso());
             const ps = pv.paydays.filter((g) => g.add || g.upd || g.clear || pv.carry.some((c) => c.payday === g.payday && c.kind === 'add')).map((g) => g.payday);
@@ -4844,7 +4845,7 @@ export default function App() {
             <Pressable
               style={styles.lRow}
               onPress={() => {
-                Haptics.selectionAsync();
+                Haptics.selectionAsync().catch(noop);
                 setImpClear((v) => !v);
               }}
             >
@@ -5017,7 +5018,7 @@ export default function App() {
                     try {
                       const t = await Clipboard.getStringAsync();
                       if (!t) return Alert.alert('Буфер пуст', 'Скопируйте текст заметки и нажмите «Вставить».');
-                      Haptics.selectionAsync();
+                      Haptics.selectionAsync().catch(noop);
                       setShNotes((x) => ({ ...x, text: x.text.trim() ? `${x.text.trimEnd()}\n${t}` : t }));
                     } catch (err) {
                       console.warn('clipboard failed', err);
@@ -5029,7 +5030,7 @@ export default function App() {
                 <ScaleButton
                   style={[styles.actBtn, styles.notesBtn]}
                   onPress={() => {
-                    Haptics.selectionAsync();
+                    Haptics.selectionAsync().catch(noop);
                     doParse(SHIFTS_NOTE, SHIFTS_NOTE_REF);
                   }}
                 >
@@ -5096,7 +5097,7 @@ export default function App() {
                     key={t}
                     style={({ pressed }) => [styles.lRow, i < 2 && styles.lRowSep, pressed && styles.rowPressed]}
                     onPress={() => {
-                      Haptics.selectionAsync();
+                      Haptics.selectionAsync().catch(noop);
                       fn();
                     }}
                   >
@@ -5296,7 +5297,7 @@ export default function App() {
                       key={t}
                       style={[styles.chip, form.title === t && styles.chipOn]}
                       onPress={() => {
-                        Haptics.selectionAsync();
+                        Haptics.selectionAsync().catch(noop);
                         setForm((f) => ({ ...f, title: t }));
                       }}
                     >
@@ -5387,7 +5388,7 @@ export default function App() {
                     key={n.key}
                     style={({ pressed }) => [styles.lRow, i < nav.length - 1 && styles.lRowSep, pressed && styles.rowPressed]}
                     onPress={() => {
-                      Haptics.selectionAsync();
+                      Haptics.selectionAsync().catch(noop);
                       setSheet(n.key);
                     }}
                   >
@@ -5460,7 +5461,7 @@ export default function App() {
                     style={[styles.actBtn, styles.dangerBtn, { flex: 1, marginTop: 0 }]}
                     onPress={() => {
                       patch((p) => ({ ...p, custom: { ...p.custom, bg: null } }));
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
                     }}
                   >
                     <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать</Text>
@@ -5479,7 +5480,7 @@ export default function App() {
                         style={[styles.colorDot, active && styles.colorDotOn]}
                         onPress={() => {
                           patch((p) => ({ ...p, settings: { ...p.settings, hue: c.h } }));
-                          Haptics.selectionAsync();
+                          Haptics.selectionAsync().catch(noop);
                         }}
                       >
                         <View style={[styles.colorFill, { backgroundColor: `hsl(${c.h},72%,${light}%)` }]} />
@@ -5495,7 +5496,7 @@ export default function App() {
                       hitSlop={{ top: 8, bottom: 8 }}
                       onPress={() => {
                         patch((p) => ({ ...p, settings: { ...p.settings, hue: h } }));
-                        Haptics.selectionAsync();
+                        Haptics.selectionAsync().catch(noop);
                       }}
                       style={[styles.hueSeg, { backgroundColor: `hsl(${h},70%,50%)` }, state.settings.hue === h && styles.hueSegOn]}
                     />
@@ -5576,7 +5577,7 @@ export default function App() {
                         onPress: () => {
                           const ids = list.map((e) => e.id);
                           patch((p) => removeExpenses(p, ids));
-                          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
                         },
                       },
                     ]
@@ -5656,7 +5657,7 @@ export default function App() {
                     try {
                       const t = await Clipboard.getStringAsync();
                       if (!t) return Alert.alert('Буфер пуст', 'Скопируйте текст заметки и нажмите «Вставить».');
-                      Haptics.selectionAsync();
+                      Haptics.selectionAsync().catch(noop);
                       setNotes((x) => ({ ...x, text: x.text.trim() ? `${x.text.trimEnd()}\n${t}` : t }));
                     } catch (err) {
                       console.warn('clipboard failed', err);
@@ -5668,7 +5669,7 @@ export default function App() {
                 <ScaleButton
                   style={[styles.actBtn, styles.notesBtn]}
                   onPress={() => {
-                    Haptics.selectionAsync();
+                    Haptics.selectionAsync().catch(noop);
                     Keyboard.dismiss();
                     setImpAll(false);
                     setNotes((x) => ({ ...x, parsed: { blocks: PLAN_BLOCKS, unparsed: [], planId: PLAN_ID } }));
@@ -5818,7 +5819,7 @@ export default function App() {
               date={calcKeyNow}
               accent={accent}
               onPick={(k) => {
-                Haptics.selectionAsync();
+                Haptics.selectionAsync().catch(noop);
                 setCalcDateRaw(keyDate(k));
                 setCalcSlot(keySlot(k));
                 setSheet(null);
