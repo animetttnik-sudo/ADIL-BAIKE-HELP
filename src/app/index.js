@@ -102,7 +102,7 @@ import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEnt
 import { computeBoxes, fmtKg } from '../lib/boxes';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
-import Svg, { Circle, Defs, Path as SvgPath, Text as SvgText, TextPath } from 'react-native-svg';
+import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
 import { liquidShape } from '../lib/liquid';
 import { GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
 
@@ -1349,12 +1349,14 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const hostRef = useRef(null);
   const hostX = useSharedValue(0);
   const hostY = useSharedValue(0);
-  const [lensImg, setLensImg] = useState(null);
+  const [lensSnap, setLensSnap] = useState(null);
+  const lensReady = useSharedValue(0); // преломление проявляется плавно, когда свежий снимок готов
   const [segWJs, setSegWJs] = useState(0);
   const snapBusy = useRef(false);
   const takeSnap = useCallback(() => {
     if (!realLens || snapBusy.current) return;
     snapBusy.current = true;
+    lensReady.value = 0; // старый снимок не показываем — он уже не совпадает с экраном
     try {
       hostRef.current?.measureInWindow?.((x, y) => {
         hostX.value = x;
@@ -1364,13 +1366,15 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       // нет замера — останется прежний
     }
     snapshotView(SNAP_ROOT)
-      .then((img) => {
-        if (img) setLensImg(img);
+      .then((snap) => {
+        if (!snap) return;
+        setLensSnap(snap);
+        lensReady.value = withDelay(32, withTiming(1, { duration: 200 }));
       })
       .finally(() => {
         snapBusy.current = false;
       });
-  }, [realLens, hostX, hostY]);
+  }, [realLens, hostX, hostY, lensReady]);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -1408,7 +1412,6 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .maxDuration(5000)
       .onBegin(() => {
         try {
-          if (realLens) scheduleOnRN(takeSnap);
           press.value = withTiming(1, { duration: 90 });
           // удержание (дольше 160 мс) — плашка «разжижается»
           if (isLiquid) liquid.value = withDelay(160, withSpring(1, liquidOnSpring));
@@ -1438,7 +1441,6 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       .onBegin(() => {
         try {
           drag0.value = pos.value;
-          if (realLens) scheduleOnRN(takeSnap);
         } catch (err) {
           wErr(err);
         }
@@ -1479,7 +1481,16 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         }
       });
     return Gesture.Race(pan, tap);
-  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel, realLens, takeSnap]);
+  }, [n, pos, target, drag0, press, segW, commit, onPickUI, isLiquid, liquid, vel]);
+
+  // снимок экрана — только когда капля действительно поднимается (удержание / перетаскивание),
+  // а не на каждый быстрый тап по вкладке
+  useAnimatedReaction(
+    () => liquid.value > 0.04,
+    (up, was) => {
+      if (realLens && up && !was) scheduleOnRN(takeSnap);
+    }
+  );
 
   // скорость плашки и при пружине после отпускания (сегментов/с) — для растяжения по ходу
   useAnimatedReaction(
@@ -1603,9 +1614,9 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         <Animated.View pointerEvents="none" style={[styles.lqDrop, { top: 5, left: 5, height: h0 }, drop]}>
           <Animated.View style={[styles.lqClip, dropRad]}>
             {/* настоящее преломление снимка экрана (Skia); без Skia — прозрачная приближённая линза */}
-            {realLens && lensImg ? (
+            {realLens && lensSnap ? (
               <Animated.View style={[styles.lqCanvas, lensPos]}>
-                <GlassLens image={lensImg} cw={lensW} ch={lensH} geo={lensGeo} />
+                <GlassLens snap={lensSnap} ready={lensReady} cw={lensW} ch={lensH} geo={lensGeo} />
               </Animated.View>
             ) : null}
             {/* прозрачная линза: без размытия и заливки — видно всё, что под каплей */}
@@ -2941,23 +2952,27 @@ function Stamp({ r, size = 132 }) {
   return (
     <View style={[styles.expStamp, { transform: [{ rotate: `${k.rotate}deg` }] }]} pointerEvents="none">
       <Svg width={k.size} height={k.size} viewBox={`0 0 ${k.size} ${k.size}`}>
-        <Defs>
-          <SvgPath id="stampRing" d={k.path} />
-        </Defs>
         {k.rings.map((g) => (
           <Circle key={g.r} cx={k.c} cy={k.c} r={g.r} fill="none" stroke={k.ink} strokeWidth={g.w} />
         ))}
-        <SvgText fill={k.ink} fontSize={k.ringFont} fontWeight="700" letterSpacing={1}>
-          <TextPath href="#stampRing" startOffset="0">
-            {k.ring}
-          </TextPath>
-        </SvgText>
-        <SvgText x={k.c} y={k.c - k.size * 0.01} textAnchor="middle" fill={k.ink} fontSize={k.starFont}>
-          {k.star}
-        </SvgText>
-        <SvgText x={k.c} y={k.c + k.size * 0.12} textAnchor="middle" fill={k.ink} fontSize={k.dateFont} fontWeight="700">
-          {k.date}
-        </SvgText>
+        {/* та же побуквенная раскладка по дугам, что и в PDF (stampSpec) */}
+        {k.glyphs.map((g, i) => (
+          <SvgText
+            key={i}
+            x={g.x}
+            y={g.y}
+            transform={`rotate(${g.rot} ${g.x} ${g.y})`}
+            textAnchor="middle"
+            fill={k.ink}
+            fontSize={g.size}
+            fontWeight={g.weight}
+          >
+            {g.ch}
+          </SvgText>
+        ))}
+        {k.stars.map((d) => (
+          <SvgPath key={d} d={d} fill={k.ink} />
+        ))}
       </Svg>
     </View>
   );

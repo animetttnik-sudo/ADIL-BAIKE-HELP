@@ -194,10 +194,49 @@ test('экспорт: дата выдачи в отчёте и имени фай
   const html = reportHtml(r);
   assert.ok(html.includes(`Дата выдачи: <b>${r.payout}</b>`));
   assert.ok(html.includes(r.periodDates));
-  assert.ok(html.includes('<svg') && html.includes('РАСЧЁТ ЗАРПЛАТЫ') && html.includes(STAMP_APP));
+  assert.ok(html.includes('<svg') && html.includes('>Р</text>') && STAMP_APP.length > 0);
   assert.ok(!reportHtml(r, '#30d158', { stamp: false }).includes('<svg'));
   const k = stampSpec(r);
-  assert.equal(k.rotate, -8);
+  assert.ok(k.rotate <= -8 && k.rotate >= -12);
   assert.equal(k.date, r.payout);
-  assert.ok(stampSvg(r).includes('rotate(-8deg)'));
+  assert.ok(stampSvg(r).includes(`rotate(${k.rotate}deg)`));
+});
+
+test('печать: текст по кругу целиком внутри своей полосы, низ читается прямо, звёзды на 9 и 3 часах', async () => {
+  const { stampSpec, STAMP_APP, STAMP_BOTTOM } = await import('../src/lib/payExport.js');
+  const k = stampSpec({ payout: '30.10.2026', payday: '2026-10-30' }, 150);
+  const { textIn, textOut, microIn, microOut, textSize, microSize } = k.bands;
+  const dist = (g) => Math.hypot(g.x - k.c, g.y - k.c);
+  const letters = (t) => [...t].filter((ch) => ch !== ' ').length;
+  const nTop = letters(STAMP_APP);
+  const nBot = letters(STAMP_BOTTOM);
+  const top = k.glyphs.slice(0, nTop);
+  const bot = k.glyphs.slice(nTop, nTop + nBot);
+  const cap = textSize * 0.7;
+  // верх: базовая линия + высота буквы внутри полосы; низ: буквы «головой» к центру
+  top.forEach((g) => {
+    assert.ok(dist(g) > textIn && dist(g) + cap < textOut, `верх ${g.ch}`);
+    assert.ok(g.y < k.c + 1, 'верхняя дуга — над центром');
+  });
+  bot.forEach((g) => {
+    assert.ok(dist(g) - cap > textIn && dist(g) < textOut, `низ ${g.ch}`);
+    assert.ok(g.y > k.c, 'нижняя дуга — под центром');
+    assert.ok(Math.abs(g.rot) < 90, `низ не вверх ногами: ${g.rot}`);
+  });
+  // слева направо: x растёт и сверху, и снизу
+  for (let i = 1; i < top.length; i++) assert.ok(top[i].x > top[i - 1].x);
+  for (let i = 1; i < bot.length; i++) assert.ok(bot[i].x > bot[i - 1].x);
+  // микротекст — между полосой текста и внутренним кругом
+  const micro = k.glyphs.slice(nTop + nBot, k.glyphs.length - letters(k.date));
+  assert.ok(micro.length > 40);
+  micro.forEach((g) => assert.ok(dist(g) > microIn && dist(g) + microSize * 0.7 < microOut));
+  // дата — по дуге (не прямо): края выше середины
+  const dg = k.glyphs.slice(k.glyphs.length - letters(k.date));
+  assert.ok(dg[0].y < dg[Math.floor(dg.length / 2)].y);
+  assert.ok(Math.abs(dg[0].y - dg[dg.length - 1].y) < 0.5, 'симметрично');
+  // боковые звёзды: на одной высоте с центром, симметрично
+  const firstPt = (d) => d.slice(2).split(' L ')[0].split(' ').map(Number);
+  const [l, rr] = [firstPt(k.stars[0]), firstPt(k.stars[1])];
+  assert.ok(Math.abs(l[1] - rr[1]) < 0.01);
+  assert.ok(Math.abs(k.c - l[0] - (rr[0] - k.c)) < 0.01);
 });

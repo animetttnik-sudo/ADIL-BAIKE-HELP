@@ -88,49 +88,135 @@ export function exportFileName(r, ext, latin = false) {
 
 /** Название приложения на печати (app.json → expo.name). */
 export const STAMP_APP = 'ADIL BAIKE HELP PLEASE';
+/** Нижняя дуга печати. */
+export const STAMP_BOTTOM = 'РАСЧЁТ ЗАРПЛАТЫ';
 /** Цвет «чернил» печати — полупрозрачный синий (на белом PDF и светлее — на тёмной карточке фото). */
 export const STAMP_INK = 'rgba(28,86,196,0.72)';
 export const STAMP_INK_DARK = 'rgba(96,156,255,0.78)';
 
+const CAP = 0.7; // высота заглавной буквы относительно кегля
+const r2 = (v) => Math.round(v * 100) / 100;
+// относительная ширина символа (пробел и узкие — уже, широкие — шире): для раскладки по дуге
+const charW = (ch) => (ch === ' ' ? 0.45 : /[.,·:]/.test(ch) ? 0.4 : /[IЁЙ1]/.test(ch) ? 0.6 : /[ШЩЖМWЫЮ]/.test(ch) ? 1.25 : 1);
+
 /**
- * Геометрия собственной печати приложения (не имитирует ничью официальную печать):
- * двойное кольцо, по кругу — название приложения и «РАСЧЁТ ЗАРПЛАТЫ», в центре — звезда и дата выдачи.
- * Общая для PDF (SVG-строка) и фото (react-native-svg).
+ * Раскладка строки по дуге побуквенно (одинаково в PDF и в react-native-svg).
+ *  top: дуга сверху, буквы «головой» наружу, читается слева направо по часовой;
+ *  bottom: дуга снизу, буквы «головой» к центру — читаются нормально (не вверх ногами).
+ *  mid — радиус середины полосы текста (буквы целиком внутри полосы ±cap/2), span — угол дуги (рад).
+ */
+export function arcGlyphs(text, { c, mid, size, span, side = 'top', center, weight = '700' }) {
+  const chars = [...text];
+  const ws = chars.map(charW);
+  const total = ws.reduce((a, b) => a + b, 0);
+  const cap = size * CAP;
+  const r = side === 'top' ? mid - cap / 2 : mid + cap / 2; // базовая линия
+  const c0 = center ?? (side === 'top' ? Math.PI / 2 : -Math.PI / 2);
+  const out = [];
+  let acc = 0;
+  chars.forEach((ch, i) => {
+    const t = (acc + ws[i] / 2) / total - 0.5; // −0.5…0.5 по дуге
+    acc += ws[i];
+    if (ch === ' ') return;
+    // top: слева направо — угол убывает; bottom: слева направо — угол растёт
+    const th = side === 'top' ? c0 - t * span : c0 + t * span;
+    const x = c + r * Math.cos(th);
+    const y = c - r * Math.sin(th);
+    const rot = side === 'top' ? 90 - (th * 180) / Math.PI : -90 - (th * 180) / Math.PI;
+    out.push({ ch, x: r2(x), y: r2(y), rot: r2(rot), size: r2(size), weight });
+  });
+  return out;
+}
+
+/** Пятиконечная звезда (path) с центром (x, y) и внешним радиусом R. */
+export function starPath(x, y, R, inner = 0.42) {
+  const p = [];
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 ? R * inner : R;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    p.push(`${r2(x + rr * Math.cos(a))} ${r2(y + rr * Math.sin(a))}`);
+  }
+  return `M ${p.join(' L ')} Z`;
+}
+
+/**
+ * Геометрия собственной печати приложения (не имитирует ничью официальную печать).
+ * Снаружи внутрь: толстое кольцо · тонкое кольцо · полоса текста (сверху — название приложения,
+ * снизу — «РАСЧЁТ ЗАРПЛАТЫ», звёзды ровно на 9 и 3 часах) · тонкое кольцо · кольцо микротекста
+ * «ADIL BAIKE HELP PLEASE» (выглядит как пунктир, защитный узор) · внутренний круг ·
+ * большая звезда и дата выдачи по дуге под ней. Наклон −11°.
  */
 export function stampSpec(r, size = 150, ink = STAMP_INK) {
-  const c = size / 2;
-  const tr = size * 0.355; // радиус строки текста по кругу
-  return {
-    size,
+  const S = size;
+  const c = S / 2;
+  const R = {
+    outer: S * 0.47,
+    bandOut: S * 0.43,
+    bandIn: S * 0.325,
+    microIn: S * 0.275,
+  };
+  const textSize = S * 0.068;
+  const mid = (R.bandOut + R.bandIn) / 2;
+  const gap = (13 * Math.PI) / 180; // место под звёзды на 9 и 3 часах
+  const span = Math.PI - 2 * gap;
+  const glyphs = [
+    ...arcGlyphs(STAMP_APP, { c, mid, size: textSize, span: span - 0.06, side: 'top' }),
+    ...arcGlyphs(STAMP_BOTTOM, { c, mid, size: textSize, span: span * 0.74, side: 'bottom' }),
+  ];
+  // микротекст по всему кругу
+  const microSize = S * 0.024;
+  const microMid = (R.bandIn + R.microIn) / 2;
+  const unit = `${STAMP_APP}   `;
+  const per = [...unit].reduce((a, ch) => a + charW(ch), 0) * microSize * 0.62; // длина одного повтора
+  const reps = Math.max(1, Math.round((2 * Math.PI * (microMid - microSize * CAP * 0.5)) / per));
+  const micro = arcGlyphs(unit.repeat(reps), {
     c,
-    rings: [
-      { r: size * 0.47, w: 3 },
-      { r: size * 0.41, w: 1 },
-      { r: size * 0.25, w: 1 },
-    ],
-    path: `M ${c} ${c} m -${tr} 0 a ${tr} ${tr} 0 1 1 ${2 * tr} 0 a ${tr} ${tr} 0 1 1 -${2 * tr} 0`,
-    ring: `${STAMP_APP} ★ РАСЧЁТ ЗАРПЛАТЫ ★`,
-    ringFont: size * 0.072,
-    star: '★',
-    starFont: size * 0.16,
-    date: r.payout || dotDate(r.payday),
-    dateFont: size * 0.075,
-    rotate: -8,
+    mid: microMid,
+    size: microSize,
+    span: 2 * Math.PI,
+    side: 'top',
+    weight: '600',
+  });
+  // дата по дуге под большой звездой
+  const date = r.payout || dotDate(r.payday);
+  const dateSize = S * 0.066;
+  const dateMid = S * 0.175;
+  const dateSpan = ([...date].reduce((a, ch) => a + charW(ch), 0) * dateSize * 0.62) / dateMid;
+  const dateGlyphs = arcGlyphs(date, { c, mid: dateMid, size: dateSize, span: dateSpan, side: 'bottom' });
+  const sideStar = textSize * 0.62;
+  return {
+    size: S,
+    c,
+    rotate: -11,
     ink,
+    rings: [
+      { r: r2(R.outer), w: r2(S * 0.02) },
+      { r: r2(R.bandOut), w: r2(S * 0.007) },
+      { r: r2(R.bandIn), w: r2(S * 0.007) },
+      { r: r2(R.microIn), w: r2(S * 0.007) },
+    ],
+    glyphs: [...glyphs, ...micro, ...dateGlyphs],
+    stars: [starPath(c - mid, c, sideStar), starPath(c + mid, c, sideStar), starPath(c, c - S * 0.045, S * 0.11)],
+    date,
+    bands: { textIn: R.bandIn, textOut: R.bandOut, microIn: R.microIn, microOut: R.bandIn, textSize, microSize, mid, microMid },
   };
 }
 
+const FONT = '-apple-system, Helvetica, Arial, sans-serif';
 export function stampSvg(r, size = 150) {
   const k = stampSpec(r, size);
   const rings = k.rings
     .map((g) => `<circle cx="${k.c}" cy="${k.c}" r="${g.r}" fill="none" stroke="${k.ink}" stroke-width="${g.w}"/>`)
     .join('');
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${k.size}" height="${k.size}" viewBox="0 0 ${k.size} ${k.size}" style="transform: rotate(${k.rotate}deg)">
-  <defs><path id="stampRing" d="${k.path}"/></defs>${rings}
-  <text fill="${k.ink}" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="${k.ringFont}" font-weight="700" letter-spacing="1">
-    <textPath href="#stampRing" xlink:href="#stampRing" startOffset="0">${esc(k.ring)}</textPath></text>
-  <text x="${k.c}" y="${k.c - k.size * 0.01}" text-anchor="middle" fill="${k.ink}" font-size="${k.starFont}">${k.star}</text>
-  <text x="${k.c}" y="${k.c + k.size * 0.12}" text-anchor="middle" fill="${k.ink}" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="${k.dateFont}" font-weight="700">${esc(k.date)}</text>
+  const glyphs = k.glyphs
+    .map(
+      (g) =>
+        `<text x="${g.x}" y="${g.y}" transform="rotate(${g.rot} ${g.x} ${g.y})" text-anchor="middle" font-size="${g.size}" font-weight="${g.weight}">${esc(g.ch)}</text>`
+    )
+    .join('');
+  const stars = k.stars.map((d) => `<path d="${d}" fill="${k.ink}"/>`).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${k.size}" height="${k.size}" viewBox="0 0 ${k.size} ${k.size}" style="transform: rotate(${k.rotate}deg)">
+  ${rings}<g fill="${k.ink}" font-family="${FONT}">${glyphs}</g>${stars}
 </svg>`;
 }
 
