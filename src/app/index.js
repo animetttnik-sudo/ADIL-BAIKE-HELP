@@ -1781,16 +1781,18 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
 
   const ind = useAnimatedStyle(() => {
     if (!isLiquid) {
+      const p = Math.max(0, Math.min(n - 1, pos.value));
       return {
         width: segW.value,
-        transform: [{ translateX: pos.value * segW.value }, { scale: 1 + press.value * 0.04 }],
+        // нажатие слегка «вдавливает» плашку (scale < 1) — увеличение вылезало бы за край дорожки
+        transform: [{ translateX: p * segW.value }, { scale: 1 - press.value * 0.03 }],
       };
     }
     // в покое — твёрдая плашка в панели; при удержании её заменяет капля над панелью
     return {
       width: segW.value,
       opacity: 1 - Math.min(1, Math.max(0, liquid.value)),
-      transform: [{ translateX: pos.value * segW.value }],
+      transform: [{ translateX: Math.max(0, Math.min(n - 1, pos.value)) * segW.value }],
     };
   });
   // капля (приподнятая линза) над панелью: настоящие размеры, а не scale — кромка не искажается
@@ -1862,26 +1864,32 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       depth="chrome"
     >
       <GestureDetector gesture={gesture}>
-        <View
-          style={styles.segCapRow}
-          collapsable={false}
-          onLayout={(e) => {
-            const w = e.nativeEvent.layout.width;
-            segW.value = (w - 10) / n;
-            if (isLiquid) setSegWJs((w - 10) / n);
-            if (!measured) setMeasured(true);
-          }}
-        >
-          {/* плашку рисуем только после замера ширины — без «прыжка» */}
-          {measured && (
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: h0 / 2 }, ind]}
-            />
-          )}
-          {labels.map((lab, i) => (
-            <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} liquid={isLiquid ? liquid : null} />
-          ))}
+        <View style={styles.segCapRow} collapsable={false}>
+          {/* дорожка плашки: ровно 5 pt от краёв со всех сторон; ширину сегмента берём из неё самой,
+              поэтому плашка никогда не выходит за край капсулы */}
+          <View
+            style={styles.segTrack}
+            pointerEvents="none"
+            onLayout={(e) => {
+              const w = e.nativeEvent.layout.width / n;
+              segW.value = w;
+              if (isLiquid) setSegWJs(w);
+              if (!measured) setMeasured(true);
+            }}
+          >
+            {/* плашку рисуем только после замера ширины — без «прыжка» */}
+            {measured && (
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: h0 / 2 }, ind]}
+              />
+            )}
+          </View>
+          <View style={styles.segTrackRow} pointerEvents="none">
+            {labels.map((lab, i) => (
+              <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} liquid={isLiquid ? liquid : null} />
+            ))}
+          </View>
         </View>
       </GestureDetector>
     </Wrap>
@@ -7085,13 +7093,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(28,28,34,0.94)',
   },
   segCapGlass: { overflow: 'hidden' },
-  segCapRow: { flex: 1, flexDirection: 'row', padding: 5 },
+  segCapRow: { flex: 1 },
+  // одна и та же рамка (5 pt внутрь от краёв капсулы) для плашки и подписей
+  segTrack: { position: 'absolute', top: 5, left: 5, right: 5, bottom: 5 },
+  segTrackRow: { position: 'absolute', top: 5, left: 5, right: 5, bottom: 5, flexDirection: 'row' },
   seg: { flex: 1, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
   segInd: {
     position: 'absolute',
-    top: 5,
-    left: 5,
-    bottom: 5,
+    top: 0,
+    left: 0,
+    bottom: 0,
     borderRadius: 26,
     backgroundColor: 'rgba(255,255,255,0.17)',
   },
