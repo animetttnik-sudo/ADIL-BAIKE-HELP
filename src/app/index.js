@@ -5750,23 +5750,25 @@ export default function App() {
           body: (
             <>
               <Text style={styles.sectionLabel}>Режим смен</Text>
-              <SegmentCapsule
-                value={state.settings.mode === 'work' ? 1 : 0}
-                labels={['Учёба', 'Работа']}
-                height={50}
-                onChange={(i) =>
-                  patch((p) =>
-                    seedMonth(
-                      {
-                        ...p,
-                        settings: { ...p.settings, mode: i === 1 ? 'work' : 'study' },
-                      },
-                      viewY,
-                      viewM
+              <View style={styles.segBlock}>
+                <SegmentCapsule
+                  value={state.settings.mode === 'work' ? 1 : 0}
+                  labels={['Учёба', 'Работа']}
+                  height={50}
+                  onChange={(i) =>
+                    patch((p) =>
+                      seedMonth(
+                        {
+                          ...p,
+                          settings: { ...p.settings, mode: i === 1 ? 'work' : 'study' },
+                        },
+                        viewY,
+                        viewM
+                      )
                     )
-                  )
-                }
-              />
+                  }
+                />
+              </View>
               <ItemCard style={styles.listCard}>
                 {nav.map((n, i) => (
                   <Pressable
@@ -7034,6 +7036,8 @@ const styles = StyleSheet.create({
   },
   segCapGlass: { overflow: 'hidden' },
   segCapRow: { flex: 1 },
+  // отступ под переключателем, за которым сразу идёт следующий блок
+  segBlock: { marginBottom: 16 },
   // одна и та же рамка (5 pt внутрь от краёв капсулы) для плашки и подписей
   segTrack: { position: 'absolute', top: 5, left: 5, right: 5, bottom: 5 },
   segTrackRow: { position: 'absolute', top: 5, left: 5, right: 5, bottom: 5, flexDirection: 'row' },
