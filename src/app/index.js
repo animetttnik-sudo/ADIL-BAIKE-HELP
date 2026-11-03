@@ -191,34 +191,8 @@ function TextInput(props) {
 
 /** Корневой View экрана — его снимок преломляет капля дока (Skia). */
 const SNAP_ROOT = { current: null };
-// касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое.
-// dirty: экран поменялся (листание, данные, вкладка, шторка, клавиатура) — старый снимок
-// больше не показываем (капля — просто прозрачная линза), пока не снимем новый в покое.
-const SNAP_BUS = { kick: null, dirty: null, gen: 0, dragging: false, momentum: false };
-function snapInvalidate(kick = true) {
-  SNAP_BUS.gen += 1;
-  SNAP_BUS.dirty?.();
-  if (kick) SNAP_BUS.kick?.();
-}
-/** Пропсы для ScrollView страниц: листание делает снимок устаревшим, конец листания — переснять. */
-const SNAP_SCROLL = {
-  onScrollBeginDrag: () => {
-    SNAP_BUS.dragging = true;
-    snapInvalidate(false);
-  },
-  onScrollEndDrag: () => {
-    SNAP_BUS.dragging = false;
-    SNAP_BUS.kick?.();
-  },
-  onMomentumScrollBegin: () => {
-    SNAP_BUS.momentum = true;
-    snapInvalidate(false);
-  },
-  onMomentumScrollEnd: () => {
-    SNAP_BUS.momentum = false;
-    snapInvalidate(true);
-  },
-};
+// касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
+const SNAP_BUS = { kick: null };
 
 // expo-glass-effect — опционально
 let GlassView = null;
@@ -290,8 +264,6 @@ const DEPTH = {
   sheet: '0px 18px 48px rgba(0,0,0,0.6), 0px 3px 10px rgba(0,0,0,0.32)',
   toast: '0px 16px 36px rgba(0,0,0,0.55), 0px 4px 10px rgba(0,0,0,0.35)',
   chrome: '0px 10px 26px rgba(0,0,0,0.45), 0px 2px 6px rgba(0,0,0,0.3)',
-  // строки длинных списков: одна лёгкая тень (каждая тень — отдельный слой с маской)
-  row: '0px 6px 16px rgba(0,0,0,0.34)',
 };
 // внутренний градиент: сверху чуть светлее, книзу темнее (плавно, без линии по краю)
 const DEPTH_SHADE = 'linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(255,255,255,0) 42%, rgba(0,0,0,0.16) 100%)';
@@ -708,7 +680,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
             </Text>
           ) : null}
           <ScaleButton style={styles.hDateHit} hitSlop={4} onPress={show}>
-            <Glass style={styles.hDatePill} intensity={40} depth="chrome">
+            <Glass style={styles.hDatePill} intensity={40}>
               <Text style={styles.hDateTxt} numberOfLines={1} adjustsFontSizeToFit>
                 {fmtShort(value || iso(date))}
                 <Text style={styles.hDateDow}> · {DOW[date.getDay()]}</Text>
@@ -1175,7 +1147,7 @@ const ExpenseCard = memo(function ExpenseCard({ item, onEdit, onToggle, onReturn
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       {/* стекло не кладём прямо в вид с layout-анимациями — между ними обычный View */}
       <View collapsable={false}>
-      <Glass style={styles.eCard} intensity={34} depth="row">
+      <Glass style={styles.eCard} intensity={34}>
         {hi}
         <Pressable
           style={styles.itemPress}
@@ -1240,7 +1212,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
   return (
     <Animated.View entering={ROW_ENTER} exiting={CARD_EXIT} layout={ROW_LAYOUT} style={styles.eCardOuter}>
       <View collapsable={false}>
-      <Glass style={styles.eCard} intensity={34} depth="row">
+      <Glass style={styles.eCard} intensity={34}>
         {hi}
         <Pressable
           style={styles.itemPress}
@@ -1393,19 +1365,12 @@ function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) 
 
 /** Капсула: тап + свайп + spring-доводка. Индикатор — плотная плашка без nested glass. */
 /** Подпись сегмента: яркость считается из позиции плашки на UI-потоке (без ожидания JS). */
-function SegLabel({ label, index, pos, fontSize, liquid }) {
+function SegLabel({ label, index, pos, fontSize }) {
   const on = useAnimatedStyle(() => ({
     opacity: interpolate(Math.abs(pos.value - index), [0, 0.6], [1, 0], Extrapolation.CLAMP),
   }));
-  // под поднятой каплей подпись рисует сама капля (увеличенная) — обычную прячем, без двойного текста
-  const under = useAnimatedStyle(() => {
-    if (!liquid) return { opacity: 1 };
-    const lift = Math.min(1, Math.max(0, liquid.value * 1.5));
-    const cover = interpolate(Math.abs(pos.value - index), [0.35, 0.85], [1, 0], Extrapolation.CLAMP);
-    return { opacity: 1 - lift * cover };
-  });
   return (
-    <Animated.View style={[styles.seg, under]} pointerEvents="none">
+    <View style={styles.seg} pointerEvents="none">
       <Text style={[styles.segTxt, fontSize && { fontSize }]} numberOfLines={1} maxFontSizeMultiplier={SEG_FONT_MAX}>
         {label}
       </Text>
@@ -1416,7 +1381,7 @@ function SegLabel({ label, index, pos, fontSize, liquid }) {
       >
         {label}
       </Animated.Text>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -1529,15 +1494,9 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     }
     snapBusy.current = true;
     measureHost();
-    const gen = SNAP_BUS.gen;
     snapshotView(SNAP_ROOT)
       .then((snap) => {
         if (!snap || !snap.image || snap.image.width() < 2 || snap.image.height() < 2) return;
-        // пока снимали, экран успел поменяться — этот снимок уже старый, переснять в покое
-        if (gen !== SNAP_BUS.gen) {
-          snapWhenIdleRef.current(300, false);
-          return;
-        }
         setLensSnap(snap);
         if (!hasSnap.value) {
           hasSnap.value = 1;
@@ -1561,11 +1520,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         // кадр отрисовки после паузы; капля должна быть опущена (пружина могла ещё не «досесть» —
         // тогда пробуем ещё раз позже, а не теряем снимок навсегда)
         requestAnimationFrame(() => {
-          const still =
-            Math.abs(liquidRef.current.value) < 0.01 &&
-            Math.abs(pressRef.current.value) < 0.01 &&
-            !SNAP_BUS.dragging &&
-            !SNAP_BUS.momentum;
+          const still = Math.abs(liquidRef.current.value) < 0.01 && Math.abs(pressRef.current.value) < 0.01;
           GLASS_DIAG.idle = still ? 'снимаю' : 'жду покоя';
           if (force || still) takeSnap();
           else snapWhenIdleRef.current(400, false);
@@ -1578,20 +1533,12 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   useEffect(() => {
     if (!realLens) return undefined;
     GLASS_DIAG.ready = () => lensReady.value;
-    SNAP_BUS.kick = () => snapWhenIdle(600, false); // в покое (листание проверяется флагами)
-    // экран поменялся: старый снимок прячем сразу (иначе капля показывает «прошлый» экран)
-    SNAP_BUS.dirty = () => {
-      if (hasSnap.value) {
-        hasSnap.value = 0;
-        lensReady.value = withTiming(0, { duration: 90 });
-      }
-    };
+    SNAP_BUS.kick = () => snapWhenIdle(1100, false); // после листания с инерцией
     return () => {
       SNAP_BUS.kick = null;
-      SNAP_BUS.dirty = null;
       clearTimeout(idleTimer.current);
     };
-  }, [realLens, snapWhenIdle, lensReady, hasSnap]);
+  }, [realLens, snapWhenIdle, lensReady]);
   const segW = useSharedValue(0);
   const [measured, setMeasured] = useState(false);
   const pos = useSharedValue(value);
@@ -1887,7 +1834,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
           </View>
           <View style={styles.segTrackRow} pointerEvents="none">
             {labels.map((lab, i) => (
-              <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} liquid={isLiquid ? liquid : null} />
+              <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
             ))}
           </View>
         </View>
@@ -2248,26 +2195,6 @@ function KeyBarHost({ scope }) {
     });
     return () => d.remove();
   }, []);
-  // фокус ушёл в поле без панели, а клавиатура осталась — панель с прошлой подписью не держим
-  const kbHiding = useRef(false);
-  useEffect(() => {
-    const a = Keyboard.addListener('keyboardWillHide', () => (kbHiding.current = true));
-    const b = Keyboard.addListener('keyboardWillShow', () => (kbHiding.current = false));
-    return () => {
-      a.remove();
-      b.remove();
-    };
-  }, []);
-  useEffect(() => {
-    if (cfg) return undefined;
-    const t = setTimeout(() => {
-      if (!kbStore.cfg && !kbHiding.current && lastRef.current && Keyboard.isVisible()) {
-        lastRef.current = null;
-        bump((k) => k + 1);
-      }
-    }, 150);
-    return () => clearTimeout(t);
-  }, [cfg]);
   const mine = cfg && cfg.scope === scope ? cfg : null;
   if (mine) lastRef.current = mine;
   else if (cfg) lastRef.current = null; // фокус в другом окне — здесь не показываем
@@ -3136,12 +3063,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
   const shown = useMemo(() => filterExpenses(list, flt), [list, flt]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
-      <ScrollView
-        style={styles.pages}
-        contentContainerStyle={styles.pagesContent}
-        showsVerticalScrollIndicator={false}
-        {...SNAP_SCROLL}
-      >
+      <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
             <PayCard payday={payday} t={t} short={short} mentor={mentor} accent={accent} />
@@ -3379,12 +3301,7 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
   const shown = useMemo(() => filterShifts(list, flt), [list, flt]);
   return (
     <Animated.View style={[StyleSheet.absoluteFill, st]}>
-      <ScrollView
-        style={styles.pages}
-        contentContainerStyle={styles.pagesContent}
-        showsVerticalScrollIndicator={false}
-        {...SNAP_SCROLL}
-      >
+      <ScrollView style={styles.pages} contentContainerStyle={styles.pagesContent} showsVerticalScrollIndicator={false}>
         <LayoutAnimationConfig skipEntering skipExiting>
           <View>
             <ShiftSumCard payday={payday} t={t} accent={accent} onCarry={onCarry} />
@@ -3693,14 +3610,6 @@ export default function App() {
     },
     [flushCalc]
   );
-  // снимок для капли дока: любое изменение экрана делает его старым — спрятать и переснять в покое
-  useEffect(() => {
-    snapInvalidate(true);
-  }, [state, calc, page, sheet, pi, si]);
-  useEffect(() => {
-    const evs = ['keyboardDidShow', 'keyboardDidHide'].map((ev) => Keyboard.addListener(ev, () => snapInvalidate(true)));
-    return () => evs.forEach((x) => x.remove());
-  }, []);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
       if (s !== 'active') {
@@ -6466,7 +6375,6 @@ export default function App() {
             keyboardDismissMode="interactive"
             automaticallyAdjustKeyboardInsets
             ref={mainScroll}
-            {...SNAP_SCROLL}
             scrollEventThrottle={16}
             onScroll={(e) => {
               mainScrollY.current = e.nativeEvent.contentOffset.y;
