@@ -256,27 +256,20 @@ const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailab
 const PaneGlassCtx = createContext(false);
 
 /** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
-function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false }) {
+function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false, native = false }) {
   const inPane = useContext(PaneGlassCtx);
-  if (inPane && !interactive) {
+  // Нативный Liquid Glass (UIGlassEffect) всегда рисует свой блик-кромку — белые полоски
+  // сверху/снизу. Убрать его нельзя, поэтому карточки, шторки и тосты — BlurView без кромок;
+  // GlassView остаётся только у дока (native / interactive).
+  if (inPane && !interactive && !native) {
     return (
       <View style={[styles.glassBase, styles.cardBase, style]}>
-        {LG && GlassView ? (
-          <GlassView
-            pointerEvents="none"
-            glassEffectStyle="regular"
-            colorScheme="dark"
-            tintColor={tint}
-            style={StyleSheet.absoluteFill}
-          />
-        ) : (
-          <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
-        )}
+        <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
         {children}
       </View>
     );
   }
-  if (LG && GlassView) {
+  if (LG && GlassView && (native || interactive)) {
     return (
       <GlassView
         glassEffectStyle="regular"
@@ -289,8 +282,7 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
       </GlassView>
     );
   }
-  // запасной вариант (нет Liquid Glass): blur + подкраска + блик сверху + тонкая кромка
-  const r = StyleSheet.flatten(style)?.borderRadius;
+  // blur + подкраска (без блика сверху и кромки — они давали белые полоски)
   return (
     <View style={[styles.glassBase, style]}>
       <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
@@ -298,8 +290,6 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
       {tint ? (
         <View style={[StyleSheet.absoluteFill, { backgroundColor: tintFallback || tint }]} pointerEvents="none" />
       ) : null}
-      <View style={styles.glassTopEdge} pointerEvents="none" />
-      <View style={[styles.glassBorder, r != null && { borderRadius: r }]} pointerEvents="none" />
       {children}
     </View>
   );
@@ -316,7 +306,6 @@ function TintGlass({ style, fill, radius, interactive = false, children }) {
         pointerEvents="none"
         style={[styles.tgShine, { borderTopLeftRadius: radius, borderTopRightRadius: radius }]}
       />
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.tgEdge, { borderRadius: radius }]} />
       {children}
     </Glass>
   );
@@ -326,7 +315,6 @@ function TintGlass({ style, fill, radius, interactive = false, children }) {
 function ItemCard({ children, style }) {
   return (
     <View style={[styles.itemCard, style]}>
-      <View style={styles.itemCardEdge} pointerEvents="none" />
       {children}
     </View>
   );
@@ -1002,9 +990,7 @@ const IslandMenu = memo(function IslandMenu({ arc }) {
       <Animated.View style={[StyleSheet.absoluteFill, styles.menuBack, back]} />
       <Animated.View style={[styles.islBox, box]}>
         <TintGlass style={styles.island} fill="rgba(30,30,38,0.62)" radius={ISL_R} interactive>
-          <Animated.View style={[styles.islPill, pill]}>
-            <View style={styles.segIndEdge} />
-          </Animated.View>
+          <Animated.View style={[styles.islPill, pill]} />
           <IslandOption i={0} arc={arc} />
           <IslandOption i={1} arc={arc} />
           <IslandOption i={2} arc={arc} />
@@ -1790,6 +1776,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     <Wrap
       style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
       intensity={50}
+      native={glass || undefined}
     >
       <GestureDetector gesture={gesture}>
         <View
@@ -1807,9 +1794,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
             <Animated.View
               pointerEvents="none"
               style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: h0 / 2 }, ind]}
-            >
-              <View style={styles.segIndEdge} />
-            </Animated.View>
+            />
           )}
           {labels.map((lab, i) => (
             <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
@@ -2139,6 +2124,7 @@ const kbSubscribe = (f) => {
   return () => kbStore.subs.delete(f);
 };
 const kbGet = () => kbStore.cfg;
+const KB_EMPTY = { label: '', hasPrev: false, isLast: false, accent: 'transparent' };
 
 function KeyBarHost({ scope }) {
   const cfg = useSyncExternalStore(kbSubscribe, kbGet);
@@ -2159,48 +2145,37 @@ function KeyBarHost({ scope }) {
       b.remove();
     };
   }, [jsH]);
-  // стекло панели создаётся только когда клавиатура уже встала (панель на экране и видна),
-  // каждый показ — новый key; пока его нет, видна лёгкая подложка с кромкой
-  const [glassKey, setGlassKey] = useState(0);
-  const [glassOn, setGlassOn] = useState(() => !!Keyboard.isVisible?.()); // клавиатура уже открыта — сразу стекло
-  useEffect(() => {
-    const a = Keyboard.addListener('keyboardDidShow', () => {
-      setGlassKey((k) => k + 1);
-      setGlassOn(true);
-    });
-    const b = Keyboard.addListener('keyboardWillHide', () => setGlassOn(false));
-    return () => {
-      a.remove();
-      b.remove();
-    };
-  }, []);
   const lastRef = useRef(null);
+  // клавиатура ушла совсем — забываем последнюю подпись (поле без панели её не покажет)
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const d = Keyboard.addListener('keyboardDidHide', () => {
+      if (!kbStore.cfg && lastRef.current) {
+        lastRef.current = null;
+        bump((k) => k + 1);
+      }
+    });
+    return () => d.remove();
+  }, []);
   const mine = cfg && cfg.scope === scope ? cfg : null;
   if (mine) lastRef.current = mine;
   else if (cfg) lastRef.current = null; // фокус в другом окне — здесь не показываем
-  const shown = mine || lastRef.current; // пока клавиатура уезжает — держим последнюю подпись
+  const shown = mine || lastRef.current || KB_EMPTY; // пока клавиатура уезжает — держим последнюю подпись
   const anim = useAnimatedStyle(() => {
     const h = kb.height.value > 0 ? kb.height.value : jsH.value;
-    // без opacity: панель прячется сдвигом за нижний край экрана, пока клавиатуры нет
-    return { transform: [{ translateY: h > 40 ? -h : KB_BAR_H + 40 }] };
+    // едет кадр в кадр с клавиатурой с первого кадра её показа; без клавиатуры — за нижним краем
+    return { transform: [{ translateY: h > 0.5 ? -h : KB_BAR_H + 40 }] };
   });
-  if (Platform.OS !== 'ios' || !shown) return null;
+  if (Platform.OS !== 'ios') return null;
+  // Панель смонтирована всегда (вместе с окном), стекло — лёгкий BlurView, тоже всегда:
+  // при показе клавиатуры ничего не создаётся и не ждёт keyboardDidShow — только сдвиг.
   return (
-    <Animated.View style={[styles.keyBarWrap, anim]} pointerEvents={mine ? 'box-none' : 'none'}>
+    <Animated.View
+      style={[styles.keyBarWrap, shown === KB_EMPTY && styles.keyBarOff, anim]}
+      pointerEvents={mine ? 'box-none' : 'none'}
+    >
       <View style={styles.keyBar}>
-        {glassOn ? (
-          LG && GlassView ? (
-            <GlassView
-              key={glassKey}
-              pointerEvents="none"
-              glassEffectStyle="regular"
-              colorScheme="dark"
-              style={StyleSheet.absoluteFill}
-            />
-          ) : (
-            <BlurView key={glassKey} pointerEvents="none" intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
-          )
-        ) : null}
+        <BlurView pointerEvents="none" intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
         <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
           <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
@@ -2322,36 +2297,33 @@ const CalcAdjRow = memo(function CalcAdjRow({ value, date, onChange, accent, reg
   );
 });
 
-/** Плитка раздела «Расчёта»: квадратная карточка (то же стекло, что у Расходов/Смен), тап — шторка раздела. */
-const CALC_TILE_W = Math.floor((SCREEN_W - 32 - 10) / 2);
+/** Раздел «Расчёта»: панель во всю ширину (то же стекло, что у Расходов/Смен), тап — шторка раздела. */
 const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
   return (
     <ScaleButton style={styles.tileHit} onPress={onPress}>
       <Glass style={styles.tile} intensity={34}>
-        <View style={styles.tileTop}>
-          <View style={styles.tileIcon}>
-            <Text style={styles.tileIconTxt}>{icon}</Text>
-          </View>
-          <Text style={styles.chevMini}>›</Text>
+        <View style={styles.tileIcon}>
+          <Text style={styles.tileIconTxt}>{icon}</Text>
         </View>
-        <View>
-          <Text style={styles.tileBig} numberOfLines={1} adjustsFontSizeToFit>
-            {big}
-          </Text>
-          <Text style={styles.tileTitle} numberOfLines={2}>
+        <View style={styles.tileMid}>
+          <Text style={styles.tileTitle} numberOfLines={1}>
             {title}
           </Text>
           <Text style={styles.tileSub} numberOfLines={1}>
             {sub}
           </Text>
         </View>
+        <Text style={styles.tileBig} numberOfLines={1}>
+          {big}
+        </Text>
+        <Text style={styles.chevMini}>›</Text>
       </Glass>
     </ScaleButton>
   );
 });
 
 /**
- * Позиции в шторке — плоский список в порядке таблицы. Ввод подряд: «Далее ›» на панели
+ * «Касса» (позиции) в шторке — плоский список в порядке таблицы. Ввод подряд: «Далее ›» на панели
  * шторки идёт по позициям сверху вниз, поле в фокусе докручивается над клавиатурой.
  */
 const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep, onSet, onOpen, onQuick }) {
@@ -2412,7 +2384,6 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
           />
         ))}
       </ItemCard>
-      <Text style={[styles.hint, { paddingHorizontal: 6 }]}>Тап по названию — несколько подсчётов (59 + 98)</Text>
     </View>
   );
 });
@@ -2605,14 +2576,11 @@ function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
           {nextName ? `${nextName} ›` : 'последняя'}
         </Text>
       </View>
-      <Text style={styles.hint}>
-        «Далее ›» сохраняет и показывает следующую, «↑» — назад. Пустое поле — значение не меняется. 59+98 — через «+ подсчёт».
-      </Text>
     </View>
   );
 }
 
-/** «Итог по позициям» — в шторке. */
+/** «План продаж» (бывш. «Итог по позициям») — в шторке. */
 function CalcSummaryList({ day, rates }) {
   const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
   return (
@@ -2642,7 +2610,7 @@ function CalcSummaryList({ day, rates }) {
   );
 }
 
-/** «Расход ингредиентов» — в шторке. */
+/** «Расход» (бывш. «Расход ингредиентов») — в шторке. */
 function CalcUsageList({ day, rates }) {
   const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
   const boxes = useMemo(() => computeBoxes(day.counts), [day.counts]);
@@ -2707,7 +2675,6 @@ function CalcSavedList({ calc, date: cur, accent, onPick }) {
           <Text style={[styles.itemTitle, x.key === cur && { color: accent }]}>{money(x.pay)}</Text>
         </ScaleButton>
       ))}
-      <Text style={[styles.hint, { textAlign: 'center' }]}>Расчёт сохраняется автоматически по дате.</Text>
     </View>
   );
 }
@@ -2933,24 +2900,24 @@ const CalcView = memo(function CalcView({
       <Animated.View style={styles.tileGrid} layout={ROW_LAYOUT}>
         <CalcTile
           icon="🧾"
-          title="Позиции"
+          title="Касса"
           big={fmtNum(units)}
           sub={`заполнено ${entered} из ${CALC_ITEMS.length}`}
           onPress={() => onOpenSection('calcPos')}
         />
         <CalcTile
-          icon="📊"
-          title="Итог по позициям"
-          big={fmtNum(res.total)}
-          sub={`единица ${fmtNum(res.unit)}`}
-          onPress={() => onOpenSection('calcSum')}
-        />
-        <CalcTile
           icon="🥫"
-          title="Расход ингредиентов"
+          title="Расход"
           big={fmtNum(usageN)}
           sub={usageN ? `ингр. · коробок фри ${fmtNum(friBoxes)}` : 'пока ничего'}
           onPress={() => onOpenSection('calcUse')}
+        />
+        <CalcTile
+          icon="📊"
+          title="План продаж"
+          big={fmtNum(res.total)}
+          sub={`единица ${fmtNum(res.unit)}`}
+          onPress={() => onOpenSection('calcSum')}
         />
         <CalcTile
           icon="🗂"
@@ -2959,12 +2926,6 @@ const CalcView = memo(function CalcView({
           sub={saved.length ? `последний ${fmtShort(saved[0].date)}${saved[0].slot > 1 ? ` · смена ${saved[0].slot}` : ''}` : 'пока нет'}
           onPress={() => onOpenSection('calcSaved')}
         />
-      </Animated.View>
-
-      <Animated.View layout={ROW_LAYOUT}>
-        <Text style={[styles.hint, { textAlign: 'center' }]}>
-          Расчёт сохраняется автоматически по дате. Закрыли две смены за день — «Ещё смена за этот день».
-        </Text>
       </Animated.View>
     </>
   );
@@ -6147,7 +6108,7 @@ export default function App() {
 
       case 'calcPos':
         return {
-          title: 'Позиции',
+          title: 'Касса',
           onClose: closeSheet,
           right: (
             <Pressable onPress={closeSheet}>
@@ -6180,13 +6141,13 @@ export default function App() {
         };
       case 'calcSum':
         return {
-          title: 'Итог по позициям',
+          title: 'План продаж',
           onClose: closeSheet,
           body: calcDay ? <CalcSummaryList day={calcDay} rates={calc.rates} /> : null,
         };
       case 'calcUse':
         return {
-          title: 'Расход ингредиентов',
+          title: 'Расход',
           onClose: closeSheet,
           body: calcDay ? <CalcUsageList day={calcDay} rates={calc.rates} /> : null,
         };
@@ -6223,7 +6184,6 @@ export default function App() {
           body: (
             <LayoutAnimationConfig skipEntering>
               <View>
-                <Text style={styles.hint}>Подсчёты складываются. Например, 59 + 98.</Text>
                 {t.map((n, i) => (
                   <Animated.View key={i} style={styles.tallyRow} entering={ROW_ENTER} layout={ROW_LAYOUT}>
                     <Text style={[styles.setL, { flex: 1 }]}>Подсчёт {i + 1}</Text>
@@ -6283,10 +6243,6 @@ export default function App() {
           ),
           body: (
             <>
-              <Text style={styles.hint}>
-                Выработка = позиции × ставка, делится на сотрудников. Наставник и остановки добавляются,
-                только если отмечены галочкой. Промежутка забирает из выработки долю «его часы / длина смены».
-              </Text>
               <ItemCard style={styles.listCard}>
                 {RATE_FIELDS.map(([k, label, unit], i) => {
                   const kb = fieldKb(`rate_${k}`, RATE_FIELDS.map(([x]) => `rate_${x}`), label);
@@ -6470,7 +6426,7 @@ export default function App() {
           <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
-          <Glass style={styles.gearInner} intensity={50}>
+          <Glass style={styles.gearInner} intensity={50} native>
             <Text style={styles.gearIcon}>⚙</Text>
           </Glass>
         </ScaleButton>
@@ -6560,22 +6516,6 @@ const styles = StyleSheet.create({
   // карточка во вкладке: заливка и кромка на САМОМ виде с радиусом — видны на чёрном всегда
   cardBase: {
     backgroundColor: 'rgba(118,118,128,0.2)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.16)',
-  },
-  glassTopEdge: {
-    position: 'absolute',
-    top: 0,
-    left: 12,
-    right: 12,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255,255,255,0.22)',
-  },
-  glassBorder: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.14)',
   },
 
   balance: { padding: 20, marginBottom: 16, borderRadius: 26 },
@@ -6661,16 +6601,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     overflow: 'hidden',
     backgroundColor: 'rgba(30,30,36,0.94)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  itemCardEdge: {
-    position: 'absolute',
-    top: 0,
-    left: 10,
-    right: 10,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255,255,255,0.12)',
   },
   rowWrap: { position: 'relative', overflow: 'hidden' },
   eCardOuter: { marginBottom: 8 },
@@ -6738,7 +6668,6 @@ const styles = StyleSheet.create({
     height: '48%',
     backgroundColor: 'rgba(255,255,255,0.13)',
   },
-  tgEdge: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.32)' },
   sGlyph: { color: '#fff', fontSize: 16, fontWeight: '800' },
   menuBack: { backgroundColor: 'rgba(0,0,0,0.28)' },
   addMenuBack: { backgroundColor: 'rgba(0,0,0,0.18)' },
@@ -6790,8 +6719,6 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
     borderRadius: 30,
     backgroundColor: 'rgba(44,44,50,0.42)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.18)',
     overflow: 'hidden',
   },
   qeCount: { color: 'rgba(235,235,245,0.55)', fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] },
@@ -6812,28 +6739,30 @@ const styles = StyleSheet.create({
   qePlusTxt: { color: '#fff', fontSize: 13, fontWeight: '600' },
   qePeek: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingHorizontal: 8, marginTop: 12 },
   qePeekTxt: { flex: 1, color: 'rgba(235,235,245,0.38)', fontSize: 13 },
-  tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 16, marginBottom: 6 },
-  tileHit: { width: CALC_TILE_W },
+  tileGrid: { gap: 10, marginTop: 16, marginBottom: 6 },
+  tileHit: { alignSelf: 'stretch' },
   tile: {
-    width: CALC_TILE_W,
-    height: CALC_TILE_W,
+    minHeight: 84,
     borderRadius: 24,
-    padding: 14,
-    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
-  tileTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   tileIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  tileIconTxt: { fontSize: 19 },
-  tileBig: { color: '#fff', fontSize: 30, fontWeight: '700', letterSpacing: -0.6, fontVariant: ['tabular-nums'] },
-  tileTitle: { color: '#fff', fontSize: 15, fontWeight: '600', marginTop: 2 },
-  tileSub: { color: 'rgba(235,235,245,0.5)', fontSize: 12, marginTop: 2 },
+  tileIconTxt: { fontSize: 21 },
+  tileMid: { flex: 1, minWidth: 0 },
+  tileBig: { color: '#fff', fontSize: 26, fontWeight: '700', letterSpacing: -0.5, fontVariant: ['tabular-nums'], flexShrink: 0 },
+  tileTitle: { color: '#fff', fontSize: 17, fontWeight: '600' },
+  tileSub: { color: 'rgba(235,235,245,0.5)', fontSize: 13, marginTop: 2 },
   adjLine: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   adjMini: { flexDirection: 'row', gap: 4 },
   adjMiniBtn: {
@@ -6870,8 +6799,6 @@ const styles = StyleSheet.create({
     height: ISL_PILL,
     borderRadius: ISL_PILL / 2,
     backgroundColor: 'rgba(255,255,255,0.2)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.4)',
   },
   islOpt: { position: 'absolute', top: 0, left: ISL_T / 2 - ISL_OPT / 2, width: ISL_OPT, height: ISL_OPT },
   islDot: {
@@ -7017,8 +6944,6 @@ const styles = StyleSheet.create({
     borderRadius: 32,
     overflow: 'hidden',
     backgroundColor: 'rgba(28,28,34,0.94)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
   },
   segCapGlass: { overflow: 'hidden' },
   segCapRow: { flex: 1, flexDirection: 'row', padding: 5 },
@@ -7030,11 +6955,9 @@ const styles = StyleSheet.create({
     bottom: 5,
     borderRadius: 26,
     backgroundColor: 'rgba(255,255,255,0.17)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.24)',
   },
   // твёрдое стекло плашки дока: чуть плотнее и с яркой кромкой
-  segIndSolid: { backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.42)' },
+  segIndSolid: { backgroundColor: 'rgba(255,255,255,0.2)' },
   // StyleSheet.absoluteFillObject в этой версии RN нет — заливка задана явно
   lqClip: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
   lqRim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.75)' },
@@ -7065,14 +6988,6 @@ const styles = StyleSheet.create({
   lqLab: { position: 'absolute', top: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
   lqTxtR: { color: 'rgba(255,80,100,0.55)', transform: [{ translateX: -1 }] },
   lqTxtB: { color: 'rgba(90,170,255,0.55)', transform: [{ translateX: 1 }] },
-  segIndEdge: {
-    position: 'absolute',
-    top: 0,
-    left: 14,
-    right: 14,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255,255,255,0.5)',
-  },
   segTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 15, fontWeight: '600' },
   segTxtOn: { color: '#fff' },
   segTxtAbs: { position: 'absolute' },
@@ -7489,6 +7404,7 @@ const styles = StyleSheet.create({
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
   keyBarWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50 },
+  keyBarOff: { opacity: 0 },
   // стеклянная капсула над клавиатурой; лёгкая подложка + кромка на самом виде — панель видна,
   // даже если стекло не нарисовалось
   keyBar: {
@@ -7502,8 +7418,6 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     overflow: 'hidden',
     backgroundColor: 'rgba(44,44,50,0.5)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.18)',
   },
   keyBarRound: {
     width: 48,
