@@ -2681,7 +2681,7 @@ function CalcQuickEntry({ day, accent, onSetTallies, onDone }) {
             </Pressable>
             <View style={styles.qeFoot}>
               <Text style={styles.qeNow} numberOfLines={1}>
-                {draft ? `было ${quickShown(base.current)}` : item.note || (total ? 'пусто + Далее — оставить' : ' ')}
+                {draft ? `было ${quickShown(base.current)}` : item.note || ' '}
               </Text>
               <Pressable
                 hitSlop={8}
@@ -3174,10 +3174,6 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                 )}
               </>
             )}
-            <Text style={[styles.hint, styles.pageHint]}>
-              Листайте вбок — другие зарплаты. Тап по карточке — изменить или удалить. Тап по кнопке — ✓, удержание —
-              ✓ / → перенести / ○.
-            </Text>
           </View>
         </LayoutAnimationConfig>
       </ScrollView>
@@ -3436,7 +3432,6 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
                 )}
               </>
             )}
-            <Text style={[styles.hint, styles.pageHint]}>Листайте вбок — другие зарплаты</Text>
           </View>
         </LayoutAnimationConfig>
       </ScrollView>
@@ -4957,10 +4952,6 @@ export default function App() {
             {pv.replace.length} · уже есть {pv.same.length + pv.keep.length}
           </Text>
         </ItemCard>
-        <Text style={styles.hint}>
-          Заметка — источник правды. Каждый расход встанет под ту же зарплату, что в заметке; ✅ — оплачен.
-          Точные совпадения (дата + сумма + название) не дублируются, а если в заметке ✅ — отмечаются оплаченными.
-        </Text>
         {left.length > 0 && (
           <Pressable
             style={({ pressed }) => [styles.warnCard, pressed && styles.rowPressed]}
@@ -5158,12 +5149,7 @@ export default function App() {
           <Text style={styles.bigUnit}>сом</Text>
         </View>
         {kb.bar}
-        <Text style={styles.fieldNote}>
-          {note ||
-            (plus
-              ? 'Излишек — только для сведения: его забирает работодатель, к «К выплате» не прибавляется.'
-              : 'Сумма смены не уменьшается — недостача вычитается из итога зарплаты («К выплате»).')}
-        </Text>
+        {note ? <Text style={styles.fieldNote}>{note}</Text> : null}
       </View>
     );
   };
@@ -5228,10 +5214,6 @@ export default function App() {
             {pv.carry.length ? ` · депонирование ${pv.carry.length}` : ''}
           </Text>
         </ItemCard>
-        <Text style={styles.hint}>
-          Смены без суммы — сумма придёт из «Расчёта». Уже введённые не дублируются: дописываются только пустые поля
-          (недостача, место), сумма не меняется никогда.
-        </Text>
         {(P.warnings || []).length > 0 && (
           <View style={styles.warnCard}>
             {P.warnings.map((w, i) => (
@@ -5358,10 +5340,6 @@ export default function App() {
           ),
           body: (
             <>
-              <Text style={styles.hint}>
-                Зарплата {form.carryP ? fmtShort(form.carryP) : ''}: депонирование. Не привязано к смене — «−»
-                вычитается из «К выплате» этой зарплаты, «+» прибавляется. Пусто или 0 — убрать.
-              </Text>
               {adjField(kC, {
                 key: 'carry',
                 label: 'Депонирование',
@@ -5459,11 +5437,6 @@ export default function App() {
               >
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
               </ScaleButton>
-              <Text style={styles.hint}>
-                Заголовок «21-4 дек. Зп 11 декабрь», затем смены «21 - ночь касса», можно несколько в строке. «- 2430» после
-                смены — недостача, «+300» — наставник (доплата к зарплате), «-3927 депонирование» — депонирование зарплаты (также понимаю «с прошлой зп»; «+» прибавляется). Место пишите между
-                временем и ролью: «26 - день Аламедин рядовой».
-              </Text>
             </>
           ),
         };
@@ -5489,9 +5462,6 @@ export default function App() {
               <ScaleButton style={styles.actBtn} onPress={closeSheet}>
                 <Text style={styles.actBtnTxt}>Отмена</Text>
               </ScaleButton>
-              <Text style={styles.hint}>
-                Файл: {exportFileName(r, 'pdf')} / .jpg. Откроется «Поделиться»: «Сохранить в Файлы», «Сохранить изображение» или отправить.
-              </Text>
             </>
           ),
         };
@@ -5633,10 +5603,6 @@ export default function App() {
                     </Text>
                   </View>
                 </ItemCard>
-                <Text style={styles.hint}>
-                  Сумма считается в «Расчёте» и обновляется сама. Чтобы изменить — поправьте количества,
-                  роль или ставки там.
-                </Text>
                 {adjField(kShort)}
 
                 <ScaleButton
@@ -5691,7 +5657,6 @@ export default function App() {
                   <Text style={styles.bigUnit}>сом</Text>
                 </View>
                 {kAmt.bar}
-                <Text style={styles.fieldNote}>Пусто — смена без суммы (в итог не идёт).</Text>
                 {(() => {
                   const m = editId ? mentorMark(state.shifts.find((x) => x.id === editId)) : 0;
                   return m ? (
@@ -5802,9 +5767,6 @@ export default function App() {
                   )
                 }
               />
-              <Text style={[styles.fieldNote, { marginBottom: 16 }]}>
-                Учёба — смены пт, сб, вс · работа — все дни
-              </Text>
               <ItemCard style={styles.listCard}>
                 {nav.map((n, i) => (
                   <Pressable
@@ -5860,11 +5822,6 @@ export default function App() {
                   <Text style={styles.actBtnTxt}>Вернуть как было до вставки</Text>
                 </ScaleButton>
               )}
-              <Text style={styles.hint}>
-                Версии приложения (через dev-сервер и опубликованная) хранят данные отдельно. Чтобы перенести: в версии с
-                данными нажмите «Скопировать все данные», затем откройте другую версию → ⚙ → «Перенос данных» →
-                «Вставить данные». Данные в той версии будут заменены копией.
-              </Text>
             </>
           ),
         };
@@ -5951,7 +5908,6 @@ export default function App() {
 
       case 'cleanup': {
         const list = autoAddedRecurring(state).sort((x, y) => (x.date < y.date ? -1 : 1));
-        const hasRules = Array.isArray(state.recurring) && state.recurring.length > 0;
         const byM = {};
         for (const e of list) (byM[e.date.slice(0, 7)] = byM[e.date.slice(0, 7)] || []).push(e);
         const months = Object.keys(byM).sort();
@@ -5968,11 +5924,6 @@ export default function App() {
                 </Text>
                 <Text style={styles.calcMeta}>только неоплаченные и не изменённые — оплаченные ✓ остаются</Text>
               </ItemCard>
-              <Text style={styles.hint}>
-                {hasRules
-                  ? 'Это платежи, которые раньше сами добавляла функция «Постоянные платежи»: то же название, сумма и число, что в её списке, без правок и переносов.'
-                  : 'Списка старых «Постоянных платежей» в данных нет — автодобавленные нельзя отличить от введённых вручную, поэтому ничего не удаляем.'}
-              </Text>
               {months.map((k) => (
                 <View key={k}>
                   <Text style={styles.sectionLabel}>
@@ -6112,11 +6063,6 @@ export default function App() {
               >
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
               </ScaleButton>
-              <Text style={styles.hint}>
-                Строки вида «15 октября - 5075 Мбанк ✅», «15 окт 5075 Мбанк», «15.10 – 5 075 Мбанк». Заголовки «Расходы
-                Ноябрь» и «… зарплата 30 октября» не обязательны — каждая строка с датой попадёт под свою зарплату. Год —
-                ближайший к сегодняшнему дню. ✅ — уже оплачено.
-              </Text>
             </>
           ),
         };
@@ -6170,9 +6116,7 @@ export default function App() {
                   </ScaleButton>
                 );
               })}
-              {!find.q.trim() ? (
-                <Text style={[styles.hint, { textAlign: 'center' }]}>Ищет по всем зарплатам. Тап по найденному — открыть.</Text>
-              ) : res.length >= 40 ? (
+              {find.q.trim() && res.length >= 40 ? (
                 <Text style={[styles.hint, { textAlign: 'center' }]}>Показаны первые 40 — уточните запрос.</Text>
               ) : null}
             </>
@@ -6242,9 +6186,6 @@ export default function App() {
                   <Text style={styles.lVal}>{money(spent)}</Text>
                 </View>
               </ItemCard>
-              <Text style={styles.hint}>
-                Учитываются расходы со статусом «✓ оплачено» и все смены с суммой, за вычетом недостачи, плюс наставник и депонирование (+ / −). Излишек не считается — его забирает работодатель.
-              </Text>
             </>
           ),
         };
@@ -6711,7 +6652,6 @@ const styles = StyleSheet.create({
   },
   footL: { color: 'rgba(235,235,245,0.55)', fontSize: 14, fontWeight: '600' },
   footV: { color: '#ffd60a', fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  pageHint: { textAlign: 'center', paddingHorizontal: 20, marginTop: 4 },
   periodBlock: { marginBottom: 10 },
   hidden: { display: 'none' },
   cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
