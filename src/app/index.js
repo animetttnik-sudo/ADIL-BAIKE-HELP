@@ -255,41 +255,68 @@ const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailab
  */
 const PaneGlassCtx = createContext(false);
 
-/** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
-function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false, native = false }) {
+/**
+ * Глубина: мягкая большая тень + плотная короткая (boxShadow: тень по пути скругления,
+ * внутри карточки вырезана — стекло не темнеет; рисуется вне обрезки overflow:hidden).
+ */
+const DEPTH = {
+  card: '0px 12px 28px rgba(0,0,0,0.42), 0px 2px 5px rgba(0,0,0,0.28)',
+  sheet: '0px 18px 48px rgba(0,0,0,0.6), 0px 3px 10px rgba(0,0,0,0.32)',
+  toast: '0px 16px 36px rgba(0,0,0,0.55), 0px 4px 10px rgba(0,0,0,0.35)',
+  chrome: '0px 10px 26px rgba(0,0,0,0.45), 0px 2px 6px rgba(0,0,0,0.3)',
+};
+// внутренний градиент: сверху чуть светлее, книзу темнее (плавно, без линии по краю)
+const DEPTH_SHADE = 'linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(255,255,255,0) 42%, rgba(0,0,0,0.16) 100%)';
+// Нативное стекло шире видимой карточки на GLASS_BLEED со всех сторон: его блик-кромка
+// (тонкая светлая линия по краю UIGlassEffect — те самые белые полоски сверху/снизу)
+// оказывается ЗА обрезкой скруглённого контейнера; внутри — то же Liquid Glass.
+const GLASS_BLEED = 4;
+
+/** Стекло: нативный Liquid Glass (GlassView) с кромкой за обрезкой; без него — BlurView. */
+function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false, depth }) {
   const inPane = useContext(PaneGlassCtx);
-  // Нативный Liquid Glass (UIGlassEffect) всегда рисует свой блик-кромку — белые полоски
-  // сверху/снизу. Убрать его нельзя, поэтому карточки, шторки и тосты — BlurView без кромок;
-  // GlassView остаётся только у дока (native / interactive).
-  if (inPane && !interactive && !native) {
-    return (
-      <View style={[styles.glassBase, styles.cardBase, style]}>
-        <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
-        {children}
-      </View>
-    );
-  }
-  if (LG && GlassView && (native || interactive)) {
+  const flat = StyleSheet.flatten(style) || {};
+  const r = flat.borderRadius != null ? flat.borderRadius : 26;
+  const shadow = depth === 'none' ? null : { boxShadow: DEPTH[depth || 'card'] };
+  // всплывающие меню с interactive-стеклом — как раньше: GlassView сам несёт содержимое
+  if (interactive && LG && GlassView) {
     return (
       <GlassView
         glassEffectStyle="regular"
         colorScheme="dark"
         tintColor={tint}
-        isInteractive={interactive}
+        isInteractive
         style={[styles.glassBase, style]}
       >
         {children}
       </GlassView>
     );
   }
-  // blur + подкраска (без блика сверху и кромки — они давали белые полоски)
+  const shade = <View pointerEvents="none" style={styles.depthShade} />;
+  if (LG && GlassView) {
+    return (
+      <View style={[styles.glassBase, inPane && styles.cardBase, style, shadow]}>
+        <GlassView
+          pointerEvents="none"
+          glassEffectStyle="regular"
+          colorScheme="dark"
+          tintColor={tint}
+          style={[styles.glassBleed, { borderRadius: r + GLASS_BLEED }]}
+        />
+        {shade}
+        {children}
+      </View>
+    );
+  }
+  // нет Liquid Glass: blur + подкраска (без блика и кромки)
   return (
-    <View style={[styles.glassBase, style]}>
-      <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
+    <View style={[styles.glassBase, style, shadow]}>
+      <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
       <View style={styles.glassFill} pointerEvents="none" />
       {tint ? (
         <View style={[StyleSheet.absoluteFill, { backgroundColor: tintFallback || tint }]} pointerEvents="none" />
       ) : null}
+      {shade}
       {children}
     </View>
   );
@@ -501,7 +528,7 @@ function SheetHost({ active, render, onClosed }) {
           {cfg && (
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
               <Animated.View style={drag}>
-                <Glass style={styles.sheet} intensity={48}>
+                <Glass style={styles.sheet} intensity={48} depth="sheet">
                   <GestureDetector gesture={pan}>
                     <View collapsable={false}>
                       <View style={styles.handle} />
@@ -1069,7 +1096,7 @@ function Toast({ toast, onUndo, onHide }) {
       style={styles.toastWrap}
       pointerEvents="box-none"
     >
-      <Glass style={styles.toast} intensity={60}>
+      <Glass style={styles.toast} intensity={60} depth="toast">
         <Text style={styles.toastTxt} numberOfLines={1}>{toast.text}</Text>
         {toast.undo ? (
           <Pressable hitSlop={12} onPress={onUndo} accessibilityRole="button" accessibilityLabel="Отменить">
@@ -1305,6 +1332,9 @@ function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' })
  * ломает BlurView/GlassView на iOS). Небольшая задержка pressIn, чтобы кнопки
  * не сжимались, когда палец просто начинает скролл.
  */
+// мягкое «вдавливание» панели и пружинистый возврат
+const PRESS_IN = { duration: 110, easing: Easing.out(Easing.quad) };
+const PRESS_OUT = { damping: 18, stiffness: 260, mass: 0.7 };
 function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) {
   const scale = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({
@@ -1314,10 +1344,10 @@ function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) 
     <APressable
       unstable_pressDelay={70}
       onPressIn={() => {
-        scale.value = withTiming(0.96, { duration: 80 });
+        scale.value = withTiming(0.965, PRESS_IN);
       }}
       onPressOut={() => {
-        scale.value = withTiming(1, { duration: 140 });
+        scale.value = withSpring(1, PRESS_OUT);
       }}
       onPress={() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
@@ -1776,7 +1806,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     <Wrap
       style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
       intensity={50}
-      native={glass || undefined}
+      depth="chrome"
     >
       <GestureDetector gesture={gesture}>
         <View
@@ -2161,21 +2191,36 @@ function KeyBarHost({ scope }) {
   if (mine) lastRef.current = mine;
   else if (cfg) lastRef.current = null; // фокус в другом окне — здесь не показываем
   const shown = mine || lastRef.current || KB_EMPTY; // пока клавиатура уезжает — держим последнюю подпись
+  // панель не нужна (поле без неё) — уводим за нижний край сдвигом, не opacity:
+  // нативное стекло при почти нулевой прозрачности не ставится
+  const off = useSharedValue(shown === KB_EMPTY ? 1 : 0);
+  useEffect(() => {
+    off.value = shown === KB_EMPTY ? 1 : 0;
+  }, [shown, off]);
   const anim = useAnimatedStyle(() => {
     const h = kb.height.value > 0 ? kb.height.value : jsH.value;
     // едет кадр в кадр с клавиатурой с первого кадра её показа; без клавиатуры — за нижним краем
-    return { transform: [{ translateY: h > 0.5 ? -h : KB_BAR_H + 40 }] };
+    return { transform: [{ translateY: h > 0.5 && !off.value ? -h : KB_BAR_H + 40 }] };
   });
   if (Platform.OS !== 'ios') return null;
-  // Панель смонтирована всегда (вместе с окном), стекло — лёгкий BlurView, тоже всегда:
+  // Панель и её стекло смонтированы всегда (вместе с окном), стекло готово заранее:
   // при показе клавиатуры ничего не создаётся и не ждёт keyboardDidShow — только сдвиг.
   return (
     <Animated.View
-      style={[styles.keyBarWrap, shown === KB_EMPTY && styles.keyBarOff, anim]}
+      style={[styles.keyBarWrap, anim]}
       pointerEvents={mine ? 'box-none' : 'none'}
     >
       <View style={styles.keyBar}>
-        <BlurView pointerEvents="none" intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+        {LG && GlassView ? (
+          <GlassView
+            pointerEvents="none"
+            glassEffectStyle="regular"
+            colorScheme="dark"
+            style={[styles.glassBleed, { borderRadius: 26 + GLASS_BLEED }]}
+          />
+        ) : (
+          <BlurView pointerEvents="none" intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+        )}
         <Pressable style={styles.keyBarHide} hitSlop={6} onPress={() => Keyboard.dismiss()}>
           <Text style={styles.keyBarHideTxt}>Скрыть</Text>
         </Pressable>
@@ -6426,7 +6471,7 @@ export default function App() {
           <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
-          <Glass style={styles.gearInner} intensity={50} native>
+          <Glass style={styles.gearInner} intensity={50} depth="chrome">
             <Text style={styles.gearIcon}>⚙</Text>
           </Glass>
         </ScaleButton>
@@ -6509,6 +6554,8 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     overflow: 'hidden',
   },
+  glassBleed: { position: 'absolute', top: -GLASS_BLEED, left: -GLASS_BLEED, right: -GLASS_BLEED, bottom: -GLASS_BLEED },
+  depthShade: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundImage: DEPTH_SHADE },
   glassFill: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(22,22,28,0.42)',
@@ -7404,7 +7451,6 @@ const styles = StyleSheet.create({
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },
   keyBarWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50 },
-  keyBarOff: { opacity: 0 },
   // стеклянная капсула над клавиатурой; лёгкая подложка + кромка на самом виде — панель видна,
   // даже если стекло не нарисовалось
   keyBar: {
