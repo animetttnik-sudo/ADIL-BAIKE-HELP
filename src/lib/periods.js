@@ -1,6 +1,7 @@
 /**
  * Даты, периоды и зарплаты (чистые функции, без React) — общие для App и тестов.
  */
+import { seedRecurringMonth } from './recurring.js';
 export const KEY = 'zp_app_v1';
 export const ANCHOR = '2026-09-04';
 export const MONTHS = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
@@ -70,7 +71,7 @@ export function defaultState() {
   return {
     settings: { mode: 'study', hue: 145, light: 54 },
     custom: { bg: null },
-    // type — след старой функции «Постоянные платежи» (интерфейс его больше не показывает)
+    // type 'recurring' — постоянный платёж (старые записи без rid — от прежней версии функции)
     expenses: [
       { id: uid(), date: '2026-09-04', amount: 1000, title: 'Адилет Аке', type: 'unexpected', status: 'paid' },
       { id: uid(), date: '2026-09-04', amount: 7000, title: 'апама карыз', type: 'unexpected', status: 'paid' },
@@ -107,7 +108,8 @@ export function seedMonth(state, viewY, viewM) {
     custom: { ...(state.custom || { bg: null }) },
     removed: [...(state.removed || [])],
   };
-  // «Постоянные платежи» убраны: расходы сами больше не добавляются — только смены.
+  // «Постоянные платежи»: активные правила (с датой «до») добавляют расход в то же число месяца
+  if (seedRecurringMonth(next, viewY, viewM, uid)) changed = true;
   periodsTouchingMonth(viewY, viewM).forEach((period) => {
     for (let d = period.start; d <= period.end; d = addDays(d, 1)) {
       if (next.removed.includes(d) || next.shifts.some((s) => s.date === d)) continue;

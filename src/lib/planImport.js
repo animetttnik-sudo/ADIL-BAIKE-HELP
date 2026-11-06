@@ -164,12 +164,14 @@ export function applyImport(app, blocks, makeId, planId, now = new Date().toISOS
  * Если правило удалено, его расходы так уже не отличить — их не трогаем.
  */
 export function autoAddedRecurring(app) {
-  const rules = Array.isArray(app?.recurring) ? app.recurring : [];
+  // только старые правила (без untilDate); новые постоянные снимаются кнопкой «Удалить» у платежа
+  const rules = (Array.isArray(app?.recurring) ? app.recurring : []).filter((r) => r && !r.untilDate);
   if (!rules.length) return [];
   return (app.expenses || []).filter(
     (e) =>
       e &&
       e.type === 'recurring' &&
+      !e.rid &&
       !e.src &&
       !e.movedFrom &&
       !e.edited &&

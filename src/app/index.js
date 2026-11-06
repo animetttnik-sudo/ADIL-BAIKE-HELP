@@ -100,6 +100,7 @@ import { computeBoxes, fmtKg } from '../lib/boxes';
 import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
+import { addRecurring, isSeries, removeSeries, seriesToRemove } from '../lib/recurring';
 import { repeatShiftDraft } from '../lib/repeatShift';
 import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/listView';
 import { paydayIndexFor, searchItems } from '../lib/search';
@@ -570,7 +571,7 @@ function SheetHost({ active, render, onClosed }) {
   );
 }
 
-function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', variant, eyebrow }) {
+function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', variant, eyebrow, min }) {
   const [open, setOpen] = useState(false);
   const initial = useRef(value);
   const ty = useSharedValue(SCREEN_H);
@@ -638,7 +639,9 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
                 ['Вчера', -1],
                 ['Сегодня', 0],
                 ['Завтра', 1],
-              ].map(([t, d]) => {
+              ]
+                .filter(([, d]) => !min || addDays(todayIso(), d) >= min)
+                .map(([t, d]) => {
                 const v = addDays(todayIso(), d);
                 const on = v === value;
                 return (
@@ -661,7 +664,8 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
               display="spinner"
               locale="ru-RU"
               themeVariant="dark"
-              onValueChange={(_, d) => d && onChange(iso(d))}
+              onValueChange={(_, d) => d && onChange(min && iso(d) < min ? min : iso(d))}
+              {...(min ? { minimumDate: parse(min) } : null)}
               style={{ height: 200, width: SCREEN_W - 40 }}
             />
           </Animated.View>
@@ -4078,6 +4082,9 @@ export default function App() {
       date: e.date,
       amount: e.amount != null ? String(e.amount) : '',
       title: e.title || '',
+      // новый расход: «Одноразовый» по умолчанию; «Постоянный» — до даты until (по умолчанию через год)
+      rec: false,
+      until: id ? null : addDays(e.date, 365),
     });
     setSheet('exp');
   }, []);
@@ -4319,6 +4326,28 @@ export default function App() {
       if (!e) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
       const what = `${e.title || 'Без названия'} · ${fmtShort(e.date)} · ${money(Number(e.amount) || 0)} сом`;
+      if (isSeries(stateRef.current, e)) {
+        // постоянный: одна кнопка «Удалить» убирает этот и все следующие неоплаченные и снимает правило
+        const n = seriesToRemove(stateRef.current, id).length;
+        Alert.alert(
+          'Удалить постоянный платёж?',
+          `${what}\n${n > 1 ? `Этот и следующие неоплаченные (${n}) удалятся, новые больше не появятся.` : 'Новые больше не появятся.'} Оплаченные останутся.`,
+          [
+            { text: 'Отмена', style: 'cancel' },
+            {
+              text: 'Удалить',
+              style: 'destructive',
+              onPress: () => {
+                const { undo } = removeSeries(stateRef.current, id);
+                patch((p) => removeSeries(p, id).app);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
+                if (undo) setToast({ k: Date.now(), text: n > 1 ? `Удалено: ${n}` : 'Расход удалён', undo });
+              },
+            },
+          ]
+        );
+        return;
+      }
       Alert.alert('Удалить расход?', what, [
         { text: 'Отмена', style: 'cancel' },
         {
@@ -4544,6 +4573,9 @@ export default function App() {
           const { type: _oldType, ...rest } = expenses[i];
           expenses[i] = { ...rest, date, amount, title, edited: true };
         }
+      } else if (form.rec) {
+        // постоянный: первый расход на эту дату + правило «каждое это число до until»
+        return addRecurring(prev, { date, amount, title, untilDate: form.until }, uid);
       } else {
         expenses.push({ id: uid(), date, amount, title, status: null });
       }
@@ -5458,7 +5490,32 @@ export default function App() {
                 />
                 {kTitle.bar}
               </View>
-              <DateWheel value={form.date} accent={accent} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
+              {!editId && (
+                <View style={styles.segBlock}>
+                  <SegmentCapsule
+                    value={form.rec ? 0 : 1}
+                    labels={['Постоянный', 'Одноразовый']}
+                    height={50}
+                    onChange={(i) => setForm((f) => ({ ...f, rec: i === 0 }))}
+                  />
+                </View>
+              )}
+              <DateWheel
+                value={form.date}
+                accent={accent}
+                onChange={(d) =>
+                  setForm((f) => ({ ...f, date: d, until: f.until && f.until < d ? d : f.until }))
+                }
+              />
+              {!editId && form.rec ? (
+                <DateWheel
+                  label="До"
+                  value={form.until}
+                  min={form.date}
+                  accent={accent}
+                  onChange={(d) => setForm((f) => ({ ...f, until: d < f.date ? f.date : d }))}
+                />
+              ) : null}
               {editId && (
                 <ScaleButton
                   style={[styles.actBtn, styles.dangerBtn]}
