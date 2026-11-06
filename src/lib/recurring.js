@@ -94,27 +94,45 @@ export function seedRecurringMonth(next, y, m, makeId) {
 /** Правило, к которому относится расход (по rid). */
 export const ruleOfExpense = (app, e) => (e && e.rid ? rulesOf(app).find((r) => r.id === e.rid) || null : null);
 
+/** Тот же платёж: то же название (без регистра/пробелов), та же сумма и то же число месяца. */
+const sameAs = (e) => {
+  const n = normT(e.title);
+  const dd = Number(od(e).slice(8, 10));
+  return (x) =>
+    (!!e.rid && x.rid === e.rid) ||
+    (normT(x.title) === n && Number(x.amount) === Number(e.amount) && Number(od(x).slice(8, 10)) === dd);
+};
+
 /**
- * Расходы серии, которые удалит «Удалить» у постоянного платежа: этот + все последующие неоплаченные
- * того же правила (по rid; для старых «постоянных» без rid — тот же тип, название, сумма и число месяца).
- * Прошлые и оплаченные остаются.
+ * Расходы, которые удалит «Этот и следующие»: этот + все последующие неоплаченные такие же —
+ * того же правила (по rid) или с тем же названием, суммой и числом месяца (старые «постоянные»,
+ * строки импортированного плана, введённые вручную). Прошлые и оплаченные остаются.
  */
 export function seriesToRemove(app, id) {
   const e = (app.expenses || []).find((x) => x.id === id);
   if (!e) return [];
-  const legacy = !e.rid && e.type === 'recurring';
-  if (!e.rid && !legacy) return [e];
-  const n = normT(e.title);
-  const dd = Number(od(e).slice(8, 10));
-  const same = (x) =>
-    e.rid
-      ? x.rid === e.rid
-      : x.type === 'recurring' && !x.rid && normT(x.title) === n && Number(x.amount) === Number(e.amount) && Number(od(x).slice(8, 10)) === dd;
-  return app.expenses.filter((x) => x.id === e.id || (same(x) && x.status !== 'paid' && od(x) >= od(e)));
+  const same = sameAs(e);
+  return app.expenses.filter((x) => x.id === e.id || (x.status !== 'paid' && od(x) >= od(e) && same(x)));
 }
 
-/** Постоянный платёж (удаление уберёт серию и остановит правило). */
-export const isSeries = (app, e) => !!e && (!!ruleOfExpense(app, e) || (!e.rid && e.type === 'recurring'));
+/** Правила, которые надо снять вместе с серией: правило расхода (rid) и любые с тем же названием, суммой и числом. */
+function rulesFor(app, e) {
+  const n = normT(e.title);
+  const dd = Number(od(e).slice(8, 10));
+  return rulesOf(app).filter(
+    (r) =>
+      r &&
+      ((e.rid && r.id === e.rid) ||
+        (normT(r.title) === n && Number(r.amount) === Number(e.amount) && Number(r.dayOfMonth ?? r.day) === dd))
+  );
+}
+
+/**
+ * Есть что удалять «сериями»: у расхода есть правило, или впереди есть такие же неоплаченные,
+ * или это старый «постоянный» (type recurring). Тогда в удалении есть выбор «Только этот / Этот и следующие».
+ */
+export const isSeries = (app, e) =>
+  !!e && (rulesFor(app, e).length > 0 || e.type === 'recurring' || seriesToRemove(app, e.id).length > 1);
 
 /**
  * Удалить платёж серии + будущие неоплаченные и снять правило (новые не появятся).
@@ -126,15 +144,7 @@ export function removeSeries(app, id) {
   const items = seriesToRemove(app, id);
   const ids = new Set(items.map((x) => x.id));
   const rules = rulesOf(app);
-  let dropRules;
-  if (e.rid) dropRules = rules.filter((r) => r.id === e.rid);
-  else {
-    // старое правило (без untilDate) с тем же названием, суммой и числом — тоже убираем
-    const dd = Number(od(e).slice(8, 10));
-    dropRules = rules.filter(
-      (r) => !isActiveRule(r) && r.title === e.title && Number(r.amount) === Number(e.amount) && Number(r.day) === dd
-    );
-  }
+  const dropRules = rulesFor(app, e);
   const dropIds = new Set(dropRules.map((r) => r.id));
   const indexes = app.expenses.map((x, i) => (ids.has(x.id) ? i : -1)).filter((i) => i >= 0);
   const next = { ...app, expenses: app.expenses.filter((x) => !ids.has(x.id)) };

@@ -4326,16 +4326,21 @@ export default function App() {
       if (!e) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
       const what = `${e.title || 'Без названия'} · ${fmtShort(e.date)} · ${money(Number(e.amount) || 0)} сом`;
+      const removeOne = () => {
+        const { undo } = removeExpense(stateRef.current, id);
+        patch((p) => removeExpense(p, id).app);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
+        if (undo) setToast({ k: Date.now(), text: 'Расход удалён', undo });
+      };
       if (isSeries(stateRef.current, e)) {
-        // постоянный: одна кнопка «Удалить» убирает этот и все следующие неоплаченные и снимает правило
+        // постоянный / повторяющийся (в т.ч. старый или из импорта): выбор «Только этот» или «Этот и следующие»
         const n = seriesToRemove(stateRef.current, id).length;
         Alert.alert(
           'Удалить постоянный платёж?',
-          `${what}\n${n > 1 ? `Этот и следующие неоплаченные (${n}) удалятся, новые больше не появятся.` : 'Новые больше не появятся.'} Оплаченные останутся.`,
+          `${what}\n${n > 1 ? `Дальше есть такие же неоплаченные: ${n - 1}.` : 'Дальше таких же пока нет.'} Оплаченные останутся.`,
           [
-            { text: 'Отмена', style: 'cancel' },
             {
-              text: 'Удалить',
+              text: n > 1 ? `Этот и следующие (${n})` : 'Удалить и не повторять',
               style: 'destructive',
               onPress: () => {
                 const { undo } = removeSeries(stateRef.current, id);
@@ -4344,6 +4349,8 @@ export default function App() {
                 if (undo) setToast({ k: Date.now(), text: n > 1 ? `Удалено: ${n}` : 'Расход удалён', undo });
               },
             },
+            { text: 'Только этот', onPress: removeOne },
+            { text: 'Отмена', style: 'cancel' },
           ]
         );
         return;

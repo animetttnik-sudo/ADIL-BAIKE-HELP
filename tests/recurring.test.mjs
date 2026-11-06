@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { defaultState, seedMonth, normalizeApp } from '../src/lib/periods.js';
-import { addRecurring, removeSeries, seriesToRemove } from '../src/lib/recurring.js';
+import { addRecurring, isSeries, removeSeries, seriesToRemove } from '../src/lib/recurring.js';
 import { restoreRemoved } from '../src/lib/undo.js';
 import { autoAddedRecurring } from '../src/lib/planImport.js';
 
@@ -65,4 +65,31 @@ test('старые сейвы: правила без untilDate ничего не
   const r = removeSeries(o, first.id).app;
   assert.ok(!r.expenses.some((e) => e.title === 'О!Банк' && e.amount === 1385));
   assert.equal(r.recurring.length, 0);
+});
+
+test('старые/импортированные без rid: «Этот и следующие» по названию, сумме и числу; оплаченные и прошлые остаются', () => {
+  const app = {
+    ...base(),
+    expenses: [
+      { id: 'a', date: '2026-10-15', amount: 5075, title: 'Мбанк', status: 'paid', src: 'plan' },
+      { id: 'b', date: '2026-11-15', amount: 5075, title: 'Мбанк', status: null, src: 'plan' },
+      { id: 'c', date: '2026-12-15', amount: 5075, title: 'мбанк ', status: null, src: 'plan' },
+      { id: 'd', date: '2027-01-15', amount: 5075, title: 'Мбанк', status: 'paid' },
+      { id: 'e', date: '2027-02-15', amount: 5075, title: 'Мбанк', type: 'recurring', status: null },
+      { id: 'f', date: '2027-02-16', amount: 5075, title: 'Мбанк', status: null },
+      { id: 'g', date: '2027-03-15', amount: 5000, title: 'Мбанк', status: null },
+      { id: 'h', date: '2026-11-13', amount: 1350, title: 'Вай фай', status: null, src: 'plan' },
+      { id: 'i', date: '2026-12-13', amount: 1350, title: 'Вайфай', type: 'recurring', status: null },
+    ],
+    recurring: [{ id: 'r', title: 'Мбанк', amount: 5075, day: 15 }],
+  };
+  assert.ok(isSeries(app, app.expenses[1]));
+  assert.deepEqual(seriesToRemove(app, 'b').map((x) => x.id), ['b', 'c', 'e']);
+  const { app: next, undo } = removeSeries(app, 'b');
+  assert.deepEqual(next.expenses.map((x) => x.id), ['a', 'd', 'f', 'g', 'h', 'i']);
+  assert.equal(next.recurring.length, 0);
+  assert.deepEqual(restoreRemoved(next, undo).expenses.map((x) => x.id).sort(), app.expenses.map((x) => x.id).sort());
+  assert.deepEqual(seriesToRemove(app, 'h').map((x) => x.id), ['h', 'i']);
+  // одиночный обычный расход — без выбора
+  assert.ok(!isSeries(app, app.expenses[6]));
 });
