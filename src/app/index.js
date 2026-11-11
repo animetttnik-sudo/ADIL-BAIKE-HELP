@@ -196,13 +196,19 @@ const SNAP_ROOT = { current: null };
 // касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
 const SNAP_BUS = { kick: null };
 
-// expo-glass-effect — опционально
+// expo-glass-effect — опционально (есть в Expo Go SDK 58). Нативный Liquid Glass
+// рисуется только если isLiquidGlassAvailable() (сборка с iOS 26+ SDK + система)
+// и isGlassEffectAPIAvailable() (иначе падение на части iOS 26 beta).
 let GlassView = null;
+let GlassContainer = null;
 let isLiquidGlassAvailable = () => false;
+let isGlassEffectAPIAvailable = () => false;
 try {
   const eg = require('expo-glass-effect');
   GlassView = eg.GlassView;
+  GlassContainer = eg.GlassContainer;
   isLiquidGlassAvailable = eg.isLiquidGlassAvailable || (() => false);
+  isGlassEffectAPIAvailable = eg.isGlassEffectAPIAvailable || (() => false);
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -246,7 +252,16 @@ function wErr(err) {
 const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 
-const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
+const LG =
+  Platform.OS === 'ios' &&
+  !!GlassView &&
+  typeof isLiquidGlassAvailable === 'function' &&
+  !!isLiquidGlassAvailable() &&
+  typeof isGlassEffectAPIAvailable === 'function' &&
+  !!isGlassEffectAPIAvailable();
+// Док с нативным морфингом капли: GlassContainer + interactive GlassView.
+// Без обоих флагов остаётся текущий док (иконки, плашка, JS-капля).
+const NATIVE_DOCK_GLASS = LG && !!GlassContainer;
 
 /**
  * Карточки внутри вкладок (Расходы / Смены / Расчёт) — ОДИН путь для всех.
@@ -3821,6 +3836,56 @@ function newShiftDate(k) {
   return today >= per.start && today <= per.end ? today : per.start;
 }
 
+/**
+ * Нативный Liquid Glass док (iOS 26+): GlassContainer сливает соседние GlassView
+ * в жидкую каплю, выбранный сегмент — isInteractive. Только если NATIVE_DOCK_GLASS.
+ */
+function NativeGlassDock({ page, labels, icons, onChange, onSettings }) {
+  const n = labels.length;
+  const innerW = SCREEN_W - 32 - 8 - 64;
+  const segW = Math.max(48, Math.floor((innerW - 8) / n));
+  return (
+    <View style={styles.dock}>
+      <GlassContainer spacing={10} style={styles.dockGlassRow}>
+        <View style={styles.dockGlassCap}>
+          {icons.map((icon, i) => {
+            const on = i === page;
+            return (
+              <GlassView
+                key={labels[i]}
+                glassEffectStyle="regular"
+                isInteractive={on}
+                colorScheme="dark"
+                style={[styles.dockGlassSeg, { width: segW }]}
+              >
+                <Pressable
+                  onPress={() => onChange(i)}
+                  accessibilityRole="button"
+                  accessibilityLabel={labels[i]}
+                  accessibilityState={{ selected: on }}
+                  style={styles.dockGlassHit}
+                >
+                  <AppIcon name={icon} size={42} variant="glyph" color="#FFFFFF" />
+                </Pressable>
+              </GlassView>
+            );
+          })}
+        </View>
+        <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassGear}>
+          <Pressable
+            onPress={onSettings}
+            accessibilityRole="button"
+            accessibilityLabel="Настройки"
+            style={styles.dockGlassHit}
+          >
+            <AppIcon name="gear" size={40} variant="glyph" color="#FFFFFF" />
+          </Pressable>
+        </GlassView>
+      </GlassContainer>
+    </View>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState(0);
@@ -6810,15 +6875,31 @@ export default function App() {
         )}
       </View>
 
-      {/* Dock */}
-      <View style={styles.dock}>
-        <View style={styles.capsuleWrap}>
-          <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
+      {/* Док: нативный Liquid Glass (капля через GlassContainer) только если API доступен; иначе прежний док. */}
+      {NATIVE_DOCK_GLASS ? (
+        <NativeGlassDock
+          page={page}
+          labels={DOCK_LABELS}
+          icons={DOCK_ICONS}
+          onChange={(i) => {
+            if (i !== page) {
+              Haptics.selectionAsync().catch(noop);
+              scheduleOnUI(tabAnim, i);
+            }
+            onDock(i);
+          }}
+          onSettings={() => setSheet('settings')}
+        />
+      ) : (
+        <View style={styles.dock}>
+          <View style={styles.capsuleWrap}>
+            <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
+          </View>
+          <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
+            <AppIcon name="gear" size={64} variant="tile" shape="circle" />
+          </ScaleButton>
         </View>
-        <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
-          <AppIcon name="gear" size={64} variant="tile" shape="circle" />
-        </ScaleButton>
-      </View>
+      )}
 
       <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
       <IslandMenu arc={arc} />
@@ -7331,6 +7412,11 @@ const styles = StyleSheet.create({
     gap: 10,
     alignItems: 'center',
   },
+  dockGlassRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dockGlassCap: { flex: 1, flexDirection: 'row', alignItems: 'center', height: 64, gap: 6 },
+  dockGlassSeg: { height: 54, borderRadius: 27 },
+  dockGlassGear: { width: 64, height: 64, borderRadius: 32 },
+  dockGlassHit: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
   segCap: {
     borderRadius: 32,
