@@ -1,12 +1,13 @@
 /**
  * Фирменные иконки: тёмная стеклянная плитка / зелёная активная #35DE7C / голый глиф.
  * Стекло — плавный градиент без поперечной полосы. shape: 'rounded' | 'circle'.
+ * Глиф всегда по центру плитки (flexbox на всю плитку + сдвиг path в viewBox 24×24).
  * Только react-native-svg (уже в Expo Go SDK 58) — без новых нативных модулей.
  */
 import { memo, useId } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
-import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
-import { GLYPHS, LAYERS, RULES, SET } from './icon-paths';
+import Svg, { Circle, Defs, G, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
+import { GLYPHS, LAYERS, RULES, SET, SHIFT, STROKES } from './icon-paths';
 
 export const ICON_GREEN = '#35DE7C';
 export const ICON_SET = SET;
@@ -14,14 +15,43 @@ export const ICON_SET = SET;
 const RADIUS = 0.223;
 
 function Glyph({ name, size, color }) {
-  const layers = LAYERS[name] || [name];
+  const stroke = STROKES[name];
+  const [dx, dy] = SHIFT[name] || [0, 0];
+  const move = dx || dy ? `translate(${dx} ${dy})` : undefined;
+  let body = null;
+  if (stroke && stroke.circle) {
+    body = (
+      <Circle
+        cx={stroke.circle.cx}
+        cy={stroke.circle.cy}
+        r={stroke.circle.r}
+        fill="none"
+        stroke={color}
+        strokeWidth={stroke.width}
+      />
+    );
+  } else if (stroke) {
+    body = (
+      <Path
+        d={stroke.d}
+        fill="none"
+        stroke={color}
+        strokeWidth={stroke.width}
+        strokeLinecap={stroke.linecap || 'round'}
+        strokeLinejoin={stroke.linejoin || 'round'}
+      />
+    );
+  } else {
+    const layers = LAYERS[name] || [name];
+    body = layers.map((id) => {
+      const d = GLYPHS[id];
+      if (!d) return null;
+      return <Path key={id} d={d} fill={color} fillRule={RULES[id] || 'nonzero'} />;
+    });
+  }
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-      {layers.map((id) => {
-        const d = GLYPHS[id];
-        if (!d) return null;
-        return <Path key={id} d={d} fill={color} fillRule={RULES[id] || 'nonzero'} />;
-      })}
+      {move ? <G transform={move}>{body}</G> : body}
     </Svg>
   );
 }
@@ -50,7 +80,6 @@ export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile'
   const on = variant === 'tileOn';
   const r = shape === 'circle' ? size / 2 : Math.round(size * RADIUS * 10) / 10;
   const glyphSize = Math.round(size * 0.62);
-  const pad = (size - glyphSize) / 2;
 
   return (
     <View
@@ -70,7 +99,7 @@ export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile'
           },
         ]}
       >
-        <Svg pointerEvents="none" width={size} height={size} style={StyleSheet.absoluteFill}>
+        <Svg pointerEvents="none" width={size} height={size} style={styles.fill}>
           <Defs>
             <LinearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
               <Stop offset="0" stopColor="#ffffff" stopOpacity={on ? 0.28 : 0.16} />
@@ -80,21 +109,35 @@ export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile'
           </Defs>
           <Rect x="0" y="0" width={size} height={size} rx={r} ry={r} fill={`url(#${gid})`} />
         </Svg>
-        {name ? (
-          <View style={{ position: 'absolute', top: pad, left: pad, width: glyphSize, height: glyphSize }}>
-            <Glyph name={name} size={glyphSize} color={glyphColor} />
-          </View>
-        ) : null}
       </View>
+      {name ? (
+        <View pointerEvents="none" style={styles.glyphSlot}>
+          <Glyph name={name} size={glyphSize} color={glyphColor} />
+        </View>
+      ) : null}
     </View>
   );
 });
 
 const styles = StyleSheet.create({
   tile: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  fill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  glyphSlot: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   glowOff: Platform.select({
     ios: {
@@ -118,4 +161,4 @@ const styles = StyleSheet.create({
   }),
 });
 
-export { GLYPHS, LAYERS, RULES };
+export { GLYPHS, LAYERS, RULES, SHIFT, STROKES };

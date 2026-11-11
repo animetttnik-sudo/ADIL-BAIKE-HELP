@@ -432,4 +432,195 @@ const SET = [
   'box',
 ];
 
-module.exports = { GLYPHS, RULES, LAYERS, SET, NAMES, rr, cir, cap };
+
+// ── Штриховые глифы (галочка, стрелки, кольцо) — круглые концы, уже в центре 24×24
+const STROKES = {
+  check: {
+    d: 'M5.15 12.2 L10.2 17.4 L18.9 6.65',
+    width: 2.7,
+    linecap: 'round',
+    linejoin: 'round',
+  },
+  arrowRight: {
+    d: 'M4.45 12 H17.45 M12.85 6.4 L19.55 12 L12.85 17.6',
+    width: 2.45,
+    linecap: 'round',
+    linejoin: 'round',
+  },
+  arrowLeft: {
+    d: 'M19.55 12 H6.55 M11.15 6.4 L4.45 12 L11.15 17.6',
+    width: 2.45,
+    linecap: 'round',
+    linejoin: 'round',
+  },
+  empty: {
+    circle: { cx: 12, cy: 12, r: 7.05 },
+    width: 2.2,
+  },
+};
+
+function tokenize(d) {
+  const out = [];
+  const re = /([MmLlHhVvCcSsQqTtAaZz])|(-?\d*\.?\d+(?:e[-+]?\d+)?)/g;
+  let m, cur = null, nums = [];
+  const flush = () => { if (cur) out.push({ c: cur, n: nums }); cur = null; nums = []; };
+  while ((m = re.exec(d))) {
+    if (m[1]) { flush(); cur = m[1]; }
+    else nums.push(Number(m[2]));
+  }
+  flush();
+  return out;
+}
+
+function arcPoints(x1, y1, rx, ry, phiDeg, large, sweep, x2, y2, steps = 24) {
+  const pts = [];
+  rx = Math.abs(rx); ry = Math.abs(ry);
+  if (!rx || !ry) { pts.push([x2, y2]); return pts; }
+  const phi = (phiDeg * Math.PI) / 180;
+  const cos = Math.cos(phi), sin = Math.sin(phi);
+  const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+  let x1p = cos * dx + sin * dy;
+  let y1p = -sin * dx + cos * dy;
+  const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; }
+  const sign = large !== sweep ? 1 : -1;
+  const rx2 = rx * rx, ry2 = ry * ry;
+  const num = Math.max(0, rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p);
+  const den = rx2 * y1p * y1p + ry2 * x1p * x1p;
+  const coef = den ? sign * Math.sqrt(num / den) : 0;
+  const cxp = coef * (rx * y1p) / ry;
+  const cyp = coef * (-ry * x1p) / rx;
+  const cx = cos * cxp - sin * cyp + (x1 + x2) / 2;
+  const cy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const ang = (ux, uy, vx, vy) => {
+    const mag = Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1;
+    const a = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy) / mag)));
+    return ux * vy - uy * vx < 0 ? -a : a;
+  };
+  const theta1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dtheta = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!sweep && dtheta > 0) dtheta -= 2 * Math.PI;
+  if (sweep && dtheta < 0) dtheta += 2 * Math.PI;
+  for (let i = 0; i <= steps; i++) {
+    const t = theta1 + (dtheta * i) / steps;
+    const x = cx + rx * Math.cos(t) * cos - ry * Math.sin(t) * sin;
+    const y = cy + rx * Math.cos(t) * sin + ry * Math.sin(t) * cos;
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
+function pathBBox(d) {
+  const cmds = tokenize(d);
+  let x = 0, y = 0, sx = 0, sy = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const add = (px, py) => {
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+    minX = Math.min(minX, px); minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px); maxY = Math.max(maxY, py);
+  };
+  for (const { c, n } of cmds) {
+    const rel = c === c.toLowerCase() && c.toUpperCase() !== 'Z';
+    const T = c.toUpperCase();
+    let i = 0;
+    const take = (k) => n.slice(i, (i += k));
+    if (T === 'M') {
+      let first = true;
+      while (i < n.length) {
+        let nx = n[i++], ny = n[i++];
+        if (ny == null) break;
+        if (rel) { nx += x; ny += y; }
+        x = nx; y = ny;
+        if (first) { sx = x; sy = y; first = false; }
+        add(x, y);
+      }
+    } else if (T === 'L') {
+      while (i < n.length) {
+        let nx = n[i++], ny = n[i++];
+        if (ny == null) break;
+        if (rel) { nx += x; ny += y; }
+        x = nx; y = ny; add(x, y);
+      }
+    } else if (T === 'H') {
+      while (i < n.length) {
+        let nx = n[i++];
+        if (rel) nx += x;
+        x = nx; add(x, y);
+      }
+    } else if (T === 'V') {
+      while (i < n.length) {
+        let ny = n[i++];
+        if (rel) ny += y;
+        y = ny; add(x, y);
+      }
+    } else if (T === 'C') {
+      while (i < n.length) {
+        const p = take(6);
+        if (p.length < 6) break;
+        if (rel) { for (let k = 0; k < 6; k += 2) { p[k] += x; p[k + 1] += y; } }
+        add(p[0], p[1]); add(p[2], p[3]); add(p[4], p[5]);
+        x = p[4]; y = p[5];
+      }
+    } else if (T === 'S' || T === 'Q') {
+      while (i < n.length) {
+        const p = take(4);
+        if (p.length < 4) break;
+        if (rel) { for (let k = 0; k < 4; k += 2) { p[k] += x; p[k + 1] += y; } }
+        add(p[0], p[1]); add(p[2], p[3]);
+        x = p[2]; y = p[3];
+      }
+    } else if (T === 'A') {
+      while (i < n.length) {
+        const p = take(7);
+        if (p.length < 7) break;
+        let nx = p[5], ny = p[6];
+        if (rel) { nx += x; ny += y; }
+        for (const [ax, ay] of arcPoints(x, y, p[0], p[1], p[2], !!p[3], !!p[4], nx, ny, 24)) add(ax, ay);
+        x = nx; y = ny;
+      }
+    } else if (T === 'Z') {
+      x = sx; y = sy;
+    }
+  }
+  return {
+    minX, minY, maxX, maxY,
+    w: maxX - minX, h: maxY - minY,
+    cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+    dx: 12 - (minX + maxX) / 2, dy: 12 - (minY + maxY) / 2,
+  };
+}
+
+function iconBBox(name, GLYPHS, LAYERS) {
+  const layers = LAYERS[name] || [name];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const id of layers) {
+    const d = GLYPHS[id];
+    if (!d) continue;
+    const b = pathBBox(d);
+    minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY);
+    maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY);
+  }
+  return {
+    minX, minY, maxX, maxY,
+    w: maxX - minX, h: maxY - minY,
+    cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+    dx: 12 - (minX + maxX) / 2, dy: 12 - (minY + maxY) / 2,
+  };
+}
+
+module.exports = { pathBBox, iconBBox };
+
+
+const SHIFT = {};
+for (const name of SET) {
+  if (STROKES[name]) {
+    SHIFT[name] = [0, 0];
+    continue;
+  }
+  const b = iconBBox(name, GLYPHS, LAYERS);
+  const dx = Math.abs(b.dx) < 0.05 ? 0 : +b.dx.toFixed(3);
+  const dy = Math.abs(b.dy) < 0.05 ? 0 : +b.dy.toFixed(3);
+  SHIFT[name] = [dx, dy];
+}
+
+module.exports = { GLYPHS, RULES, LAYERS, SET, NAMES, STROKES, SHIFT, pathBBox, iconBBox, rr, cir, cap };
