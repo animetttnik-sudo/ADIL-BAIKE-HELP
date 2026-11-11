@@ -21,7 +21,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
     AppState,
@@ -3319,30 +3319,35 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
 
 const SAFE_TOP = Platform.OS === 'ios' ? 54 : 28;
 const SLOT_INSET = 8;
-const EJECT_IN = { duration: 560, easing: Easing.bezier(0.22, 1, 0.36, 1) };
-const EJECT_OUT = { duration: 340, easing: Easing.in(Easing.cubic) };
-const PRINT_BACK_IN = { duration: 260, easing: Easing.out(Easing.quad) };
-const PRINT_BACK_OUT = { duration: 240, easing: Easing.in(Easing.quad) };
-const ACTIONS_IN = { duration: 240, easing: Easing.out(Easing.cubic) };
+const ACTIONS_BOTTOM_PAD = 28;
+const ACT_BTN_H = 54;
+const ACT_GAP = 10;
+const GAP_ABOVE_PDF = 12;
+const ACTIONS_BLOCK_H = ACT_BTN_H + ACT_GAP + ACT_BTN_H; // PDF/Фото + Отмена
+const EJECT = { duration: 520, easing: Easing.bezier(0.16, 1, 0.3, 1) };
+const EJECT_CLOSE = { duration: 420, easing: Easing.bezier(0.55, 0, 1, 0.35) };
 
 /**
  * Печать зарплаты: чек выезжает из полной зелёной кнопки-принтера, как бумага
- * из щели. Движение — только translateY на UI-потоке (Reanimated), клип по
- * верхнему краю кнопки, сама кнопка рисуется сверху щели. PDF / Фото остаются
- * доступны. Закрытие — обратный заезд в кнопку.
+ * из щели. Кнопка одновременно опускается и останавливается чуть выше PDF/Фото;
+ * бумага остаётся прикреплённой к щели и заполняет место сверху. Закрытие —
+ * обратный ход (кнопка вверх, чек заезжает обратно).
+ *
+ * Чтобы не было подвисаний: вся геометрия меряется ДО старта; во время анимации
+ * нет setState и нет правки layout-свойств — только translateY/opacity на
+ * UI-потоке (один progress, 520 мс). Тень/SVG кнопки растеризуются в слой.
  */
 function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, onPhoto, onClosed }) {
   const [shown, setShown] = useState(false);
-  const [settled, setSettled] = useState(false);
-  const [paperH, setPaperH] = useState(0);
-  const [travel, setTravel] = useState(0);
+  const [geom, setGeom] = useState(null);
+  const [interactive, setInteractive] = useState(false);
   const progress = useSharedValue(0);
-  const back = useSharedValue(0);
-  const actions = useSharedValue(0);
-  const travelSV = useSharedValue(0);
+  const btnTravelSV = useSharedValue(0);
+  const ejectSV = useSharedValue(0);
   const leaving = useRef(false);
   const started = useRef(false);
   const closedPending = useRef(false);
+  const measuredH = useRef(0);
   const reduce = useReducedMotion();
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -3355,9 +3360,15 @@ function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, 
   const oy = Math.round(origin?.y ?? SCREEN_H * 0.42);
   const ow = Math.round(origin?.width ?? SCREEN_W - 32);
   const oh = Math.round(origin?.height ?? 56);
-  const available = Math.max(140, oy - SAFE_TOP);
+  const destY = Math.round(
+    Math.max(SAFE_TOP + 80, SCREEN_H - ACTIONS_BOTTOM_PAD - ACTIONS_BLOCK_H - GAP_ABOVE_PDF - oh)
+  );
+  const buttonTravel = destY - oy;
+  const maxEject = Math.max(1, destY - SAFE_TOP);
 
-  const markSettled = useCallback(() => setSettled(true), []);
+  const markInteractive = useCallback(() => {
+    if (visibleRef.current && !leaving.current) setInteractive(true);
+  }, []);
 
   const fireClosed = useCallback(() => {
     if (!closedPending.current) return;
@@ -3367,34 +3378,31 @@ function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, 
 
   const finishClose = useCallback(() => {
     leaving.current = false;
-    setShown(false);
-    setSettled(false);
+    started.current = false;
+    measuredH.current = 0;
     progress.value = 0;
-    back.value = 0;
-    actions.value = 0;
+    setShown(false);
+    setGeom(null);
+    setInteractive(false);
     fireClosed();
-  }, [fireClosed, progress, back, actions]);
+  }, [fireClosed, progress]);
 
   const startIn = useCallback(
-    (h) => {
-      const t = Math.max(1, Math.min(h, available));
-      setTravel(t);
-      travelSV.value = t;
+    (paperH) => {
+      const eject = Math.max(1, Math.min(paperH, maxEject));
+      btnTravelSV.value = buttonTravel;
+      ejectSV.value = eject;
       if (reduce) {
         progress.value = 1;
-        back.value = 1;
-        actions.value = 1;
-        setSettled(true);
+        setInteractive(true);
         return;
       }
-      back.value = withTiming(1, PRINT_BACK_IN);
-      progress.value = withTiming(1, EJECT_IN, (fin) => {
+      progress.value = withTiming(1, EJECT, (fin) => {
         'worklet';
-        if (fin) scheduleOnRN(markSettled);
+        if (fin) scheduleOnRN(markInteractive);
       });
-      actions.value = withDelay(280, withTiming(1, ACTIONS_IN));
     },
-    [available, reduce, progress, back, actions, travelSV, markSettled]
+    [buttonTravel, maxEject, reduce, progress, btnTravelSV, ejectSV, markInteractive]
   );
 
   useEffect(() => {
@@ -3402,112 +3410,161 @@ function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, 
       leaving.current = false;
       started.current = false;
       closedPending.current = false;
-      setSettled(false);
-      setPaperH(0);
-      setTravel(0);
+      measuredH.current = 0;
       progress.value = 0;
-      back.value = 0;
-      actions.value = 0;
+      btnTravelSV.value = buttonTravel;
+      ejectSV.value = 0;
+      setGeom(null);
+      setInteractive(false);
       setShown(true);
       return;
     }
     if (!visible && shown && !leaving.current) {
       leaving.current = true;
       closedPending.current = true;
-      setSettled(false);
-      if (reduce) {
+      if (reduce || !started.current) {
         finishClose();
         return;
       }
-      actions.value = withTiming(0, { duration: 140 });
-      back.value = withTiming(0, PRINT_BACK_OUT);
-      progress.value = withTiming(0, EJECT_OUT, (fin) => {
+      progress.value = withTiming(0, EJECT_CLOSE, (fin) => {
         'worklet';
         if (fin) scheduleOnRN(finishClose);
       });
     }
-  }, [visible, shown, reduce, progress, back, actions, finishClose]);
+  }, [visible, shown, reduce, progress, btnTravelSV, ejectSV, buttonTravel, finishClose]);
 
-  const onPaperLayout = useCallback(
-    (e) => {
-      const h = Math.round(e.nativeEvent.layout.height);
-      if (!h) return;
-      setPaperH(h);
-      if (!started.current && shown && visibleRef.current) {
-        started.current = true;
-        startIn(h);
-      }
-    },
-    [shown, startIn]
-  );
+  useLayoutEffect(() => {
+    if (!shown || !geom || started.current) return;
+    started.current = true;
+    startIn(geom.paperH);
+  }, [shown, geom, startIn]);
 
+  const onPaperLayout = useCallback((e) => {
+    const h = Math.round(e.nativeEvent.layout.height);
+    if (!h || leaving.current) return;
+    measuredH.current = h;
+    setGeom((prev) => (prev && prev.paperH === h ? prev : { paperH: h, ejectH: Math.max(1, Math.min(h, maxEject)) }));
+  }, [maxEject]);
+
+  const clipStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: btnTravelSV.value * progress.value }],
+  }));
   const paperStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -travelSV.value * progress.value }],
+    transform: [{ translateY: -ejectSV.value * progress.value }],
   }));
-  const dim = useAnimatedStyle(() => ({ opacity: back.value }));
-  const actStyle = useAnimatedStyle(() => ({
-    opacity: actions.value,
-    transform: [{ translateY: (1 - actions.value) * 18 }],
+  const btnStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: btnTravelSV.value * progress.value }],
   }));
+  const dim = useAnimatedStyle(() => ({
+    opacity: progress.value,
+  }));
+  const actStyle = useAnimatedStyle(() => {
+    const a = interpolate(progress.value, [0.45, 1], [0, 1], Extrapolation.CLAMP);
+    return {
+      opacity: a,
+      transform: [{ translateY: (1 - a) * 16 }],
+    };
+  });
 
   const requestClose = useCallback(() => {
+    if (leaving.current) return;
     onCloseRef.current?.();
   }, []);
 
-  const viewportH = travel || available;
+  const clipTop = oy + SLOT_INSET - SCREEN_H;
+  const paperTopInClip = SCREEN_H - SLOT_INSET;
+  const ejectH = geom?.ejectH ?? maxEject;
+  const canScroll = interactive && geom && geom.paperH > geom.ejectH + 1;
 
   return (
     <Modal visible={shown} animationType="none" transparent onRequestClose={requestClose} onDismiss={fireClosed}>
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <View style={{ flex: 1 }}>
+        <View style={{ flex: 1, opacity: geom ? 1 : 0 }}>
+          {/* Плашка под затемнением закрывает исходную зелёную кнопку, чтобы не было «призрака». */}
+          <View
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              left: ox,
+              top: oy,
+              width: ow,
+              height: oh,
+              borderRadius: Math.round(oh * 0.32),
+              backgroundColor: '#050507',
+            }}
+          />
           <Animated.View
             pointerEvents="none"
             style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.55)' }, dim]}
           />
           <Pressable style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} onPress={requestClose} />
-          <View
+          <Animated.View
             pointerEvents="box-none"
-            style={{
-              position: 'absolute',
-              left: ox,
-              width: ow,
-              top: 0,
-              height: oy + SLOT_INSET,
-              overflow: 'hidden',
-              zIndex: 2,
-            }}
+            collapsable={false}
+            style={[
+              {
+                position: 'absolute',
+                left: ox,
+                width: ow,
+                top: clipTop,
+                height: SCREEN_H,
+                overflow: 'hidden',
+                zIndex: 2,
+              },
+              clipStyle,
+            ]}
           >
             <Animated.View
+              shouldRasterizeIOS
+              renderToHardwareTextureAndroid
+              collapsable={false}
               style={[
                 {
                   position: 'absolute',
                   left: 0,
                   width: ow,
-                  top: oy,
-                  height: viewportH,
+                  top: paperTopInClip,
+                  ...(geom ? { height: ejectH } : null),
                 },
                 paperStyle,
               ]}
             >
               <ScrollView
-                scrollEnabled={settled && paperH > travel + 1}
-                showsVerticalScrollIndicator={settled && paperH > travel + 1}
+                scrollEnabled={!!canScroll}
+                showsVerticalScrollIndicator={!!canScroll}
                 bounces={false}
                 keyboardShouldPersistTaps="handled"
-                style={{ maxHeight: viewportH }}
+                style={geom ? { height: ejectH } : null}
               >
                 <View onLayout={onPaperLayout} collapsable={false}>
                   {children}
                 </View>
               </ScrollView>
             </Animated.View>
-          </View>
-          <View pointerEvents="none" style={{ position: 'absolute', left: ox, top: oy, width: ow, height: oh, zIndex: 3 }}>
-            <AppIcon name="printer" size={oh} width="100%" variant="tileOn" />
-          </View>
+          </Animated.View>
           <Animated.View
-            pointerEvents={settled ? 'auto' : 'none'}
-            style={[{ position: 'absolute', left: 16, right: 16, bottom: 28, zIndex: 4 }, actStyle]}
+            pointerEvents="none"
+            shouldRasterizeIOS
+            renderToHardwareTextureAndroid
+            collapsable={false}
+            style={[
+              {
+                position: 'absolute',
+                left: ox - 12,
+                top: oy - 12,
+                width: ow + 24,
+                height: oh + 24,
+                zIndex: 3,
+                padding: 12,
+              },
+              btnStyle,
+            ]}
+          >
+            <AppIcon name="printer" size={oh} width="100%" variant="tileOn" />
+          </Animated.View>
+          <Animated.View
+            pointerEvents={interactive ? 'auto' : 'none'}
+            style={[{ position: 'absolute', left: 16, right: 16, bottom: ACTIONS_BOTTOM_PAD, zIndex: 4 }, actStyle]}
           >
             <View style={styles.calcBtns}>
               <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent, marginBottom: 0 }]} onPress={onPdf}>
@@ -3517,7 +3574,7 @@ function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, 
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
               </ScaleButton>
             </View>
-            <ScaleButton style={[styles.actBtn, { marginTop: 10, marginBottom: 0 }]} onPress={requestClose}>
+            <ScaleButton style={[styles.actBtn, { marginTop: ACT_GAP, marginBottom: 0 }]} onPress={requestClose}>
               <Text style={styles.actBtnTxt}>Отмена</Text>
             </ScaleButton>
           </Animated.View>
