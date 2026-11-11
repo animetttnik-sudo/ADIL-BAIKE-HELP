@@ -19,6 +19,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -251,6 +252,7 @@ function wErr(err) {
 }
 const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
+const hapticLight = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 
 const LG =
   Platform.OS === 'ios' &&
@@ -3838,80 +3840,207 @@ function newShiftDate(k) {
 
 /**
  * Нативный Liquid Glass док (iOS 26+): одна стеклянная капсула на три вкладки,
- * отдельно круглая шестерёнка с зазором (без GlassContainer — не сливаются).
- * Капля выбранной вкладки — interactive GlassView с зелёным tint, едет translateX пружиной.
+ * отдельно круглая шестерёнка (tile, не GlassView — без слияния).
+ * Капля — прозрачная стеклянная линза: панорама пальцем, две фазы иконок
+ * (tile снаружи, tileOn внутри линзы со сдвигом на −x).
  */
+const DOCK_LENS_PAD = 5;
+const DOCK_LENS_BAR = 64;
+const DOCK_LENS_INSET = 5;
+const DOCK_LENS_H = DOCK_LENS_BAR - DOCK_LENS_INSET * 2;
+// чуть собраннее исходных 14/190/0.7 и 0.3/0.2 — иначе капля слишком раздувается и тормозит при нажатии
+const DOCK_LENS_SPRING = { damping: 16, stiffness: 240, mass: 0.65 };
+const DOCK_LENS_SOFT = { damping: 18, stiffness: 180, mass: 0.75 };
+const DOCK_LENS_PRESS_X = 0.12;
+const DOCK_LENS_PRESS_Y = 0.08;
+const DOCK_LENS_STRETCH = 0.16;
+
 function NativeGlassDock({ page, labels, icons, onChange, onSettings }) {
   const n = labels.length;
   const slotSV = useSharedValue(0);
-  const pos = useSharedValue(page);
+  const x = useSharedValue(0);
+  const pressed = useSharedValue(0);
+  const vel = useSharedValue(0);
+  const idxSV = useSharedValue(page);
   const [slotW, setSlotW] = useState(0);
+  const [barW, setBarW] = useState(0);
   const measured = useRef(false);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const emitChange = useCallback((i) => {
+    onChangeRef.current?.(i);
+  }, []);
+
+  const pick = useCallback((i) => {
+    if (i < 0 || i >= n) return;
+    idxSV.value = i;
+    if (slotSV.value > 0) x.value = withSpring(DOCK_LENS_PAD + i * slotSV.value, DOCK_LENS_SPRING);
+    onChangeRef.current?.(i);
+  }, [idxSV, n, slotSV, x]);
 
   useEffect(() => {
-    if (!measured.current) {
-      pos.value = page;
-      return;
-    }
-    pos.value = withSpring(page, { damping: 20, stiffness: 240, mass: 0.85 });
-  }, [page, pos]);
+    if (slotW <= 0) return;
+    idxSV.value = page;
+    x.value = withSpring(DOCK_LENS_PAD + page * slotW, DOCK_LENS_SPRING);
+  }, [idxSV, page, slotW, x]);
 
-  const onTrack = (e) => {
+  const onBar = (e) => {
     const w = e.nativeEvent.layout.width;
     if (w <= 0) return;
-    const slot = w / n;
+    const slot = (w - DOCK_LENS_PAD * 2) / n;
     slotSV.value = slot;
+    setBarW(w);
     setSlotW(slot);
     if (!measured.current) {
       measured.current = true;
-      pos.value = page;
+      idxSV.value = page;
+      x.value = DOCK_LENS_PAD + page * slot;
     }
   };
 
-  const dropStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: pos.value * slotSV.value }],
+  const pan = useMemo(
+    () =>
+      Gesture.Pan()
+        .minDistance(0)
+        .onBegin((e) => {
+          try {
+            const slot = slotSV.value;
+            if (slot <= 0) return;
+            pressed.value = withSpring(1, DOCK_LENS_SOFT);
+            const i = Math.max(0, Math.min(n - 1, Math.floor((e.x - DOCK_LENS_PAD) / slot)));
+            idxSV.value = i;
+            x.value = withSpring(DOCK_LENS_PAD + i * slot, DOCK_LENS_SPRING);
+            scheduleOnRN(hapticLight);
+          } catch (err) {
+            wErr(err);
+          }
+        })
+        .onUpdate((e) => {
+          try {
+            const slot = slotSV.value;
+            if (slot <= 0) return;
+            const maxX = DOCK_LENS_PAD + (n - 1) * slot;
+            const raw = e.x - slot / 2;
+            x.value = Math.max(DOCK_LENS_PAD, Math.min(maxX, raw));
+            vel.value = e.velocityX;
+            const i = Math.max(0, Math.min(n - 1, Math.round((x.value - DOCK_LENS_PAD) / slot)));
+            if (i !== idxSV.value) {
+              idxSV.value = i;
+              scheduleOnRN(hapticSelect);
+            }
+          } catch (err) {
+            wErr(err);
+          }
+        })
+        .onEnd(() => {
+          try {
+            const slot = slotSV.value;
+            if (slot <= 0) return;
+            const i = Math.max(0, Math.min(n - 1, Math.round((x.value - DOCK_LENS_PAD) / slot)));
+            idxSV.value = i;
+            x.value = withSpring(DOCK_LENS_PAD + i * slot, DOCK_LENS_SPRING);
+            scheduleOnRN(emitChange, i);
+          } catch (err) {
+            wErr(err);
+          }
+        })
+        .onFinalize(() => {
+          try {
+            pressed.value = withSpring(0, DOCK_LENS_SOFT);
+            vel.value = withSpring(0, DOCK_LENS_SOFT);
+          } catch (err) {
+            wErr(err);
+          }
+        }),
+    [emitChange, idxSV, n, pressed, slotSV, vel, x],
+  );
+
+  const lensStyle = useAnimatedStyle(() => {
+    const p = pressed.value;
+    const stretch = Math.min(Math.abs(vel.value) / 3200, DOCK_LENS_STRETCH);
+    return {
+      transform: [
+        { translateX: x.value },
+        { scaleX: 1 + DOCK_LENS_PRESS_X * p + stretch },
+        { scaleY: 1 + DOCK_LENS_PRESS_Y * p - stretch * 0.5 },
+      ],
+    };
+  });
+
+  const fillStyle = useAnimatedStyle(() => ({
+    opacity: 1 - 0.55 * pressed.value,
+  }));
+
+  const innerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: -x.value }],
   }));
 
   return (
     <View style={[styles.dock, styles.dockGlassGap]}>
-      <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassCapsule}>
-        <View style={styles.dockGlassTrack} onLayout={onTrack}>
-          {slotW > 0 ? (
-            <Animated.View pointerEvents="none" style={[styles.dockGlassDropWrap, { width: slotW }, dropStyle]}>
-              <GlassView
-                pointerEvents="none"
-                glassEffectStyle="regular"
-                isInteractive
-                colorScheme="dark"
-                tintColor="rgba(53, 222, 124, 0.5)"
-                style={styles.dockGlassDrop}
+      <GestureDetector gesture={pan}>
+        <View style={styles.dockGlassCapsule} onLayout={onBar}>
+          <GlassView
+            pointerEvents="none"
+            glassEffectStyle="regular"
+            colorScheme="dark"
+            style={[StyleSheet.absoluteFill, styles.dockGlassMaterial]}
+          />
+          <LinearGradient
+            pointerEvents="none"
+            colors={['rgba(255,255,255,0.2)', 'rgba(255,255,255,0)']}
+            style={styles.dockGlassSheen}
+          />
+          <View pointerEvents="none" style={styles.dockGlassRim} />
+          <View style={styles.dockGlassIcons}>
+            {icons.map((icon, i) => (
+              <View
+                key={labels[i]}
+                accessible
+                accessibilityRole="button"
+                accessibilityLabel={labels[i]}
+                accessibilityState={{ selected: i === page }}
+                accessibilityActions={[{ name: 'activate' }]}
+                onAccessibilityAction={(ev) => {
+                  if (ev.nativeEvent.actionName === 'activate') pick(i);
+                }}
+                style={styles.dockGlassHit}
+              >
+                <AppIcon name={icon} size={42} variant="tile" />
+              </View>
+            ))}
+          </View>
+          {slotW > 0 && barW > 0 ? (
+            <Animated.View pointerEvents="none" style={[styles.dockGlassLens, { width: slotW }, lensStyle]}>
+              <Animated.View style={[StyleSheet.absoluteFill, fillStyle]} pointerEvents="none">
+                <LinearGradient
+                  colors={['rgba(255,255,255,0.22)', 'rgba(255,255,255,0.06)']}
+                  style={StyleSheet.absoluteFill}
+                />
+              </Animated.View>
+              <LinearGradient
+                colors={['rgba(255,255,255,0.5)', 'rgba(255,255,255,0)']}
+                style={styles.dockGlassLensHi}
               />
+              <LinearGradient
+                colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.16)']}
+                style={styles.dockGlassLensGlow}
+              />
+              <View pointerEvents="none" style={styles.dockGlassLensRim} />
+              <Animated.View style={[styles.dockGlassLensRow, { width: barW }, innerStyle]}>
+                {icons.map((icon, i) => (
+                  <View key={labels[i]} style={styles.dockGlassHit}>
+                    <AppIcon name={icon} size={42} variant="tileOn" />
+                  </View>
+                ))}
+              </Animated.View>
             </Animated.View>
           ) : null}
-          <View style={styles.dockGlassIcons}>
-            {icons.map((icon, i) => {
-              const on = i === page;
-              return (
-                <Pressable
-                  key={labels[i]}
-                  onPress={() => onChange(i)}
-                  accessibilityRole="button"
-                  accessibilityLabel={labels[i]}
-                  accessibilityState={{ selected: on }}
-                  style={styles.dockGlassHit}
-                >
-                  <AppIcon name={icon} size={42} variant="glyph" color="#FFFFFF" />
-                </Pressable>
-              );
-            })}
-          </View>
         </View>
-      </GlassView>
-      <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassGear}>
-        <Pressable onPress={onSettings} accessibilityRole="button" accessibilityLabel="Настройки" style={styles.dockGlassHit}>
-          <AppIcon name="gear" size={40} variant="glyph" color="#FFFFFF" />
-        </Pressable>
-      </GlassView>
+      </GestureDetector>
+      <ScaleButton style={styles.gearDock} onPress={onSettings} accessibilityLabel="Настройки">
+        <AppIcon name="gear" size={64} variant="tile" shape="circle" />
+      </ScaleButton>
     </View>
   );
 }
@@ -6905,17 +7034,14 @@ export default function App() {
         )}
       </View>
 
-      {/* Док: нативное стекло (одна капсула + шестерёнка, капля-индикатор) только если API доступен; иначе прежний док. */}
+      {/* Док: нативное стекло (капсула + прозрачная линза с панорамой) только если API доступен; иначе прежний док. */}
       {NATIVE_DOCK_GLASS ? (
         <NativeGlassDock
           page={page}
           labels={DOCK_LABELS}
           icons={DOCK_ICONS}
           onChange={(i) => {
-            if (i !== page) {
-              Haptics.selectionAsync().catch(noop);
-              scheduleOnUI(tabAnim, i);
-            }
+            if (i !== page) scheduleOnUI(tabAnim, i);
             onDock(i);
           }}
           onSettings={() => setSheet('settings')}
@@ -7443,13 +7569,60 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   dockGlassGap: { gap: 14 },
-  dockGlassCapsule: { flex: 1, height: 64, borderRadius: 32 },
-  dockGlassTrack: { flex: 1, margin: 5 },
-  dockGlassDropWrap: { position: 'absolute', left: 0, top: 0, height: 54, zIndex: 0 },
-  dockGlassDrop: { flex: 1, borderRadius: 27 },
-  dockGlassIcons: { flex: 1, flexDirection: 'row', zIndex: 1 },
-  dockGlassGear: { width: 64, height: 64, borderRadius: 32 },
+  dockGlassCapsule: {
+    flex: 1,
+    height: DOCK_LENS_BAR,
+    borderRadius: DOCK_LENS_BAR / 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.32,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  dockGlassMaterial: { borderRadius: DOCK_LENS_BAR / 2, overflow: 'hidden' },
+  dockGlassSheen: { position: 'absolute', top: 0, left: 0, right: 0, height: DOCK_LENS_BAR / 2, borderRadius: DOCK_LENS_BAR / 2 },
+  dockGlassRim: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DOCK_LENS_BAR / 2,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  dockGlassIcons: { flex: 1, flexDirection: 'row', paddingHorizontal: DOCK_LENS_PAD, zIndex: 1, alignItems: 'center' },
   dockGlassHit: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  dockGlassLens: {
+    position: 'absolute',
+    top: DOCK_LENS_INSET,
+    left: 0,
+    height: DOCK_LENS_H,
+    borderRadius: DOCK_LENS_H / 2,
+    overflow: 'hidden',
+    zIndex: 2,
+  },
+  dockGlassLensHi: { position: 'absolute', top: 0, left: 0, right: 0, height: 24 },
+  dockGlassLensGlow: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 22 },
+  dockGlassLensRim: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: DOCK_LENS_H / 2,
+    borderWidth: 1.2,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+  dockGlassLensRow: {
+    position: 'absolute',
+    top: -DOCK_LENS_INSET,
+    left: 0,
+    height: DOCK_LENS_BAR,
+    flexDirection: 'row',
+    paddingHorizontal: DOCK_LENS_PAD,
+    alignItems: 'center',
+  },
   capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
   segCap: {
     borderRadius: 32,
