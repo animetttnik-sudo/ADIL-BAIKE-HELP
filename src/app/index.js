@@ -3317,6 +3317,237 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
   );
 };
 
+const SAFE_TOP = Platform.OS === 'ios' ? 54 : 28;
+const SLOT_INSET = 8;
+const EJECT_IN = { duration: 560, easing: Easing.bezier(0.22, 1, 0.36, 1) };
+const EJECT_OUT = { duration: 340, easing: Easing.in(Easing.cubic) };
+const PRINT_BACK_IN = { duration: 260, easing: Easing.out(Easing.quad) };
+const PRINT_BACK_OUT = { duration: 240, easing: Easing.in(Easing.quad) };
+const ACTIONS_IN = { duration: 240, easing: Easing.out(Easing.cubic) };
+
+/**
+ * Печать зарплаты: чек выезжает из полной зелёной кнопки-принтера, как бумага
+ * из щели. Движение — только translateY на UI-потоке (Reanimated), клип по
+ * верхнему краю кнопки, сама кнопка рисуется сверху щели. PDF / Фото остаются
+ * доступны. Закрытие — обратный заезд в кнопку.
+ */
+function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, onPhoto, onClosed }) {
+  const [shown, setShown] = useState(false);
+  const [settled, setSettled] = useState(false);
+  const [paperH, setPaperH] = useState(0);
+  const [travel, setTravel] = useState(0);
+  const progress = useSharedValue(0);
+  const back = useSharedValue(0);
+  const actions = useSharedValue(0);
+  const travelSV = useSharedValue(0);
+  const leaving = useRef(false);
+  const started = useRef(false);
+  const closedPending = useRef(false);
+  const reduce = useReducedMotion();
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const ox = Math.round(origin?.x ?? 16);
+  const oy = Math.round(origin?.y ?? SCREEN_H * 0.42);
+  const ow = Math.round(origin?.width ?? SCREEN_W - 32);
+  const oh = Math.round(origin?.height ?? 56);
+  const available = Math.max(140, oy - SAFE_TOP);
+
+  const markSettled = useCallback(() => setSettled(true), []);
+
+  const fireClosed = useCallback(() => {
+    if (!closedPending.current) return;
+    closedPending.current = false;
+    onClosedRef.current?.();
+  }, []);
+
+  const finishClose = useCallback(() => {
+    leaving.current = false;
+    setShown(false);
+    setSettled(false);
+    progress.value = 0;
+    back.value = 0;
+    actions.value = 0;
+    fireClosed();
+  }, [fireClosed, progress, back, actions]);
+
+  const startIn = useCallback(
+    (h) => {
+      const t = Math.max(1, Math.min(h, available));
+      setTravel(t);
+      travelSV.value = t;
+      if (reduce) {
+        progress.value = 1;
+        back.value = 1;
+        actions.value = 1;
+        setSettled(true);
+        return;
+      }
+      back.value = withTiming(1, PRINT_BACK_IN);
+      progress.value = withTiming(1, EJECT_IN, (fin) => {
+        'worklet';
+        if (fin) scheduleOnRN(markSettled);
+      });
+      actions.value = withDelay(280, withTiming(1, ACTIONS_IN));
+    },
+    [available, reduce, progress, back, actions, travelSV, markSettled]
+  );
+
+  useEffect(() => {
+    if (visible && !shown) {
+      leaving.current = false;
+      started.current = false;
+      closedPending.current = false;
+      setSettled(false);
+      setPaperH(0);
+      setTravel(0);
+      progress.value = 0;
+      back.value = 0;
+      actions.value = 0;
+      setShown(true);
+      return;
+    }
+    if (!visible && shown && !leaving.current) {
+      leaving.current = true;
+      closedPending.current = true;
+      setSettled(false);
+      if (reduce) {
+        finishClose();
+        return;
+      }
+      actions.value = withTiming(0, { duration: 140 });
+      back.value = withTiming(0, PRINT_BACK_OUT);
+      progress.value = withTiming(0, EJECT_OUT, (fin) => {
+        'worklet';
+        if (fin) scheduleOnRN(finishClose);
+      });
+    }
+  }, [visible, shown, reduce, progress, back, actions, finishClose]);
+
+  const onPaperLayout = useCallback(
+    (e) => {
+      const h = Math.round(e.nativeEvent.layout.height);
+      if (!h) return;
+      setPaperH(h);
+      if (!started.current && shown && visibleRef.current) {
+        started.current = true;
+        startIn(h);
+      }
+    },
+    [shown, startIn]
+  );
+
+  const paperStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -travelSV.value * progress.value }],
+  }));
+  const dim = useAnimatedStyle(() => ({ opacity: back.value }));
+  const actStyle = useAnimatedStyle(() => ({
+    opacity: actions.value,
+    transform: [{ translateY: (1 - actions.value) * 18 }],
+  }));
+
+  const requestClose = useCallback(() => {
+    onCloseRef.current?.();
+  }, []);
+
+  const viewportH = travel || available;
+
+  return (
+    <Modal visible={shown} animationType="none" transparent onRequestClose={requestClose} onDismiss={fireClosed}>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <View style={{ flex: 1 }}>
+          <Animated.View
+            pointerEvents="none"
+            style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.55)' }, dim]}
+          />
+          <Pressable style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} onPress={requestClose} />
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: 'absolute',
+              left: ox,
+              width: ow,
+              top: 0,
+              height: oy + SLOT_INSET,
+              overflow: 'hidden',
+              zIndex: 2,
+            }}
+          >
+            <Animated.View
+              style={[
+                {
+                  position: 'absolute',
+                  left: 0,
+                  width: ow,
+                  top: oy,
+                  height: viewportH,
+                },
+                paperStyle,
+              ]}
+            >
+              <ScrollView
+                scrollEnabled={settled && paperH > travel + 1}
+                showsVerticalScrollIndicator={settled && paperH > travel + 1}
+                bounces={false}
+                keyboardShouldPersistTaps="handled"
+                style={{ maxHeight: viewportH }}
+              >
+                <View onLayout={onPaperLayout} collapsable={false}>
+                  {children}
+                </View>
+              </ScrollView>
+            </Animated.View>
+          </View>
+          <View pointerEvents="none" style={{ position: 'absolute', left: ox, top: oy, width: ow, height: oh, zIndex: 3 }}>
+            <AppIcon name="printer" size={oh} width="100%" variant="tileOn" />
+          </View>
+          <Animated.View
+            pointerEvents={settled ? 'auto' : 'none'}
+            style={[{ position: 'absolute', left: 16, right: 16, bottom: 28, zIndex: 4 }, actStyle]}
+          >
+            <View style={styles.calcBtns}>
+              <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent, marginBottom: 0 }]} onPress={onPdf}>
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
+              </ScaleButton>
+              <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent, marginBottom: 0 }]} onPress={onPhoto}>
+                <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
+              </ScaleButton>
+            </View>
+            <ScaleButton style={[styles.actBtn, { marginTop: 10, marginBottom: 0 }]} onPress={requestClose}>
+              <Text style={styles.actBtnTxt}>Отмена</Text>
+            </ScaleButton>
+          </Animated.View>
+        </View>
+      </GestureHandlerRootView>
+    </Modal>
+  );
+}
+
+function PrintExportButton({ payday, onExport }) {
+  const printRef = useRef(null);
+  const onPrint = () => {
+    const node = printRef.current;
+    if (node && typeof node.measureInWindow === 'function') {
+      node.measureInWindow((x, y, width, height) => {
+        onExport && onExport(payday, { x, y, width, height });
+      });
+    } else if (onExport) {
+      onExport(payday, null);
+    }
+  };
+  return (
+    <View ref={printRef} collapsable={false} style={styles.exportIconBtn}>
+      <ScaleButton style={styles.exportIconHit} onPress={onPrint} accessibilityLabel="Сохранить зарплату, PDF или фото">
+        <AppIcon name="printer" size={56} width="100%" variant="tileOn" />
+      </ScaleButton>
+    </View>
+  );
+}
+
 const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent, onEdit, onCalc, onCarry, onExport, onAdd }) {
   const st = useAnimatedStyle(() => {
     const d = k - pos.value;
@@ -3337,13 +3568,7 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
           <View>
             <ShiftSumCard payday={payday} t={t} accent={accent} onCarry={onCarry} />
             {list.length ? (
-              <ScaleButton
-                style={styles.exportIconBtn}
-                onPress={() => onExport && onExport(payday)}
-                accessibilityLabel="Сохранить зарплату, PDF или фото"
-              >
-                <AppIcon name="printer" size={56} variant="tile" />
-              </ScaleButton>
+              <PrintExportButton payday={payday} onExport={onExport} />
             ) : null}
             {list.length === 0 ? (
               <EmptyState
@@ -4459,11 +4684,25 @@ export default function App() {
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
   // ── Экспорт зарплаты: PDF (expo-print) / Фото (снимок карточки) → системное «Поделиться / Сохранить»
   const [exportP, setExportP] = useState(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportOrigin, setExportOrigin] = useState(null);
   const exportRef = useRef(null);
-  const openExportMenu = useCallback((p) => {
+  const afterExportClose = useRef(null);
+  const openExportMenu = useCallback((p, origin) => {
     Haptics.selectionAsync().catch(noop);
     setExportP(p);
-    setSheet('export');
+    setExportOrigin(origin || null);
+    setExportOpen(true);
+  }, []);
+  const closeExport = useCallback(() => setExportOpen(false), []);
+  const closeExportThen = useCallback((fn) => {
+    afterExportClose.current = fn;
+    setExportOpen(false);
+  }, []);
+  const onExportClosed = useCallback(() => {
+    const fn = afterExportClose.current;
+    afterExportClose.current = null;
+    if (fn) fn();
   }, []);
   /** Копия временного файла под понятным именем («Зарплата_15.10.2026.pdf»), латиницей — если кириллица не прошла. */
   const namedCopy = useCallback((uri, r, ext, latin) => {
@@ -4500,7 +4739,7 @@ export default function App() {
   const exportPdf = useCallback(
     (p) => {
       const r = payReport(stateRef.current, p, calcRef.current);
-      closeThen(async () => {
+      closeExportThen(async () => {
         try {
           const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current) });
           await shareFile(uri, 'application/pdf', 'com.adobe.pdf', r, 'pdf');
@@ -4509,19 +4748,19 @@ export default function App() {
         }
       });
     },
-    [closeThen, shareFile]
+    [closeExportThen, shareFile]
   );
   const exportPhoto = useCallback(async (p) => {
     try {
       const r = payReport(stateRef.current, p, calcRef.current);
       const uri = await captureRef(exportRef, { format: 'jpg', quality: 0.95, result: 'tmpfile' });
-      closeThen(() =>
+      closeExportThen(() =>
         shareFile(uri, 'image/jpeg', 'public.jpeg', r, 'jpg').catch((e) => Alert.alert('Фото не сохранено', String(e?.message || e)))
       );
     } catch (e) {
       Alert.alert('Фото не сохранено', String(e?.message || e));
     }
-  }, [closeThen, shareFile]);
+  }, [closeExportThen, shareFile]);
 
   const payPageProps = useMemo(
     () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, onAdd: () => openExpense(null), arc }),
@@ -6520,7 +6759,7 @@ export default function App() {
           <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
-          <AppIcon name="gear" size={64} variant="tileOn" shape="circle" />
+          <AppIcon name="gear" size={64} variant="tile" shape="circle" />
         </ScaleButton>
       </View>
 
@@ -6535,6 +6774,17 @@ export default function App() {
       />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
+      <ExportPrinterHost
+        visible={exportOpen}
+        origin={exportOrigin}
+        accent={accent}
+        onClose={closeExport}
+        onClosed={onExportClosed}
+        onPdf={() => exportP && exportPdf(exportP)}
+        onPhoto={() => exportP && exportPhoto(exportP)}
+      >
+        {exportP ? <ExportCard r={payReport(state, exportP, calc)} accent={accent} viewRef={exportRef} /> : null}
+      </ExportPrinterHost>
     </View>
   );
 
@@ -7083,7 +7333,8 @@ const styles = StyleSheet.create({
   segTxtAbs: { position: 'absolute' },
   segIconOn: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   gearDock: { width: 64, height: 64 },
-  exportIconBtn: { alignSelf: 'flex-end', width: 56, height: 56, marginTop: 0, marginBottom: 10 },
+  exportIconBtn: { alignSelf: 'stretch', height: 56, marginTop: 0, marginBottom: 10 },
+  exportIconHit: { width: '100%', height: 56 },
   gearInner: {
     flex: 1,
     borderRadius: 32,

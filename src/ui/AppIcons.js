@@ -63,28 +63,32 @@ function Glyph({ name, size, color }) {
  * @param {'tile'|'tileOn'|'glyph'} [props.variant='tile']
  * @param {'rounded'|'circle'} [props.shape='rounded']
  * @param {string} [props.color]
+ * @param {number|'100%'} [props.width] — ширина плитки (для полной полосы печати); высота остаётся size, глиф по центру
  */
-export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile', shape = 'rounded', color, style }) {
+export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile', shape = 'rounded', color, style, width }) {
   const glyphColor = color || '#FFFFFF';
   const rawId = useId().replace(/[^a-zA-Z0-9]/g, '');
   const gid = `gl${rawId}`;
+  const boxW = width == null ? size : width;
+  const wide = width != null && width !== size;
 
   if (variant === 'glyph') {
     return (
-      <View style={[{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }, style]}>
+      <View style={[{ width: boxW, height: size, alignItems: 'center', justifyContent: 'center' }, style]}>
         {name ? <Glyph name={name} size={size} color={glyphColor} /> : null}
       </View>
     );
   }
 
   const on = variant === 'tileOn';
-  const r = shape === 'circle' ? size / 2 : Math.round(size * RADIUS * 10) / 10;
+  const r = shape === 'circle' ? size / 2 : Math.round(size * (wide ? 0.32 : RADIUS) * 10) / 10;
   const glyphSize = Math.round(size * 0.62);
+  const svgW = typeof boxW === 'number' ? boxW : '100%';
 
   return (
     <View
       style={[
-        { width: size, height: size, borderRadius: r },
+        { width: boxW, height: size, borderRadius: r },
         on ? styles.glowOn : styles.glowOff,
         style,
       ]}
@@ -99,7 +103,7 @@ export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile'
           },
         ]}
       >
-        <Svg pointerEvents="none" width={size} height={size} style={styles.fill}>
+        <Svg pointerEvents="none" width={svgW} height={size} style={styles.fill} preserveAspectRatio="none">
           <Defs>
             <LinearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
               <Stop offset="0" stopColor="#ffffff" stopOpacity={on ? 0.28 : 0.16} />
@@ -107,7 +111,7 @@ export const AppIcon = memo(function AppIcon({ name, size = 32, variant = 'tile'
               <Stop offset="1" stopColor="#000000" stopOpacity={on ? 0.1 : 0.2} />
             </LinearGradient>
           </Defs>
-          <Rect x="0" y="0" width={size} height={size} rx={r} ry={r} fill={`url(#${gid})`} />
+          <Rect x="0" y="0" width={svgW} height={size} rx={r} ry={r} fill={`url(#${gid})`} />
         </Svg>
       </View>
       {name ? (
