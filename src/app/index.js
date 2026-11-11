@@ -225,12 +225,25 @@ const capSpring = { damping: 26, stiffness: 180, mass: 0.9, overshootClamping: t
 // пассивное (в покое) перемещение плашки дока по тапу — плавно, без перелёта
 const passiveMove = { duration: 280, easing: Easing.bezier(0.25, 0.1, 0.25, 1) };
 // подлёт капли от выбранной вкладки к пальцу при удержании
-const grabSpring = { damping: 17, stiffness: 200, mass: 0.85 };
-const liquidPosSpring = { damping: 15, stiffness: 210, mass: 0.85 };
-const liquidOnSpring = { damping: 16, stiffness: 320, mass: 0.7 };
-const liquidOffSpring = { damping: 9, stiffness: 240, mass: 0.75 };
-// капля над доком: на ~17.5 % меньше, центр остаётся на активной вкладке
-const DROP_SIZE = 0.825;
+// заметный перелёт и покачивание, но собранно (высокая жёсткость, малое демпфирование)
+const grabSpring = { damping: 10, stiffness: 260, mass: 0.7 };
+const liquidPosSpring = { damping: 7, stiffness: 260, mass: 0.65 };
+const liquidOnSpring = { damping: 7, stiffness: 300, mass: 0.65 };
+const liquidOffSpring = { damping: 6, stiffness: 280, mass: 0.65 };
+// покой: капля внутри капсулы на активной вкладке; нажатие: выше и ниже панели
+const DROP_IDLE_RX = 1;
+const DROP_IDLE_RY = 1;
+const DROP_PRESS_RX = 1.12;
+const DROP_PRESS_RY = 1.82; // h0 54 → ≈98 pt при 64-pt доке, выступ сверху и снизу
+
+function dropMetrics(liquid, vel, slotW, trackH) {
+  'worklet';
+  const lift = Math.max(0, Math.min(1.35, liquid));
+  const jelly = Math.max(-0.28, Math.min(0.28, vel / 6));
+  const w = slotW * (DROP_IDLE_RX + (DROP_PRESS_RX - DROP_IDLE_RX) * lift) * (1 + Math.abs(jelly));
+  const h = trackH * (DROP_IDLE_RY + (DROP_PRESS_RY - DROP_IDLE_RY) * lift) * (1 - Math.abs(jelly) * 0.5);
+  return { w, h, lift };
+}
 
 const SHEET_IN = { duration: 320, easing: Easing.out(Easing.cubic) };
 const SHEET_OUT = { duration: 220, easing: Easing.in(Easing.cubic) };
@@ -1499,6 +1512,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const [lensSnap, setLensSnap] = useState(null);
   const lensReady = useSharedValue(0); // преломление проявляется плавно, когда снимок готов
   const hasSnap = useSharedValue(0);
+  const hideForSnap = useSharedValue(0);
   const [segWJs, setSegWJs] = useState(0);
   const snapBusy = useRef(false);
   const measureHost = useCallback(() => {
@@ -1523,18 +1537,23 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     }
     snapBusy.current = true;
     measureHost();
-    snapshotView(SNAP_ROOT)
-      .then((snap) => {
-        if (!snap || !snap.image || snap.image.width() < 2 || snap.image.height() < 2) return;
-        setLensSnap(snap);
-        if (!hasSnap.value) {
-          hasSnap.value = 1;
-          lensReady.value = withTiming(1, { duration: 220 });
-        }
-      })
-      .finally(() => {
-        snapBusy.current = false;
+    // прячем каплю на два кадра: в снимке должны быть фон панели и иконки, без самой линзы
+    hideForSnap.value = 1;
+    const done = (snap) => {
+      hideForSnap.value = 0;
+      snapBusy.current = false;
+      if (!snap || !snap.image || snap.image.width() < 2 || snap.image.height() < 2) return;
+      setLensSnap(snap);
+      if (!hasSnap.value) {
+        hasSnap.value = 1;
+        lensReady.value = withTiming(1, { duration: 220 });
+      }
+    };
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        snapshotView(SNAP_ROOT).then(done).catch(() => done(null));
       });
+    });
   }, [realLens, measureHost, lensReady, hasSnap]);
   const idleTimer = useRef(null);
   const snapWhenIdleRef = useRef(() => {});
@@ -1591,7 +1610,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   useEffect(() => {
     if (target.value !== value) {
       target.value = value;
-      pos.value = isLiquid ? withTiming(value, passiveMove) : withSpring(value, capSpring);
+      pos.value = isLiquid ? withSpring(value, liquidPosSpring) : withSpring(value, capSpring);
     }
   }, [value, pos, target, isLiquid]);
 
@@ -1605,9 +1624,8 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
       'worklet';
       follow.value = 0;
       grab.value = 0;
-      // покой (простой тап) — ровное смещение без пружины; пружина — только после удержания/перетаскивания
-      if (isLiquid && !active) pos.value = withTiming(p, passiveMove);
-      else pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
+      // перелёт и покачивание и на тапе, и после перетаскивания
+      pos.value = withSpring(p, isLiquid ? { ...liquidPosSpring, velocity: v } : capSpring);
       if (isLiquid) liquid.value = withSpring(0, liquidOffSpring);
       if (p !== target.value) {
         target.value = p;
@@ -1764,49 +1782,49 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
         transform: [{ translateX: p * segW.value }, { scale: 1 - press.value * 0.03 }],
       };
     }
-    // в покое — твёрдая плашка в панели; при удержании её заменяет капля над панелью
+    // индикатор — стеклянная капля (в т.ч. в покое); твёрдую плашку не показываем
     return {
       width: segW.value,
-      opacity: 1 - Math.min(1, Math.max(0, liquid.value)),
+      opacity: 0,
       transform: [{ translateX: Math.max(0, Math.min(n - 1, pos.value)) * segW.value }],
     };
   });
-  // капля (приподнятая линза) над панелью: настоящие размеры, а не scale — кромка не искажается
+  // капля над панелью: настоящие размеры, а не scale — кромка не искажается
   const h0 = height - 10;
   const drop = useAnimatedStyle(() => {
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
-    const w = segW.value * sh.rx * DROP_SIZE;
-    const h = h0 * sh.ry * DROP_SIZE;
-    const on = Math.min(1, Math.max(0, liquid.value * 1.5));
+    const { w, h, lift } = dropMetrics(liquid.value, vel.value, segW.value, h0);
+    const hidden = hideForSnap.value;
     return {
       width: w,
       height: h,
       borderRadius: h / 2,
-      opacity: on,
-      shadowOpacity: 0.3 * on,
+      opacity: 1 - hidden,
+      shadowOpacity: (0.18 + 0.2 * Math.min(1, lift)) * (1 - hidden),
       transform: [{ translateX: pos.value * segW.value - (w - segW.value) / 2 }, { translateY: -(h - h0) / 2 }],
     };
   });
   const dropRad = useAnimatedStyle(() => {
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
-    return { borderRadius: (h0 * sh.ry * DROP_SIZE) / 2 };
+    const { h } = dropMetrics(liquid.value, vel.value, segW.value, h0);
+    return { borderRadius: h / 2 };
   });
-  // подписи внутри капли — те же, что раньше (масштаб sx/sy вокруг центра плашки), под новый размер
+  const dropFill = useAnimatedStyle(() => ({
+    opacity: 1 - 0.55 * Math.min(1, Math.max(0, liquid.value)),
+  }));
+  // в покое — живая активная иконка; при нажатии её сменяет снимок в линзе (без двойного рисунка)
   const dropLabels = useAnimatedStyle(() => {
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
-    const w = segW.value * sh.rx * DROP_SIZE;
-    const h = h0 * sh.ry * DROP_SIZE;
+    const { w, h, lift } = dropMetrics(liquid.value, vel.value, segW.value, h0);
     return {
       width: segW.value,
       left: (w - segW.value) / 2,
       top: (h - h0) / 2,
-      transform: [{ scaleX: sh.sx * DROP_SIZE }, { scaleY: sh.sy * DROP_SIZE }],
+      opacity: 1 - Math.min(1, Math.max(0, (lift - 0.06) / 0.22)) * lensReady.value,
+      transform: [{ scaleX: 1 }, { scaleY: 1 }],
     };
   });
 
-  // холст преломления: фиксированного размера (больше самой большой капли), центр — в центре капли
-  const lensW = Math.ceil(segWJs * 1.18 * DROP_SIZE * 1.35) + 8;
-  const lensH = Math.ceil(h0 * 1.55 * DROP_SIZE) + 8;
+  // холст больше самой большой капли (с запасом на перелёт пружины и jelly)
+  const lensW = Math.ceil(segWJs * DROP_PRESS_RX * 1.45) + 16;
+  const lensH = Math.ceil(h0 * DROP_PRESS_RY * 1.45) + 16;
   // uniforms шейдера — здесь же, на UI-потоке, из тех же shared values, что и сама капля (точки экрана)
   const snapK = lensSnap ? `${lensSnap.image.width()}|${lensSnap.ox}|${lensSnap.oy}|${lensSnap.w}` : '';
   const sIw = lensSnap ? lensSnap.image.width() : 1;
@@ -1815,21 +1833,23 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const sOx = lensSnap ? lensSnap.ox : 0;
   const sOy = lensSnap ? lensSnap.oy : 0;
   const lensUniforms = useDerivedValue(() => {
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
+    const { w, h, lift } = dropMetrics(liquid.value, vel.value, segW.value, h0);
     return {
       uCanvas: [lensW, lensH],
-      uSize: [segW.value * sh.rx * DROP_SIZE, h0 * sh.ry * DROP_SIZE],
+      uSize: [w, h],
       uCenter: [hostX.value + 5 + pos.value * segW.value + segW.value / 2, hostY.value + 5 + h0 / 2],
       uOrigin: [sOx, sOy],
       uImg: [sIw, sIh],
       uScale: sScale,
       uBar: [hostX.value, hostY.value, segW.value * n + 10, height],
       uDebug: GLASS_TINT.value,
+      uLift: lift,
     };
   }, [snapK, lensW, lensH, h0, n, height]);
   const lensPos = useAnimatedStyle(() => {
-    const sh = liquidShape(liquid.value, pos.value, vel.value);
-    return { left: (segW.value * sh.rx * DROP_SIZE - lensW) / 2, top: (h0 * sh.ry * DROP_SIZE - lensH) / 2, opacity: lensReady.value };
+    const { w, h, lift } = dropMetrics(liquid.value, vel.value, segW.value, h0);
+    const show = lensReady.value * Math.min(1, Math.max(0, (lift - 0.05) / 0.22));
+    return { left: (w - lensW) / 2, top: (h - lensH) / 2, opacity: show };
   });
 
   const Wrap = glass ? Glass : View;
@@ -1884,8 +1904,8 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
                 <GlassLens snap={lensSnap} cw={lensW} ch={lensH} uniforms={lensUniforms} />
               </Animated.View>
             ) : null}
-            {/* прозрачная линза без белой кромки и бликов */}
-            <View style={styles.lqDropFill} />
+            {/* тёмное стекло чуть светлее панели; без белой кромки */}
+            <Animated.View style={[styles.lqDropFill, dropFill]} />
             <Animated.View style={[styles.lqDropLabels, { height: h0 }, dropLabels]}>
               {labels.map((lab, i) => (
                 <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} icon={icons ? icons[i] : undefined} />
@@ -7331,8 +7351,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
+    overflow: 'visible',
   },
-  capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
+  capsuleWrap: { flex: 1, zIndex: 5, overflow: 'visible' }, // капля дока поверх кнопки настроек, может выступать из панели
   segCap: {
     borderRadius: 32,
     overflow: 'hidden',
@@ -7376,7 +7397,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     shadowRadius: 10,
   },
-  lqDropFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.05)' },
+  lqDropFill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.12)' },
   // мягкие блики: сверху два слабых слоя (плавный край), снизу — отражение
   lqHi: { position: 'absolute', left: 0, right: 0 },
   lqHiTop1: { top: 0, height: '30%', backgroundColor: 'rgba(255,255,255,0.05)' },

@@ -63,6 +63,7 @@ uniform float2 uImg;
 uniform float uScale;
 uniform float4 uBar;
 uniform float uDebug;
+uniform float uLift;
 
 float sdCap(float2 p, float2 b) {
   float r = min(b.x, b.y);
@@ -101,29 +102,27 @@ half4 main(float2 xy) {
   float dEdge = sdCap(p, hb);
   float edge = 1.0 - smoothstep(-1.5, 0.0, dEdge); // видимый край — по форме капли
   if (edge <= 0.0) { return half4(0.0); }
-  // снимок и искажение считаем по капсуле чуть внутри кромки
+  // снимок чуть внутри видимой кромки; преломляем и панель, и иконки (дыра над баром убрана)
   float2 hbS = max(hb - 4.0, float2(1.0));
   float d = sdCap(p, hbS);
-  float band0 = clamp(hbS.y * 0.9, 10.0, 30.0); // прежняя ширина полосы (сила изгиба)
-  float band = band0 * 0.25; // зона искажения — 25 % прежней
+  float lift = clamp(uLift, 0.0, 1.2);
+  float band0 = clamp(hbS.y * 0.9, 10.0, 30.0);
+  float band = mix(band0 * 0.2, band0 * 0.85, min(lift, 1.0)); // в покое тонкий ободок, при нажатии кольцо изгиба
   float k = clamp(1.0 + d / band, 0.0, 1.0); // 0 — середина, 1 — кромка
   float e = 0.75;
   float2 g = float2(sdCap(p + float2(e, 0.0), hbS) - sdCap(p - float2(e, 0.0), hbS),
                     sdCap(p + float2(0.0, e), hbS) - sdCap(p - float2(0.0, e), hbS));
   float2 n = g / max(length(g), 0.0001);
-  float2 c = uCenter + p / 1.3; // увеличение 1.3× в середине (сила как была)
-  float bend = k * k * band0 * 1.7; // сила изгиба прежняя, полоса уже
-  float br = k * k * 3.0; // blur-глитч: блюр только у ободка вместе с RGB-бахромой; центр резкий
-  half4 cr = sampleBlur(c + n * bend * 0.9, br);
-  half4 cg = sampleBlur(c + n * bend, br);
-  half4 cb = sampleBlur(c + n * bend * 1.12, br);
+  float mag = mix(1.0, 1.2, min(lift, 1.0)); // 1.2× лупа при нажатии (1.15–1.25)
+  float2 c = uCenter + p / mag;
+  float bend = k * k * band0 * mix(0.4, 1.85, min(lift, 1.0)); // сильный изгиб края, в т.ч. самой панели
+  float br = k * k * mix(1.2, 3.5, min(lift, 1.0)); // blur-глитч только у ободка; центр резкий
+  half4 cr = sampleBlur(c + n * bend * mix(0.97, 0.82, min(lift, 1.0)), br);
+  half4 cg = sampleBlur(c + n * bend * mix(1.0, 0.96, min(lift, 1.0)), br);
+  half4 cb = sampleBlur(c + n * bend * mix(1.03, 1.18, min(lift, 1.0)), br);
   float sa = max(max(cr.a, cg.a), cb.a); // premultiplied
   half3 col = half3(cr.r, cg.g, cb.b);
-  // середина: над/под панелью — увеличенный снимок; внутри самой панели — прозрачно
-  // (там живые подписи с их собственной линзой, без двойного текста и «призраков» старой плашки)
-  float2 bq = abs(c - (uBar.xy + uBar.zw * 0.5)) - uBar.zw * 0.5;
-  float outBar = smoothstep(-1.0, 3.0, max(bq.x, bq.y));
-  float a = max(outBar, smoothstep(0.2, 0.6, k)) * edge;
+  float a = edge; // весь диск линзы — снимок (фон панели тоже гнётся)
   if (uDebug > 0.5) {
     col = mix(col, half3(sa, 0.0, 0.0), 0.4); // отладка: область выборки — красным
     a = max(a, 0.6 * edge);
@@ -204,7 +203,7 @@ class Guard extends React.Component {
 
 /**
  * Холст преломления. uniforms — shared value (считается в SegmentCapsule на UI-потоке):
- * { uCanvas, uSize, uCenter, uOrigin, uImg, uScale, uBar, uDebug } в точках экрана (uScale — пикс./пт снимка).
+ * { uCanvas, uSize, uCenter, uOrigin, uImg, uScale, uBar, uDebug, uLift } в точках экрана (uScale — пикс./пт снимка).
  * Центр холста (cw × ch) совпадает с центром капли. Видимость/появление — прозрачностью родителя.
  * Если связка Skia ↔ Reanimated недоступна — uniforms передаются из JS (реакция → setState).
  */
