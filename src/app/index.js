@@ -259,9 +259,9 @@ const LG =
   !!isLiquidGlassAvailable() &&
   typeof isGlassEffectAPIAvailable === 'function' &&
   !!isGlassEffectAPIAvailable();
-// Док с нативным морфингом капли: GlassContainer + interactive GlassView.
+// Док с нативным стеклом: одна капсула + отдельная шестерёнка, капля-индикатор внутри.
 // Без обоих флагов остаётся текущий док (иконки, плашка, JS-капля).
-const NATIVE_DOCK_GLASS = LG && !!GlassContainer;
+const NATIVE_DOCK_GLASS = LG && !!GlassView;
 
 /**
  * Карточки внутри вкладок (Расходы / Смены / Расчёт) — ОДИН путь для всех.
@@ -3837,28 +3837,63 @@ function newShiftDate(k) {
 }
 
 /**
- * Нативный Liquid Glass док (iOS 26+): GlassContainer сливает соседние GlassView
- * в жидкую каплю, выбранный сегмент — isInteractive. Только если NATIVE_DOCK_GLASS.
+ * Нативный Liquid Glass док (iOS 26+): одна стеклянная капсула на три вкладки,
+ * отдельно круглая шестерёнка с зазором (без GlassContainer — не сливаются).
+ * Капля выбранной вкладки — interactive GlassView с зелёным tint, едет translateX пружиной.
  */
 function NativeGlassDock({ page, labels, icons, onChange, onSettings }) {
   const n = labels.length;
-  const innerW = SCREEN_W - 32 - 8 - 64;
-  const segW = Math.max(48, Math.floor((innerW - 8) / n));
+  const slotSV = useSharedValue(0);
+  const pos = useSharedValue(page);
+  const [slotW, setSlotW] = useState(0);
+  const measured = useRef(false);
+
+  useEffect(() => {
+    if (!measured.current) {
+      pos.value = page;
+      return;
+    }
+    pos.value = withSpring(page, { damping: 20, stiffness: 240, mass: 0.85 });
+  }, [page, pos]);
+
+  const onTrack = (e) => {
+    const w = e.nativeEvent.layout.width;
+    if (w <= 0) return;
+    const slot = w / n;
+    slotSV.value = slot;
+    setSlotW(slot);
+    if (!measured.current) {
+      measured.current = true;
+      pos.value = page;
+    }
+  };
+
+  const dropStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: pos.value * slotSV.value }],
+  }));
+
   return (
-    <View style={styles.dock}>
-      <GlassContainer spacing={10} style={styles.dockGlassRow}>
-        <View style={styles.dockGlassCap}>
-          {icons.map((icon, i) => {
-            const on = i === page;
-            return (
+    <View style={[styles.dock, styles.dockGlassGap]}>
+      <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassCapsule}>
+        <View style={styles.dockGlassTrack} onLayout={onTrack}>
+          {slotW > 0 ? (
+            <Animated.View pointerEvents="none" style={[styles.dockGlassDropWrap, { width: slotW }, dropStyle]}>
               <GlassView
-                key={labels[i]}
+                pointerEvents="none"
                 glassEffectStyle="regular"
-                isInteractive={on}
+                isInteractive
                 colorScheme="dark"
-                style={[styles.dockGlassSeg, { width: segW }]}
-              >
+                tintColor="rgba(53, 222, 124, 0.5)"
+                style={styles.dockGlassDrop}
+              />
+            </Animated.View>
+          ) : null}
+          <View style={styles.dockGlassIcons}>
+            {icons.map((icon, i) => {
+              const on = i === page;
+              return (
                 <Pressable
+                  key={labels[i]}
                   onPress={() => onChange(i)}
                   accessibilityRole="button"
                   accessibilityLabel={labels[i]}
@@ -3867,21 +3902,16 @@ function NativeGlassDock({ page, labels, icons, onChange, onSettings }) {
                 >
                   <AppIcon name={icon} size={42} variant="glyph" color="#FFFFFF" />
                 </Pressable>
-              </GlassView>
-            );
-          })}
+              );
+            })}
+          </View>
         </View>
-        <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassGear}>
-          <Pressable
-            onPress={onSettings}
-            accessibilityRole="button"
-            accessibilityLabel="Настройки"
-            style={styles.dockGlassHit}
-          >
-            <AppIcon name="gear" size={40} variant="glyph" color="#FFFFFF" />
-          </Pressable>
-        </GlassView>
-      </GlassContainer>
+      </GlassView>
+      <GlassView glassEffectStyle="regular" colorScheme="dark" style={styles.dockGlassGear}>
+        <Pressable onPress={onSettings} accessibilityRole="button" accessibilityLabel="Настройки" style={styles.dockGlassHit}>
+          <AppIcon name="gear" size={40} variant="glyph" color="#FFFFFF" />
+        </Pressable>
+      </GlassView>
     </View>
   );
 }
@@ -6875,7 +6905,7 @@ export default function App() {
         )}
       </View>
 
-      {/* Док: нативный Liquid Glass (капля через GlassContainer) только если API доступен; иначе прежний док. */}
+      {/* Док: нативное стекло (одна капсула + шестерёнка, капля-индикатор) только если API доступен; иначе прежний док. */}
       {NATIVE_DOCK_GLASS ? (
         <NativeGlassDock
           page={page}
@@ -7412,9 +7442,12 @@ const styles = StyleSheet.create({
     gap: 10,
     alignItems: 'center',
   },
-  dockGlassRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dockGlassCap: { flex: 1, flexDirection: 'row', alignItems: 'center', height: 64, gap: 6 },
-  dockGlassSeg: { height: 54, borderRadius: 27 },
+  dockGlassGap: { gap: 14 },
+  dockGlassCapsule: { flex: 1, height: 64, borderRadius: 32 },
+  dockGlassTrack: { flex: 1, margin: 5 },
+  dockGlassDropWrap: { position: 'absolute', left: 0, top: 0, height: 54, zIndex: 0 },
+  dockGlassDrop: { flex: 1, borderRadius: 27 },
+  dockGlassIcons: { flex: 1, flexDirection: 'row', zIndex: 1 },
   dockGlassGear: { width: 64, height: 64, borderRadius: 32 },
   dockGlassHit: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
