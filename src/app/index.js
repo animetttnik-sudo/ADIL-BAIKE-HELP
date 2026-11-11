@@ -955,10 +955,13 @@ function IslandOption({ i, arc }) {
   const ring = useAnimatedStyle(() => ({ opacity: cur.value === i ? 1 : 0 }));
   return (
     <Animated.View style={[styles.islOpt, st]}>
-      <View style={[styles.islDot, { backgroundColor: ISL_FILL[i] }]}>
-        <View style={styles.islDotShine} />
-        {i === 2 ? <View style={styles.islEmpty} /> : <AppIcon name={i === 0 ? 'check' : 'arrowRight'} size={22} variant="glyph" color="#fff" />}
-      </View>
+      {i === 0 ? (
+        <AppIcon name="check" size={ISL_OPT} variant="tileOn" shape="circle" />
+      ) : i === 1 ? (
+        <AppIcon name="arrowRight" size={ISL_OPT} variant="tile" shape="circle" />
+      ) : (
+        <AppIcon name="empty" size={ISL_OPT} variant="tile" shape="circle" />
+      )}
       <Animated.View style={[styles.islCur, ring]} />
     </Animated.View>
   );
@@ -3334,8 +3337,12 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
           <View>
             <ShiftSumCard payday={payday} t={t} accent={accent} onCarry={onCarry} />
             {list.length ? (
-              <ScaleButton style={[styles.actBtn, { marginTop: 0, marginBottom: 10 }]} onPress={() => onExport && onExport(payday)}>
-                <Text style={[styles.actBtnTxt, { color: accent }]}>Сохранить зарплату · PDF / Фото</Text>
+              <ScaleButton
+                style={styles.exportIconBtn}
+                onPress={() => onExport && onExport(payday)}
+                accessibilityLabel="Сохранить зарплату, PDF или фото"
+              >
+                <AppIcon name="printer" size={56} variant="tile" />
               </ScaleButton>
             ) : null}
             {list.length === 0 ? (
@@ -6412,8 +6419,8 @@ export default function App() {
           </>
         )}
         <View ref={addBtnRef} collapsable={false}>
-          <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={onPlus} accessibilityLabel="Добавить">
-            <AppIcon name="plus" size={22} variant="glyph" color="#102012" />
+          <ScaleButton style={styles.round} onPress={onPlus} accessibilityLabel="Добавить">
+            <AppIcon name="plus" size={48} variant="tileOn" shape="circle" />
           </ScaleButton>
         </View>
       </View>
@@ -6513,7 +6520,7 @@ export default function App() {
           <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
-          <AppIcon name="gear" size={64} variant="tile" />
+          <AppIcon name="gear" size={64} variant="tileOn" shape="circle" />
         </ScaleButton>
       </View>
 
@@ -6535,7 +6542,7 @@ export default function App() {
 }
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
-const DOCK_ICONS = ['wallet', 'calendar', 'calculator'];
+const DOCK_ICONS = ['card', 'calendar', 'calculator'];
 /** «12–25 сентября» или «29 сентября – 12 октября». */
 function fmtRange(a, b) {
   const da = parse(a);
@@ -7076,6 +7083,7 @@ const styles = StyleSheet.create({
   segTxtAbs: { position: 'absolute' },
   segIconOn: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   gearDock: { width: 64, height: 64 },
+  exportIconBtn: { alignSelf: 'flex-end', width: 56, height: 56, marginTop: 0, marginBottom: 10 },
   gearInner: {
     flex: 1,
     borderRadius: 32,

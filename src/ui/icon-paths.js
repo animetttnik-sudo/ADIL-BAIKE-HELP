@@ -138,7 +138,7 @@ function add(name, d, rule = 'evenodd') {
 add('plus', cap(5, 12, 19, 12, 3.2) + cap(12, 5, 12, 19, 3.2), 'nonzero');
 add('minus', cap(5.2, 12, 18.8, 12, 3.2), 'nonzero');
 add('close', cap(6.2, 6.2, 17.8, 17.8, 3.05) + cap(17.8, 6.2, 6.2, 17.8, 3.05), 'nonzero');
-add('check', cap(5.1, 12.35, 10.15, 17.3, 3.05) + cap(10.15, 17.3, 19.1, 6.7, 3.05), 'nonzero');
+add('check', cap(5.2, 13.05, 10.15, 17.55, 3.15) + cap(10.15, 17.55, 19.05, 6.7, 3.15), 'nonzero');
 
 // ── Chevrons / arrows ───────────────────────────────────
 add('chevronRight', cap(9.4, 5.8, 16.2, 12, 2.7) + cap(16.2, 12, 9.4, 18.2, 2.7), 'nonzero');
@@ -256,6 +256,18 @@ add('star', star(12, 12.1, 9.3, 3.85));
   add('card', d);
 }
 
+// ── Printer + empty ─────────────────────────────────────
+{
+  // лист сверху, корпус с окном и лотком — читается как принтер, не кошелёк
+  add('printerPaper', rr(7.15, 2.15, 9.7, 8.3, 1.15) + rr(9.0, 4.15, 6.0, 1.05, 0.5) + rr(9.0, 6.15, 4.4, 1.05, 0.5), 'evenodd');
+  let body = rr(3.15, 9.6, 17.7, 11.3, 2.35);
+  body += rr(6.3, 12.55, 11.4, 2.55, 0.9); // окно
+  body += cir(17.15, 17.85, 1.15); // индикатор
+  add('printerBody', body, 'evenodd');
+  add('printer', body, 'evenodd');
+}
+add('empty', cir(12, 12, 8.15) + cir(12, 12, 6.05), 'evenodd');
+
 // ── Chart / pie / percent / history / lightning ─────────
 add(
   'chart',
@@ -368,6 +380,7 @@ const LAYERS = {
   wallet: ['walletBack', 'walletFront'],
   copy: ['copyBack', 'copyFront'],
   box: ['boxLid', 'boxFront'],
+  printer: ['printerPaper', 'printerBody'],
   info: ['info'],
 };
 
@@ -404,6 +417,8 @@ const SET = [
   'scan',
   'document',
   'card',
+  'printer',
+  'empty',
   'chart',
   'pie',
   'percent',
