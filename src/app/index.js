@@ -50,10 +50,12 @@ import Animated, {
 // expo-glass-effect — опционально
 let GlassView = null;
 let isLiquidGlassAvailable = () => false;
+let isGlassEffectAPIAvailable = () => false;
 try {
   const eg = require('expo-glass-effect');
   GlassView = eg.GlassView;
   isLiquidGlassAvailable = eg.isLiquidGlassAvailable || (() => false);
+  isGlassEffectAPIAvailable = eg.isGlassEffectAPIAvailable || (() => false);
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -165,13 +167,24 @@ function markGlyph(st) {
 const spring = { damping: 20, stiffness: 220, mass: 0.85 };
 const softSpring = { damping: 22, stiffness: 190 };
 
-const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
+const LG =
+  Platform.OS === 'ios' &&
+  typeof isLiquidGlassAvailable === 'function' &&
+  isLiquidGlassAvailable() &&
+  typeof isGlassEffectAPIAvailable === 'function' &&
+  isGlassEffectAPIAvailable();
 
-/** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
-function Glass({ children, style, intensity = 38, tint }) {
+/** Нативное Liquid Glass на поддерживаемом iOS; BlurView — fallback для остальных устройств. */
+function Glass({ children, style, intensity = 38, tint, interactive = false }) {
   if (LG && GlassView) {
     return (
-      <GlassView glassEffectStyle="regular" colorScheme="dark" tintColor={tint} style={[styles.glassBase, style]}>
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme="dark"
+        tintColor={tint}
+        isInteractive={interactive}
+        style={[styles.glassBase, style]}
+      >
         {children}
       </GlassView>
     );
@@ -1139,7 +1152,7 @@ export default function App() {
 
       {/* Dock */}
       <View style={styles.dock}>
-        <Glass style={styles.dockGlass} intensity={56} tint="rgba(255,255,255,0.08)">
+        <Glass style={styles.dockGlass} intensity={56} tint="rgba(255,255,255,0.08)" interactive>
           <View style={styles.dockRow}>
             <View style={styles.capsuleWrap}>
               <SegmentCapsule
