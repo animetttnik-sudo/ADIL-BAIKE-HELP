@@ -107,6 +107,7 @@ import { paydayIndexFor, searchItems } from '../lib/search';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
+import { AppIcon } from '../ui/AppIcons';
 import { liquidShape } from '../lib/liquid';
 import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
 
@@ -704,7 +705,7 @@ function DateWheel({ value, onChange, label = 'Дата', accent = '#30d158', va
           {fmtShort(value || iso(date))} {date.getFullYear()}
           <Text style={styles.dateDow}>  ·  {DOW[date.getDay()]}</Text>
         </Text>
-        <Text style={styles.chev}>›</Text>
+        <GlyphChev />
       </Pressable>
       {sheet}
     </View>
@@ -926,7 +927,7 @@ const StatusButton = memo(function StatusButton({ id, status, onToggle, arc }) {
           <View style={styles.sBtnEdge} pointerEvents="none" />
           <Animated.View style={[styles.sRing, ringStyle]} />
           <Animated.View style={[styles.sFill, styles.sFillPaid, paidStyle]}>
-            <Text style={styles.sGlyph}>✓</Text>
+            <AppIcon name="check" size={16} variant="glyph" color="#fff" />
           </Animated.View>
         </Animated.View>
       </View>
@@ -956,7 +957,7 @@ function IslandOption({ i, arc }) {
     <Animated.View style={[styles.islOpt, st]}>
       <View style={[styles.islDot, { backgroundColor: ISL_FILL[i] }]}>
         <View style={styles.islDotShine} />
-        {i === 2 ? <View style={styles.islEmpty} /> : <Text style={styles.islGlyph}>{i === 0 ? '✓' : '→'}</Text>}
+        {i === 2 ? <View style={styles.islEmpty} /> : <AppIcon name={i === 0 ? 'check' : 'arrowRight'} size={22} variant="glyph" color="#fff" />}
       </View>
       <Animated.View style={[styles.islCur, ring]} />
     </Animated.View>
@@ -1069,9 +1070,7 @@ const AddMenu = memo(function AddMenu({ visible, anchor, items, accent, onClose 
                 it.onPress();
               }}
             >
-              <View style={[styles.addMenuIcon, { backgroundColor: accent }]}>
-                <Text style={[styles.addIconTxt, styles.onAccent]}>{it.icon}</Text>
-              </View>
+              <AppIcon name={it.icon} size={30} variant="tile" />
               <View style={{ flex: 1 }}>
                 <Text style={styles.lTitle} numberOfLines={1}>{it.title}</Text>
                 <Text style={styles.lSub} numberOfLines={1}>{it.sub}</Text>
@@ -1266,7 +1265,7 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
             ) : null}
           </View>
           <Text style={[styles.amt, noSum && styles.amtDim]} numberOfLines={1}>{noSum ? '—' : money(item.amount)}</Text>
-          <Text style={styles.chevMini}>›</Text>
+          <GlyphChev size={16} />
         </Pressable>
       </Glass>
       </View>
@@ -1316,8 +1315,8 @@ function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' })
   return (
     <ItemCard style={styles.emptyCard}>
       {icon ? (
-        <View style={styles.emptyIcon}>
-          <Text style={[styles.emptyIconTxt, { color: accent }]}>{icon}</Text>
+        <View style={styles.emptyIconWrap}>
+          <AppIcon name={icon} size={44} variant={icon === 'check' ? 'tileOn' : 'tile'} />
         </View>
       ) : null}
       <Text style={styles.emptyTitle}>{title}</Text>
@@ -1369,10 +1368,24 @@ function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) 
 
 /** Капсула: тап + свайп + spring-доводка. Индикатор — плотная плашка без nested glass. */
 /** Подпись сегмента: яркость считается из позиции плашки на UI-потоке (без ожидания JS). */
-function SegLabel({ label, index, pos, fontSize }) {
+function GlyphChev({ size = 16 }) {
+  return <AppIcon name="chevronRight" size={size} variant="glyph" color="rgba(235,235,245,0.35)" />;
+}
+
+function SegLabel({ label, index, pos, fontSize, icon }) {
   const on = useAnimatedStyle(() => ({
     opacity: interpolate(Math.abs(pos.value - index), [0, 0.6], [1, 0], Extrapolation.CLAMP),
   }));
+  if (icon) {
+    return (
+      <View style={styles.seg} pointerEvents="none" accessible accessibilityLabel={label}>
+        <AppIcon name={icon} size={42} variant="tile" />
+        <Animated.View style={[styles.segIconOn, on]} pointerEvents="none">
+          <AppIcon name={icon} size={42} variant="tileOn" />
+        </Animated.View>
+      </View>
+    );
+  }
   return (
     <View style={styles.seg} pointerEvents="none">
       <Text style={[styles.segTxt, fontSize && { fontSize }]} numberOfLines={1} maxFontSizeMultiplier={SEG_FONT_MAX}>
@@ -1393,7 +1406,7 @@ function SegLabel({ label, index, pos, fontSize }) {
  * Подпись внутри «линзы» жидкой плашки: стоит на своём месте капсулы (сдвинута на −pos), увеличена
  * (как стекло увеличивает у края) и с красно-синей бахромой ±1 пт — приближение преломления.
  */
-function LensLabel({ label, index, pos, segW, liquid, fontSize }) {
+function LensLabel({ label, index, pos, segW, liquid, fontSize, icon }) {
   const st = useAnimatedStyle(() => {
     const sh = liquidShape(liquid.value, pos.value, 0);
     return {
@@ -1402,6 +1415,13 @@ function LensLabel({ label, index, pos, segW, liquid, fontSize }) {
       transform: [{ translateX: (index - pos.value) * segW.value }, { scale: sh.lens }],
     };
   });
+  if (icon) {
+    return (
+      <Animated.View style={[styles.lqLab, st]}>
+        <AppIcon name={icon} size={42} variant="tileOn" />
+      </Animated.View>
+    );
+  }
   const fz = fontSize && { fontSize };
   return (
     <Animated.View style={[styles.lqLab, st]}>
@@ -1459,7 +1479,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   );
 });
 
-function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize }) {
+function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize, icons }) {
   const n = labels.length;
   const isLiquid = glass; // «жидкая» плашка — только у дока
   const liquid = useSharedValue(0);
@@ -1711,7 +1731,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     }
   );
   // вкладка / размеры / шрифт поменялись — заранее переснять панель в покое
-  const labelsKey = labels.join('|');
+  const labelsKey = labels.join('|') + (icons ? '|' + icons.join('|') : '');
   useEffect(() => {
     if (measured && segWJs > 0) snapWhenIdle(500, false);
   }, [value, measured, segWJs, labelsKey, fontSize, snapWhenIdle]);
@@ -1838,7 +1858,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
           </View>
           <View style={styles.segTrackRow} pointerEvents="none">
             {labels.map((lab, i) => (
-              <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} />
+              <SegLabel key={lab} label={lab} index={i} pos={pos} fontSize={fontSize} icon={icons ? icons[i] : undefined} />
             ))}
           </View>
         </View>
@@ -1866,7 +1886,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
             <View style={[styles.lqHi, styles.lqHiBot]} />
             <Animated.View style={[styles.lqDropLabels, { height: h0 }, dropLabels]}>
               {labels.map((lab, i) => (
-                <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} />
+                <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} icon={icons ? icons[i] : undefined} />
               ))}
             </Animated.View>
             <Animated.View style={[styles.lqFringe, styles.lqFringeR, dropRad]} />
@@ -1905,7 +1925,7 @@ function AnalysisView({ state, accent }) {
       </View>
       {ks.length === 0 ? (
         <EmptyState
-          icon="▤"
+          icon="chart"
           title="Пока нечего анализировать"
           text="Когда появятся смены с суммой или оплаченные расходы, здесь будут итоги по месяцам."
           accent={accent}
@@ -2105,7 +2125,7 @@ const CountRow = memo(function CountRow({
         )}
       </Pressable>
       <ScaleButton style={styles.stepBtn} hitSlop={4} accessibilityLabel="Меньше" onPress={() => onStep(id, -1)}>
-        <Text style={styles.stepTxt}>−</Text>
+        <AppIcon name="minus" size={18} variant="glyph" color="#fff" />
       </ScaleButton>
       <NumInput
         inputRef={setRef}
@@ -2130,7 +2150,7 @@ const CountRow = memo(function CountRow({
         style={[styles.cCount, styles.cCountTxt]}
       />
       <ScaleButton style={styles.stepBtn} hitSlop={4} accessibilityLabel="Больше" onPress={() => onStep(id, 1)}>
-        <Text style={styles.stepTxt}>+</Text>
+        <AppIcon name="plus" size={18} variant="glyph" color="#fff" />
       </ScaleButton>
     </View>
   );
@@ -2276,7 +2296,7 @@ function CheckRow({ checked, label, amount, accent, onToggle, right }) {
       }}
     >
       <Animated.View style={[styles.checkBox, checked && { backgroundColor: accent, borderColor: accent }, anim]}>
-        {checked && <Text style={styles.checkMark}>✓</Text>}
+        {checked && <AppIcon name="check" size={16} variant="glyph" color="#102012" />}
       </Animated.View>
       <Text style={[styles.setL, { flex: 1 }]}>{label}</Text>
       <Text style={[styles.checkSum, checked && { color: '#fff' }]}>{right ?? `+${money(amount)}`}</Text>
@@ -2359,9 +2379,7 @@ const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
   return (
     <ScaleButton style={styles.tileHit} onPress={onPress}>
       <Glass style={styles.tile} intensity={34}>
-        <View style={styles.tileIcon}>
-          <Text style={styles.tileIconTxt}>{icon}</Text>
-        </View>
+        <AppIcon name={icon} size={44} variant="tile" />
         <View style={styles.tileMid}>
           <Text style={styles.tileTitle} numberOfLines={1}>
             {title}
@@ -2373,7 +2391,7 @@ const CalcTile = memo(function CalcTile({ icon, title, big, sub, onPress }) {
         <Text style={styles.tileBig} numberOfLines={1}>
           {big}
         </Text>
-        <Text style={styles.chevMini}>›</Text>
+        <GlyphChev size={16} />
       </Glass>
     </ScaleButton>
   );
@@ -2414,7 +2432,10 @@ const CalcPositionsList = memo(function CalcPositionsList({ day, accent, onStep,
   return (
     <View>
       <ScaleButton style={[styles.actBtn, styles.quickOpen]} onPress={onQuick}>
-        <Text style={styles.actBtnTxt}>⚡  Быстрый ввод</Text>
+        <View style={styles.actBtnRow}>
+          <AppIcon name="lightning" size={20} variant="glyph" color="#fff" />
+          <Text style={styles.actBtnTxt}>Быстрый ввод</Text>
+        </View>
       </ScaleButton>
       <View style={styles.gHead}>
         <Text style={styles.gTitle}>Как в таблице</Text>
@@ -2898,14 +2919,14 @@ const CalcView = memo(function CalcView({
             style={styles.stepBtn}
             onPress={() => onPatchDay((d) => ({ ...d, staff: Math.max(1, (Number(d.staff) || DEFAULT_STAFF) - 1) }))}
           >
-            <Text style={styles.stepTxt}>−</Text>
+            <AppIcon name="minus" size={18} variant="glyph" color="#fff" />
           </ScaleButton>
           <Text style={[styles.cCountTxt, styles.staffNum]}>{res.people}</Text>
           <ScaleButton
             style={styles.stepBtn}
             onPress={() => onPatchDay((d) => ({ ...d, staff: Math.min(30, (Number(d.staff) || DEFAULT_STAFF) + 1) }))}
           >
-            <Text style={styles.stepTxt}>+</Text>
+            <AppIcon name="plus" size={18} variant="glyph" color="#fff" />
           </ScaleButton>
         </View>
         <CheckRow
@@ -2927,7 +2948,7 @@ const CalcView = memo(function CalcView({
         <Animated.View entering={ROW_ENTER} exiting={ROW_EXIT} layout={ROW_LAYOUT}>
           <Pressable style={styles.linkLine} onPress={onShowShift} hitSlop={4}>
             <View style={[styles.linkDot, { backgroundColor: accent }]}>
-              <Text style={styles.linkDotTxt}>✓</Text>
+              <AppIcon name="check" size={14} variant="glyph" color="#102012" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.linkLineTxt}>
@@ -2938,10 +2959,13 @@ const CalcView = memo(function CalcView({
                 {manualOnDate ? ' · на эту дату есть и ручная смена — считаются обе' : ''}
               </Text>
             </View>
-            <Text style={styles.chevMini}>›</Text>
+            <GlyphChev size={16} />
           </Pressable>
           <ScaleButton style={[styles.actBtn, { marginTop: 0, marginBottom: 10 }]} onPress={onAddSlot}>
-            <Text style={[styles.actBtnTxt, { color: accent }]}>＋ Ещё смена за этот день</Text>
+            <View style={styles.actBtnRow}>
+              <AppIcon name="plus" size={18} variant="glyph" color={accent} />
+              <Text style={[styles.actBtnTxt, { color: accent }]}>Ещё смена за этот день</Text>
+            </View>
           </ScaleButton>
         </Animated.View>
       )}
@@ -2956,28 +2980,28 @@ const CalcView = memo(function CalcView({
 
       <Animated.View style={styles.tileGrid} layout={ROW_LAYOUT}>
         <CalcTile
-          icon="🧾"
+          icon="document"
           title="Касса"
           big={fmtNum(units)}
           sub={`заполнено ${entered} из ${CALC_ITEMS.length}`}
           onPress={() => onOpenSection('calcPos')}
         />
         <CalcTile
-          icon="🥫"
+          icon="box"
           title="Расход"
           big={fmtNum(usageN)}
           sub={usageN ? `ингр. · коробок фри ${fmtNum(friBoxes)}` : 'пока ничего'}
           onPress={() => onOpenSection('calcUse')}
         />
         <CalcTile
-          icon="📊"
+          icon="chart"
           title="План продаж"
           big={fmtNum(res.total)}
           sub={`единица ${fmtNum(res.unit)}`}
           onPress={() => onOpenSection('calcSum')}
         />
         <CalcTile
-          icon="🗂"
+          icon="list"
           title="Сохранённые расчёты"
           big={fmtNum(saved.length)}
           sub={saved.length ? `последний ${fmtShort(saved[0].date)}${saved[0].slot > 1 ? ` · смена ${saved[0].slot}` : ''}` : 'пока нет'}
@@ -3073,7 +3097,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
             <PayCard payday={payday} t={t} short={short} mentor={mentor} accent={accent} />
             {list.length === 0 ? (
               <EmptyState
-                icon="✓"
+                icon="wallet"
                 title="Расходов пока нет"
                 text="Впишите, что нужно оплатить с этой зарплаты, — сумма к остатку посчитается сама."
                 action="Добавить расход"
@@ -3094,7 +3118,7 @@ const PayPage = memo(function PayPage({ k, pos, payday, list, earned, short, men
                   />
                 ) : null}
                 {shown.length === 0 ? (
-                  <EmptyState icon="✓" title="Всё оплачено" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
+                  <EmptyState icon="check" title="Всё оплачено" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
                 ) : (
                   shown.map((e) => <ExpenseCard key={e.id} item={e} onEdit={onEdit} onToggle={onToggle} onReturn={onReturn} arc={arc} />)
                 )}
@@ -3316,7 +3340,7 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
             ) : null}
             {list.length === 0 ? (
               <EmptyState
-                icon="☾"
+                icon="calendar"
                 title="Смен пока нет"
                 text={`Отметьте смены с ${fmtShort(workPeriod(payday).start)} по ${fmtShort(workPeriod(payday).end)} — из них сложится эта зарплата.`}
                 action="Добавить смену"
@@ -3337,7 +3361,7 @@ const ShiftPage = memo(function ShiftPage({ k, pos, payday, list, carry, accent,
                   />
                 ) : null}
                 {shown.length === 0 ? (
-                  <EmptyState icon="✓" title="У всех смен есть сумма" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
+                  <EmptyState icon="check" title="У всех смен есть сумма" action="Показать все" onAction={() => setFlt('all')} accent={accent} />
                 ) : (
                   shown.map((s, i) => (
                     <ShiftCard
@@ -4768,14 +4792,14 @@ export default function App() {
     setSheet('find');
   };
   const findItem = {
-    icon: '⌕',
+    icon: 'search',
     title: 'Поиск',
     sub: 'по названию, месту или сумме',
     onPress: () => openFind(menuPage === 1 ? 'shift' : 'expense'),
   };
   const shiftAddItems = [
     {
-      icon: '+',
+      icon: 'plus',
       title: 'Новая смена',
       sub: 'в показанную зарплату',
       onPress: () => {
@@ -4786,7 +4810,7 @@ export default function App() {
     ...(repeatDraft
       ? [
           {
-            icon: '↻',
+            icon: 'history',
             title: 'Как прошлая смена',
             sub: `${repeatDraft.title}${repeatDraft.place ? ` · ${repeatDraft.place}` : ''} · ${fmtShort(repeatDraft.date)}`,
             onPress: () => {
@@ -4797,7 +4821,7 @@ export default function App() {
         ]
       : []),
     {
-      icon: '≡',
+      icon: 'document',
       title: 'Импорт из заметок',
       sub: 'вставить текст или «Мои смены»',
       onPress: () => {
@@ -4809,7 +4833,7 @@ export default function App() {
   ];
   const addItems = [
     {
-      icon: '+',
+      icon: 'plus',
       title: 'Новый расход',
       sub: 'в показанную зарплату',
       onPress: () => {
@@ -4818,7 +4842,7 @@ export default function App() {
       },
     },
     {
-      icon: '≡',
+      icon: 'document',
       title: 'Импорт из заметок',
       sub: 'вставить текст или годовой план',
       onPress: () => {
@@ -4962,7 +4986,7 @@ export default function App() {
                 }}
               >
                 <View style={[styles.checkBox, impReplace && { backgroundColor: accent, borderColor: accent }]}>
-                  {impReplace && <Text style={styles.checkMark}>✓</Text>}
+                  {impReplace && <AppIcon name="check" size={16} variant="glyph" color="#102012" />}
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lTitle}>Заменить строкой из заметки</Text>
@@ -5196,7 +5220,7 @@ export default function App() {
               }}
             >
               <View style={[styles.checkBox, impClear && { backgroundColor: accent, borderColor: accent }]}>
-                {impClear && <Text style={styles.checkMark}>✓</Text>}
+                {impClear && <AppIcon name="check" size={16} variant="glyph" color="#102012" />}
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.lTitle}>Убрать пустые заготовки · {pv.clear.length}</Text>
@@ -5435,14 +5459,12 @@ export default function App() {
                       fn();
                     }}
                   >
-                    <View style={[styles.addIcon, { backgroundColor: accent }]}>
-                      <Text style={[styles.addIconTxt, styles.onAccent]}>{i === 2 ? '∑' : '+'}</Text>
-                    </View>
+                    <AppIcon name={i === 2 ? 'calculator' : i === 1 ? 'calendar' : 'wallet'} size={34} variant="tile" />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.lTitle}>{t}</Text>
                       <Text style={styles.lSub}>{sub}</Text>
                     </View>
-                    <Text style={styles.chev}>›</Text>
+                    <GlyphChev />
                   </Pressable>
                 ))}
               </ItemCard>
@@ -5699,12 +5721,13 @@ export default function App() {
       case 'settings': {
         const autoN = autoAddedRecurring(state).length;
         const nav = [
-          { key: 'backup', title: 'Перенос данных', sub: 'скопировать или вставить все данные' },
-          { key: 'custom', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
-          { key: 'analysis', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
-          { key: 'stats', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
+          { key: 'backup', icon: 'copy', title: 'Перенос данных', sub: 'скопировать или вставить все данные' },
+          { key: 'custom', icon: 'drop', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
+          { key: 'analysis', icon: 'chart', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
+          { key: 'stats', icon: 'pie', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
           {
             key: 'plan',
+            icon: 'document',
             title: 'Импорт плана',
             sub:
               state.plan?.id === PLAN_ID
@@ -5713,6 +5736,7 @@ export default function App() {
           },
           {
             key: 'cleanup',
+            icon: 'trash',
             title: 'Удалить автодобавленные платежи',
             sub: autoN ? `${autoN} неоплаченных от старых «постоянных»` : 'нет — ничего удалять',
           },
@@ -5752,11 +5776,12 @@ export default function App() {
                       setSheet(n.key);
                     }}
                   >
+                    <AppIcon name={n.icon} size={30} variant="tile" />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.lTitle}>{n.title}</Text>
                       <Text style={styles.lSub}>{n.sub}</Text>
                     </View>
-                    <Text style={styles.chev}>›</Text>
+                    <GlyphChev />
                   </Pressable>
                 ))}
               </ItemCard>
@@ -5786,10 +5811,12 @@ export default function App() {
                     : 'план расходов, смены, расчёты и настройки'}
                 </Text>
               </ItemCard>
-              <ScaleButton style={[styles.actBtn, { backgroundColor: accent }]} onPress={copyBackup}>
+              <ScaleButton style={[styles.actBtn, styles.actBtnRow, { backgroundColor: accent }]} onPress={copyBackup}>
+                <AppIcon name="copy" size={20} variant="glyph" color="#102012" />
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Скопировать все данные</Text>
               </ScaleButton>
-              <ScaleButton style={styles.actBtn} onPress={pasteBackup}>
+              <ScaleButton style={[styles.actBtn, styles.actBtnRow]} onPress={pasteBackup}>
+                <AppIcon name="download" size={20} variant="glyph" color="#fff" />
                 <Text style={styles.actBtnTxt}>Вставить данные</Text>
               </ScaleButton>
               {prePaste && (
@@ -6071,7 +6098,7 @@ export default function App() {
                 accessibilityLabel="Что найти"
               />
               {find.q.trim() && res.length === 0 ? (
-                <EmptyState icon="⌕" title="Ничего не нашлось" text="Попробуйте часть названия или сумму без пробелов." accent={accent} />
+                <EmptyState icon="search" title="Ничего не нашлось" text="Попробуйте часть названия или сумму без пробелов." accent={accent} />
               ) : null}
               {res.map((x) => {
                 const noSum = x.amount == null || x.amount === '';
@@ -6248,7 +6275,7 @@ export default function App() {
                   <Animated.View key={i} style={styles.tallyRow} entering={ROW_ENTER} layout={ROW_LAYOUT}>
                     <Text style={[styles.setL, { flex: 1 }]}>Подсчёт {i + 1}</Text>
                     <ScaleButton style={styles.stepBtn} onPress={() => stepTally(calcItem, -1, i)}>
-                      <Text style={styles.stepTxt}>−</Text>
+                      <AppIcon name="minus" size={18} variant="glyph" color="#fff" />
                     </ScaleButton>
                     <NumInput
                       value={n}
@@ -6256,14 +6283,14 @@ export default function App() {
                       style={[styles.cCount, styles.cCountTxt]}
                     />
                     <ScaleButton style={styles.stepBtn} onPress={() => stepTally(calcItem, 1, i)}>
-                      <Text style={styles.stepTxt}>+</Text>
+                      <AppIcon name="plus" size={18} variant="glyph" color="#fff" />
                     </ScaleButton>
                     {t.length > 1 ? (
                       <Pressable
                         hitSlop={10}
                         onPress={() => editTallies(calcItem, (x) => x.filter((_, j) => j !== i))}
                       >
-                        <Text style={styles.tallyDel}>✕</Text>
+                        <AppIcon name="close" size={14} variant="glyph" color="#ff453a" />
                       </Pressable>
                     ) : (
                       <View style={{ width: 18 }} />
@@ -6385,8 +6412,8 @@ export default function App() {
           </>
         )}
         <View ref={addBtnRef} collapsable={false}>
-          <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={onPlus}>
-            <Text style={[styles.plus, { color: '#102012' }]}>+</Text>
+          <ScaleButton style={[styles.round, { backgroundColor: accent }]} onPress={onPlus} accessibilityLabel="Добавить">
+            <AppIcon name="plus" size={22} variant="glyph" color="#102012" />
           </ScaleButton>
         </View>
       </View>
@@ -6483,12 +6510,10 @@ export default function App() {
       {/* Dock */}
       <View style={styles.dock}>
         <View style={styles.capsuleWrap}>
-          <SegmentCapsule value={page} labels={DOCK_LABELS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
+          <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
-        <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
-          <Glass style={styles.gearInner} intensity={50} depth="chrome">
-            <Text style={styles.gearIcon}>⚙</Text>
-          </Glass>
+        <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
+          <AppIcon name="gear" size={64} variant="tile" />
         </ScaleButton>
       </View>
 
@@ -6510,6 +6535,7 @@ export default function App() {
 }
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт'];
+const DOCK_ICONS = ['wallet', 'calendar', 'calculator'];
 /** «12–25 сентября» или «29 сентября – 12 октября». */
 function fmtRange(a, b) {
   const da = parse(a);
@@ -6968,16 +6994,7 @@ const styles = StyleSheet.create({
   fChipTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 13, fontWeight: '600' },
   fChipTxtOn: { color: '#fff' },
   emptyCard: { alignItems: 'center', paddingVertical: 24, paddingHorizontal: 24 },
-  emptyIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  emptyIconTxt: { fontSize: 20, fontWeight: '600' },
+  emptyIconWrap: { marginBottom: 8 },
   emptyTitle: { color: '#fff', fontSize: 17, fontWeight: '600', textAlign: 'center' },
   emptyText: { color: 'rgba(235,235,245,0.6)', fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 4 },
   emptyBtn: {
@@ -7057,6 +7074,7 @@ const styles = StyleSheet.create({
   segTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 15, fontWeight: '600' },
   segTxtOn: { color: '#fff' },
   segTxtAbs: { position: 'absolute' },
+  segIconOn: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   gearDock: { width: 64, height: 64 },
   gearInner: {
     flex: 1,
@@ -7198,6 +7216,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
   },
   actBtnTxt: { color: '#fff', fontSize: 17, fontWeight: '600' },
+  actBtnRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   hint: {
     color: 'rgba(235,235,245,0.42)',
     fontSize: 13,
