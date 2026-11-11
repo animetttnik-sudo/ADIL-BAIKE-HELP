@@ -50,10 +50,12 @@ import Animated, {
 // expo-glass-effect — опционально
 let GlassView = null;
 let isLiquidGlassAvailable = () => false;
+let isGlassEffectAPIAvailable = () => false;
 try {
   const eg = require('expo-glass-effect');
   GlassView = eg.GlassView;
   isLiquidGlassAvailable = eg.isLiquidGlassAvailable || (() => false);
+  isGlassEffectAPIAvailable = eg.isGlassEffectAPIAvailable || (() => false);
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -165,13 +167,24 @@ function markGlyph(st) {
 const spring = { damping: 20, stiffness: 220, mass: 0.85 };
 const softSpring = { damping: 22, stiffness: 190 };
 
-const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
+const LG =
+  Platform.OS === 'ios' &&
+  typeof isLiquidGlassAvailable === 'function' &&
+  isLiquidGlassAvailable() &&
+  typeof isGlassEffectAPIAvailable === 'function' &&
+  isGlassEffectAPIAvailable();
 
-/** Стекло: BlurView + слои. Нативный GlassView — только если реально доступен. */
-function Glass({ children, style, intensity = 38, tint }) {
+/** Нативное Liquid Glass на поддерживаемом iOS; BlurView — fallback для остальных устройств. */
+function Glass({ children, style, intensity = 38, tint, interactive = false }) {
   if (LG && GlassView) {
     return (
-      <GlassView glassEffectStyle="regular" colorScheme="dark" tintColor={tint} style={[styles.glassBase, style]}>
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme="dark"
+        tintColor={tint}
+        isInteractive={interactive}
+        style={[styles.glassBase, style]}
+      >
         {children}
       </GlassView>
     );
@@ -1139,19 +1152,28 @@ export default function App() {
 
       {/* Dock */}
       <View style={styles.dock}>
-        <View style={styles.capsuleWrap}>
-          <SegmentCapsule
-            value={page}
-            labels={['Расходы', 'Смены']}
-            height={64}
-            onChange={setPage}
-          />
-        </View>
-        <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')}>
-          <Glass style={styles.gearInner} intensity={40}>
-            <Text style={styles.gearIcon}>⚙</Text>
-          </Glass>
-        </ScaleButton>
+        <Glass style={styles.dockGlass} intensity={56} tint="rgba(255,255,255,0.08)" interactive>
+          <View style={styles.dockRow}>
+            <View style={styles.capsuleWrap}>
+              <SegmentCapsule
+                value={page}
+                labels={['Расходы', 'Смены']}
+                height={56}
+                onChange={setPage}
+              />
+            </View>
+            <ScaleButton
+              style={styles.gearDock}
+              onPress={() => setSheet('settings')}
+              accessibilityRole="button"
+              accessibilityLabel="Настройки"
+            >
+              <View style={styles.gearInner}>
+                <Text style={styles.gearIcon}>⚙</Text>
+              </View>
+            </ScaleButton>
+          </View>
+        </Glass>
       </View>
 
       {/* ADD */}
@@ -1699,42 +1721,56 @@ const styles = StyleSheet.create({
 
   dock: {
     position: 'absolute',
-    left: 16,
-    right: 16,
-    bottom: Platform.OS === 'ios' ? 28 : 16,
-    flexDirection: 'row',
-    gap: 10,
-    alignItems: 'center',
+    left: 20,
+    right: 20,
+    bottom: Platform.OS === 'ios' ? 24 : 14,
   },
+  dockGlass: {
+    borderRadius: 38,
+    padding: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  dockRow: { flexDirection: 'row', gap: 4, alignItems: 'center' },
   capsuleWrap: { flex: 1 },
   segCap: {
     borderRadius: 32,
     overflow: 'hidden',
-    backgroundColor: 'rgba(28,28,34,0.94)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'transparent',
   },
   segCapBg: { ...StyleSheet.absoluteFillObject },
-  segCapRow: { flex: 1, flexDirection: 'row', padding: 5 },
-  seg: { flex: 1, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
+  segCapRow: { flex: 1, flexDirection: 'row', padding: 4 },
+  seg: { flex: 1, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   segInd: {
     position: 'absolute',
-    top: 5,
-    left: 5,
-    bottom: 5,
-    borderRadius: 26,
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    top: 4,
+    left: 4,
+    bottom: 4,
+    borderRadius: 28,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.24)',
+    shadowColor: '#fff',
+    shadowOpacity: 0.16,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 1 },
   },
-  segTxt: { color: 'rgba(235,235,245,0.45)', fontSize: 15, fontWeight: '650' },
+  segTxt: { color: 'rgba(235,235,245,0.58)', fontSize: 15, fontWeight: '650' },
   segTxtOn: { color: '#fff' },
-  gearDock: { width: 64, height: 64 },
+  gearDock: { width: 54, height: 54 },
   gearInner: {
     flex: 1,
-    borderRadius: 32,
+    borderRadius: 27,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
-  gearIcon: { fontSize: 22, color: '#fff' },
+  gearIcon: { fontSize: 21, color: '#fff' },
 
   sheetBack: {
     flex: 1,
