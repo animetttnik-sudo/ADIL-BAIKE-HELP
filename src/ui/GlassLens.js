@@ -63,7 +63,6 @@ uniform float2 uImg;
 uniform float uScale;
 uniform float4 uBar;
 uniform float uDebug;
-uniform float uLift;
 
 float sdCap(float2 p, float2 b) {
   float r = min(b.x, b.y);
@@ -78,51 +77,33 @@ half4 sampleAt(float2 screenPt) {
   return image.eval(px);
 }
 
-// блюр только у кромки (br=0 — одна выборка, центр остаётся резким)
-half4 sampleBlur(float2 screenPt, float br) {
-  half4 s0 = sampleAt(screenPt);
-  if (br < 0.4) { return s0; }
-  float2 o1 = float2(br, 0.0);
-  float2 o2 = float2(0.0, br);
-  float2 o3 = float2(br, br) * 0.70710678;
-  half4 acc = s0 * 4.0;
-  acc += sampleAt(screenPt + o1) + sampleAt(screenPt - o1);
-  acc += sampleAt(screenPt + o2) + sampleAt(screenPt - o2);
-  acc += sampleAt(screenPt + o3) + sampleAt(screenPt - o3);
-  acc += sampleAt(screenPt + float2(o3.x, -o3.y)) + sampleAt(screenPt + float2(-o3.x, o3.y));
-  return acc / 12.0;
-}
-
 half4 main(float2 xy) {
   if (uDebug > 0.5 && (xy.x < 1.5 || xy.y < 1.5 || xy.x > uCanvas.x - 1.5 || xy.y > uCanvas.y - 1.5)) {
     return half4(0.85, 0.0, 0.0, 0.85); // отладка: границы холста
   }
   float2 p = xy - uCanvas * 0.5; // центр холста = центр капли
   float2 hb = uSize * 0.5;
-  float dEdge = sdCap(p, hb);
-  float edge = 1.0 - smoothstep(-1.5, 0.0, dEdge); // видимый край — по форме капли
+  float d = sdCap(p, hb);
+  float edge = 1.0 - smoothstep(-1.5, 0.0, d); // сглаженный край по форме капли
   if (edge <= 0.0) { return half4(0.0); }
-  // снимок чуть внутри видимой кромки; преломляем и панель, и иконки (дыра над баром убрана)
-  float2 hbS = max(hb - 4.0, float2(1.0));
-  float d = sdCap(p, hbS);
-  float lift = clamp(uLift, 0.0, 1.2);
-  float band0 = clamp(hbS.y * 0.9, 10.0, 30.0);
-  float band = mix(band0 * 0.2, band0 * 0.85, min(lift, 1.0)); // в покое тонкий ободок, при нажатии кольцо изгиба
+  float band = clamp(hb.y * 0.9, 10.0, 30.0); // полоса сильного изгиба у кромки
   float k = clamp(1.0 + d / band, 0.0, 1.0); // 0 — середина, 1 — кромка
   float e = 0.75;
-  float2 g = float2(sdCap(p + float2(e, 0.0), hbS) - sdCap(p - float2(e, 0.0), hbS),
-                    sdCap(p + float2(0.0, e), hbS) - sdCap(p - float2(0.0, e), hbS));
+  float2 g = float2(sdCap(p + float2(e, 0.0), hb) - sdCap(p - float2(e, 0.0), hb),
+                    sdCap(p + float2(0.0, e), hb) - sdCap(p - float2(0.0, e), hb));
   float2 n = g / max(length(g), 0.0001);
-  float mag = mix(1.0, 1.2, min(lift, 1.0)); // 1.2× лупа при нажатии (1.15–1.25)
-  float2 c = uCenter + p / mag;
-  float bend = k * k * band0 * mix(0.4, 1.85, min(lift, 1.0)); // сильный изгиб края, в т.ч. самой панели
-  float br = k * k * mix(1.2, 3.5, min(lift, 1.0)); // blur-глитч только у ободка; центр резкий
-  half4 cr = sampleBlur(c + n * bend * mix(0.97, 0.82, min(lift, 1.0)), br);
-  half4 cg = sampleBlur(c + n * bend * mix(1.0, 0.96, min(lift, 1.0)), br);
-  half4 cb = sampleBlur(c + n * bend * mix(1.03, 1.18, min(lift, 1.0)), br);
+  float2 c = uCenter + p / 1.3; // увеличение 1.3× в середине
+  float bend = k * k * band * 1.7; // у кромки контент снаружи затягивается внутрь
+  half4 cr = sampleAt(c + n * bend * 0.9);
+  half4 cg = sampleAt(c + n * bend);
+  half4 cb = sampleAt(c + n * bend * 1.12);
   float sa = max(max(cr.a, cg.a), cb.a); // premultiplied
-  half3 col = half3(cr.r, cg.g, cb.b);
-  float a = edge; // весь диск линзы — снимок (фон панели тоже гнётся)
+  half3 col = half3(cr.r, cg.g, cb.b) + half3(k * k * k * 0.14 * sa);
+  // середина: над/под панелью — увеличенный снимок; внутри самой панели — прозрачно
+  // (там живые подписи с их собственной линзой, без двойного текста и «призраков» старой плашки)
+  float2 bq = abs(c - (uBar.xy + uBar.zw * 0.5)) - uBar.zw * 0.5;
+  float outBar = smoothstep(-1.0, 3.0, max(bq.x, bq.y));
+  float a = max(outBar, smoothstep(0.2, 0.6, k)) * edge;
   if (uDebug > 0.5) {
     col = mix(col, half3(sa, 0.0, 0.0), 0.4); // отладка: область выборки — красным
     a = max(a, 0.6 * edge);
@@ -203,7 +184,7 @@ class Guard extends React.Component {
 
 /**
  * Холст преломления. uniforms — shared value (считается в SegmentCapsule на UI-потоке):
- * { uCanvas, uSize, uCenter, uOrigin, uImg, uScale, uBar, uDebug, uLift } в точках экрана (uScale — пикс./пт снимка).
+ * { uCanvas, uSize, uCenter, uOrigin, uImg, uScale, uBar, uDebug } в точках экрана (uScale — пикс./пт снимка).
  * Центр холста (cw × ch) совпадает с центром капли. Видимость/появление — прозрачностью родителя.
  * Если связка Skia ↔ Reanimated недоступна — uniforms передаются из JS (реакция → setState).
  */
