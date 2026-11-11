@@ -1891,6 +1891,9 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
                 <LensLabel key={lab} label={lab} index={i} pos={pos} segW={segW} liquid={liquid} fontSize={fontSize} icon={icons ? icons[i] : undefined} />
               ))}
             </Animated.View>
+            {/* бахрома-глитч (RGB) у кромки, смягчённая широким кольцом — как блюр; центр без неё */}
+            <Animated.View pointerEvents="none" style={[styles.lqFringe, styles.lqFringeR, styles.lqFringeBlur, dropRad]} />
+            <Animated.View pointerEvents="none" style={[styles.lqFringe, styles.lqFringeB, styles.lqFringeBlur, dropRad]} />
             <Animated.View style={[styles.lqFringe, styles.lqFringeR, dropRad]} />
             <Animated.View style={[styles.lqFringe, styles.lqFringeB, dropRad]} />
             <Animated.View style={[styles.lqOutline, dropRad]} />
@@ -7359,6 +7362,8 @@ const styles = StyleSheet.create({
   lqFringe: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderWidth: 1.5 },
   lqFringeR: { borderColor: 'rgba(255,70,90,0.45)', transform: [{ translateX: -1.2 }] },
   lqFringeB: { borderColor: 'rgba(80,170,255,0.45)', transform: [{ translateX: 1.2 }] },
+  // широкое слабое кольцо — смягчает острую бахрому, как блюр по ободку
+  lqFringeBlur: { borderWidth: 4, opacity: 0.5 },
   // мягкий верхний блик на всю ширину; форму даёт обрезка lqClip (без своих скруглений)
   lqHost: { zIndex: 5, overflow: 'visible' },
   lqCanvas: { position: 'absolute' },

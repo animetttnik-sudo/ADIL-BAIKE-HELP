@@ -113,7 +113,7 @@ half4 main(float2 xy) {
   float2 n = g / max(length(g), 0.0001);
   float2 c = uCenter + p / 1.3; // увеличение 1.3× в середине (сила как была)
   float bend = k * k * band0 * 1.7; // сила изгиба прежняя, полоса уже
-  float br = k * k * 3.0; // блюр только у ободка, вместе с искажением; центр резкий
+  float br = k * k * 3.0; // blur-глитч: блюр только у ободка вместе с RGB-бахромой; центр резкий
   half4 cr = sampleBlur(c + n * bend * 0.9, br);
   half4 cg = sampleBlur(c + n * bend, br);
   half4 cb = sampleBlur(c + n * bend * 1.12, br);
