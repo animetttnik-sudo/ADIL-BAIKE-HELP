@@ -196,13 +196,17 @@ const SNAP_ROOT = { current: null };
 // касание экрана закончилось (листание, переходы) — доку пора обновить снимок экрана в покое
 const SNAP_BUS = { kick: null };
 
-// expo-glass-effect — опционально
+// expo-glass-effect — опционально (Expo Go SDK 58). На Android и старых iOS модуль
+// есть, но API нет — обязательно проверяем оба флага, иначе GlassView падает на
+// части сборок iOS 26 (expo/expo#40911).
 let GlassView = null;
 let isLiquidGlassAvailable = () => false;
+let isGlassEffectAPIAvailable = () => false;
 try {
   const eg = require('expo-glass-effect');
   GlassView = eg.GlassView;
   isLiquidGlassAvailable = eg.isLiquidGlassAvailable || (() => false);
+  isGlassEffectAPIAvailable = eg.isGlassEffectAPIAvailable || (() => false);
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -246,7 +250,12 @@ function wErr(err) {
 const hapticMedium = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const hapticSelect = () => Haptics.selectionAsync().catch(() => {});
 
-const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailable() : false;
+const LG =
+  Platform.OS === 'ios' &&
+  typeof isLiquidGlassAvailable === 'function' &&
+  !!isLiquidGlassAvailable() &&
+  typeof isGlassEffectAPIAvailable === 'function' &&
+  !!isGlassEffectAPIAvailable();
 
 /**
  * Карточки внутри вкладок (Расходы / Смены / Расчёт) — ОДИН путь для всех.
@@ -275,13 +284,14 @@ const DEPTH_SHADE = 'linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(25
 const GLASS_BLEED = 4;
 
 /** Стекло: нативный Liquid Glass (GlassView) с кромкой за обрезкой; без него — BlurView. */
-function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false, depth }) {
+function Glass({ children, style, intensity = 38, tint, tintFallback, interactive = false, depth, clip }) {
   const inPane = useContext(PaneGlassCtx);
   const flat = StyleSheet.flatten(style) || {};
   const r = flat.borderRadius != null ? flat.borderRadius : 26;
   const shadow = depth === 'none' ? null : { boxShadow: DEPTH[depth || 'card'] };
+  const clipBleed = clip != null ? !!clip : !interactive;
   // всплывающие меню с interactive-стеклом — как раньше: GlassView сам несёт содержимое
-  if (interactive && LG && GlassView) {
+  if (interactive && LG && GlassView && !clipBleed) {
     return (
       <GlassView
         glassEffectStyle="regular"
@@ -299,10 +309,11 @@ function Glass({ children, style, intensity = 38, tint, tintFallback, interactiv
     return (
       <View style={[styles.glassBase, inPane && styles.cardBase, style, shadow]}>
         <GlassView
-          pointerEvents="none"
+          pointerEvents={interactive ? 'box-none' : 'none'}
           glassEffectStyle="regular"
           colorScheme="dark"
           tintColor={tint}
+          isInteractive={!!interactive}
           style={[styles.glassBleed, { borderRadius: r + GLASS_BLEED }]}
         />
         {shade}
@@ -1482,7 +1493,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
   );
 });
 
-function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize, icons }) {
+function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, inShell = false, fontSize, icons }) {
   const n = labels.length;
   const isLiquid = glass; // «жидкая» плашка — только у дока
   const liquid = useSharedValue(0);
@@ -1830,10 +1841,11 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
     return { left: (segW.value * sh.rx - lensW) / 2, top: (h0 * sh.ry - lensH) / 2, opacity: lensReady.value };
   });
 
-  const Wrap = glass ? Glass : View;
+  const framed = glass && !inShell;
+  const Wrap = framed ? Glass : View;
   const capsule = (
     <Wrap
-      style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
+      style={[framed ? styles.segCapGlass : glass ? styles.segCapInDock : styles.segCap, { height, borderRadius: height / 2 }]}
       intensity={50}
       depth="chrome"
     >
@@ -6810,14 +6822,27 @@ export default function App() {
         )}
       </View>
 
-      {/* Dock */}
+      {/* Dock: одна стеклянная оболочка (капсула + настройки). Капля — поверх, вне overflow оболочки. */}
       <View style={styles.dock}>
-        <View style={styles.capsuleWrap}>
-          <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
+        <Glass
+          style={styles.dockGlass}
+          intensity={56}
+          tint="rgba(255,255,255,0.08)"
+          tintFallback="rgba(255,255,255,0.04)"
+          depth="chrome"
+          interactive
+          clip
+        >
+          <View style={styles.dockRow}>
+            <View style={styles.dockCapSlot} />
+            <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
+              <AppIcon name="gear" size={64} variant="tile" shape="circle" />
+            </ScaleButton>
+          </View>
+        </Glass>
+        <View style={styles.dockCapOverlay} pointerEvents="box-none">
+          <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass inShell onChange={onDock} onPickUI={tabAnim} />
         </View>
-        <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
-          <AppIcon name="gear" size={64} variant="tile" shape="circle" />
-        </ScaleButton>
       </View>
 
       <Toast toast={toast} onUndo={undoToast} onHide={hideToast} />
@@ -7327,9 +7352,22 @@ const styles = StyleSheet.create({
     left: 16,
     right: 16,
     bottom: Platform.OS === 'ios' ? 28 : 16,
-    flexDirection: 'row',
-    gap: 10,
-    alignItems: 'center',
+  },
+  dockGlass: {
+    borderRadius: 37,
+    padding: 5,
+  },
+  dockRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  dockCapSlot: { flex: 1, height: 64 },
+  // капля над панелью: слой вне Glass (overflow:hidden), поверх кнопки настроек
+  dockCapOverlay: {
+    position: 'absolute',
+    left: 5,
+    top: 5,
+    right: 5 + 64 + 8,
+    height: 64,
+    overflow: 'visible',
+    zIndex: 5,
   },
   capsuleWrap: { flex: 1, zIndex: 5 }, // капля дока поверх кнопки настроек
   segCap: {
@@ -7338,6 +7376,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(28,28,34,0.94)',
   },
   segCapGlass: { overflow: 'hidden' },
+  segCapInDock: { backgroundColor: 'transparent' },
   segCapRow: { flex: 1 },
   // отступ под переключателем, за которым сразу идёт следующий блок
   segBlock: { marginBottom: 16 },
