@@ -25,6 +25,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import {
     Alert,
     AppState,
+    BackHandler,
     Dimensions,
     Image,
     Keyboard,
@@ -40,7 +41,6 @@ import {
 import 'react-native-gesture-handler';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { captureRef } from 'react-native-view-shot';
 import {
     Gesture,
     GestureDetector,
@@ -104,6 +104,7 @@ import { repeatShiftDraft } from '../lib/repeatShift';
 import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/listView';
 import { paydayIndexFor, searchItems } from '../lib/search';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
+import { printerGeom } from '../lib/printerGeom';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
 import { AppIcon } from '../ui/AppIcons';
@@ -3230,7 +3231,6 @@ const ShiftSumCard = memo(function ShiftSumCard({ payday, t, accent, onCarry }) 
   );
 });
 
-/** Карточка закрытой зарплаты для «Фото» (снимок этого View) — тот же текст, что в PDF. */
 /** Собственная печать приложения (как на чеке): кольца, название приложения по кругу, звезда, дата выдачи. */
 function Stamp({ r, size = 132 }) {
   const k = stampSpec(r, size, STAMP_INK_DARK);
@@ -3263,9 +3263,10 @@ function Stamp({ r, size = 132 }) {
   );
 }
 
-const ExportCard = function ExportCard({ r, accent, viewRef }) {
+/** Чек закрытой зарплаты для анимации печати — тот же текст, что в PDF. memo: не перерисовывается во время хода. */
+const ExportCard = memo(function ExportCard({ r, accent }) {
   return (
-    <View ref={viewRef} collapsable={false} style={styles.expCard}>
+    <View collapsable={false} style={styles.expCard}>
       <Text style={styles.expTitle}>{r.title}</Text>
       <Text style={styles.expSub}>
         {r.period} · {r.count} {plural(r.count, 'смена', 'смены', 'смен')}
@@ -3314,272 +3315,306 @@ const ExportCard = function ExportCard({ r, accent, viewRef }) {
       <Stamp r={r} />
     </View>
   );
-};
+});
 
 const SAFE_TOP = Platform.OS === 'ios' ? 54 : 28;
 const SLOT_INSET = 8;
 const ACTIONS_BOTTOM_PAD = 28;
 const ACT_BTN_H = 54;
 const ACT_GAP = 10;
-const GAP_ABOVE_PDF = 12;
-const ACTIONS_BLOCK_H = ACT_BTN_H + ACT_GAP + ACT_BTN_H; // PDF/Фото + Отмена
-const EJECT = { duration: 520, easing: Easing.bezier(0.16, 1, 0.3, 1) };
-const EJECT_CLOSE = { duration: 420, easing: Easing.bezier(0.55, 0, 1, 0.35) };
+const GAP_ABOVE_ACTIONS = 12;
+const ACTIONS_BLOCK_H = ACT_BTN_H + ACT_GAP + ACT_BTN_H; // «Скачать» + «Отмена»
+const PRINT_BTN_H = 56; // = styles.exportIconBtn.height
+const PRINT_W = SCREEN_W - 32; // ширина кнопки-принтера = ширина контента страницы (pagesContent: 16 + 16)
+const EJECT = { duration: 560, easing: Easing.bezier(0.16, 1, 0.3, 1) }; // ease-out (как cubic/expo out)
+const EJECT_CLOSE = { duration: 380, easing: Easing.bezier(0.4, 0, 0.9, 0.6) };
+const PRINTER_GEOM = {
+  screenH: SCREEN_H,
+  safeTop: SAFE_TOP,
+  bottomPad: ACTIONS_BOTTOM_PAD,
+  actionsH: ACTIONS_BLOCK_H,
+  gapAbove: GAP_ABOVE_ACTIONS,
+  btnH: PRINT_BTN_H,
+};
 
 /**
- * Печать зарплаты: чек выезжает из полной зелёной кнопки-принтера, как бумага
- * из щели. Кнопка одновременно опускается и останавливается чуть выше PDF/Фото;
- * бумага остаётся прикреплённой к щели и заполняет место сверху. Закрытие —
- * обратный ход (кнопка вверх, чек заезжает обратно).
+ * Печать зарплаты: чек выезжает из зелёной кнопки-принтера, как бумага из щели.
+ * Кнопка одновременно опускается и встаёт над «Скачать»; бумага прикреплена к щели.
  *
- * Чтобы не было подвисаний: вся геометрия меряется ДО старта; во время анимации
- * нет setState и нет правки layout-свойств — только translateY/opacity на
- * UI-потоке (один progress, 520 мс). Тень/SVG кнопки растеризуются в слой.
+ * Без скачков и ожидания:
+ *  • хост смонтирован, как только открыта вкладка «Смены»: чек текущей зарплаты уже отрисован
+ *    (скрыто, opacity 0) и измерен — к нажатию высота окна бумаги известна, ничего не догружается;
+ *  • при открытии НЕ меняется layout: позиция кнопки (x/y) и путь — только shared values → translate;
+ *  • старт — одним worklet на UI-потоке (все значения в одном кадре), один progress 0→1, ease-out;
+ *  • во время хода нет setState в дереве чека (его элемент стабилен и memo), слои растеризованы.
+ * Управление императивное: apiRef.current.open(origin) / close(then).
  */
-function ExportPrinterHost({ visible, origin, accent, children, onClose, onPdf, onPhoto, onClosed }) {
-  const [shown, setShown] = useState(false);
-  const [geom, setGeom] = useState(null);
+function ExportPrinterHost({ apiRef, accent, children, onDownload, onClosed }) {
+  const [open, setOpen] = useState(false);
   const [interactive, setInteractive] = useState(false);
+  const [paperH, setPaperH] = useState(0);
   const progress = useSharedValue(0);
-  const btnTravelSV = useSharedValue(0);
-  const ejectSV = useSharedValue(0);
-  const leaving = useRef(false);
-  const started = useRef(false);
-  const closedPending = useRef(false);
-  const measuredH = useRef(0);
+  const on = useSharedValue(0);
+  const oxSV = useSharedValue(16);
+  const oySV = useSharedValue(0);
+  const travelSV = useSharedValue(0);
+  const ejectSV = useSharedValue(1);
+  const busy = useRef(false);
+  const closing = useRef(false);
+  const pendingH = useRef(0);
+  const afterClose = useRef(null);
+  const offset = useRef({ x: 0, y: 0 });
+  const rootRef = useRef(null);
   const reduce = useReducedMotion();
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
   const onClosedRef = useRef(onClosed);
   onClosedRef.current = onClosed;
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
 
-  const ox = Math.round(origin?.x ?? 16);
-  const oy = Math.round(origin?.y ?? SCREEN_H * 0.42);
-  const ow = Math.round(origin?.width ?? SCREEN_W - 32);
-  const oh = Math.round(origin?.height ?? 56);
-  const destY = Math.round(
-    Math.max(SAFE_TOP + 80, SCREEN_H - ACTIONS_BOTTOM_PAD - ACTIONS_BLOCK_H - GAP_ABOVE_PDF - oh)
-  );
-  const buttonTravel = destY - oy;
-  const maxEject = Math.max(1, destY - SAFE_TOP);
+  const g = printerGeom({ ...PRINTER_GEOM, paperH });
+  const gRef = useRef(g);
+  gRef.current = g;
+
+  // высота окна бумаги → shared value (меняется только пока чек скрыт)
+  useEffect(() => {
+    ejectSV.value = g.ejectH;
+  }, [g.ejectH, ejectSV]);
 
   const markInteractive = useCallback(() => {
-    if (visibleRef.current && !leaving.current) setInteractive(true);
-  }, []);
-
-  const fireClosed = useCallback(() => {
-    if (!closedPending.current) return;
-    closedPending.current = false;
-    onClosedRef.current?.();
+    if (busy.current && !closing.current) setInteractive(true);
   }, []);
 
   const finishClose = useCallback(() => {
-    leaving.current = false;
-    started.current = false;
-    measuredH.current = 0;
+    on.value = 0;
     progress.value = 0;
-    setShown(false);
-    setGeom(null);
+    busy.current = false;
+    closing.current = false;
+    setOpen(false);
     setInteractive(false);
-    fireClosed();
-  }, [fireClosed, progress]);
+    if (pendingH.current) {
+      setPaperH(pendingH.current);
+      pendingH.current = 0;
+    }
+    const fn = afterClose.current;
+    afterClose.current = null;
+    onClosedRef.current?.();
+    if (fn) fn();
+  }, [on, progress]);
 
-  const startIn = useCallback(
-    (paperH) => {
-      const eject = Math.max(1, Math.min(paperH, maxEject));
-      btnTravelSV.value = buttonTravel;
-      ejectSV.value = eject;
-      if (reduce) {
-        progress.value = 1;
-        setInteractive(true);
-        return;
-      }
-      progress.value = withTiming(1, EJECT, (fin) => {
+  const openAt = useCallback(
+    (origin) => {
+      if (busy.current) return false;
+      busy.current = true;
+      closing.current = false;
+      const x = Math.round((origin?.x ?? 16) - offset.current.x);
+      const y = Math.round((origin?.y ?? SCREEN_H * 0.42) - offset.current.y);
+      const travel = printerGeom({ ...PRINTER_GEOM, paperH: 0, originY: y }).travel;
+      const instant = !!reduce;
+      const done = markInteractive;
+      scheduleOnUI(() => {
         'worklet';
-        if (fin) scheduleOnRN(markInteractive);
+        oxSV.value = x;
+        oySV.value = y;
+        travelSV.value = travel;
+        on.value = 1;
+        if (instant) {
+          progress.value = 1;
+          scheduleOnRN(done);
+          return;
+        }
+        progress.value = 0;
+        progress.value = withTiming(1, EJECT, (fin) => {
+          'worklet';
+          if (fin) scheduleOnRN(done);
+        });
       });
+      setOpen(true);
+      return true;
     },
-    [buttonTravel, maxEject, reduce, progress, btnTravelSV, ejectSV, markInteractive]
+    [reduce, markInteractive, oxSV, oySV, travelSV, on, progress]
   );
 
-  useEffect(() => {
-    if (visible && !shown) {
-      leaving.current = false;
-      started.current = false;
-      closedPending.current = false;
-      measuredH.current = 0;
-      progress.value = 0;
-      btnTravelSV.value = buttonTravel;
-      ejectSV.value = 0;
-      setGeom(null);
+  const close = useCallback(
+    (then) => {
+      if (!busy.current || closing.current) return;
+      closing.current = true;
+      afterClose.current = typeof then === 'function' ? then : null;
       setInteractive(false);
-      setShown(true);
-      return;
-    }
-    if (!visible && shown && !leaving.current) {
-      leaving.current = true;
-      closedPending.current = true;
-      if (reduce || !started.current) {
+      if (reduce) {
         finishClose();
         return;
       }
-      progress.value = withTiming(0, EJECT_CLOSE, (fin) => {
+      const done = finishClose;
+      scheduleOnUI(() => {
         'worklet';
-        if (fin) scheduleOnRN(finishClose);
+        progress.value = withTiming(0, EJECT_CLOSE, (fin) => {
+          'worklet';
+          if (fin) scheduleOnRN(done);
+        });
       });
-    }
-  }, [visible, shown, reduce, progress, btnTravelSV, ejectSV, buttonTravel, finishClose]);
+    },
+    [reduce, finishClose, progress]
+  );
 
   useLayoutEffect(() => {
-    if (!shown || !geom || started.current) return;
-    started.current = true;
-    startIn(geom.paperH);
-  }, [shown, geom, startIn]);
+    if (!apiRef) return undefined;
+    apiRef.current = { open: openAt, close };
+    return () => {
+      if (apiRef.current && apiRef.current.open === openAt) apiRef.current = null;
+    };
+  }, [apiRef, openAt, close]);
+
+  // Android «назад» закрывает печать
+  useEffect(() => {
+    if (!open) return undefined;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      close();
+      return true;
+    });
+    return () => sub.remove();
+  }, [open, close]);
+
+  const onRootLayout = useCallback(() => {
+    const n = rootRef.current;
+    if (n && typeof n.measureInWindow === 'function') {
+      n.measureInWindow((x, y) => {
+        offset.current = { x: x || 0, y: y || 0 };
+      });
+    }
+  }, []);
 
   const onPaperLayout = useCallback((e) => {
     const h = Math.round(e.nativeEvent.layout.height);
-    if (!h || leaving.current) return;
-    measuredH.current = h;
-    setGeom((prev) => (prev && prev.paperH === h ? prev : { paperH: h, ejectH: Math.max(1, Math.min(h, maxEject)) }));
-  }, [maxEject]);
+    if (!h) return;
+    if (busy.current) {
+      pendingH.current = h; // чек поменялся во время показа — применим после закрытия, без прыжка
+      return;
+    }
+    setPaperH((prev) => (prev === h ? prev : h));
+  }, []);
 
+  const layerStyle = useAnimatedStyle(() => ({ opacity: on.value }));
+  const plaqueStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: oxSV.value }, { translateY: oySV.value }],
+  }));
   const clipStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: btnTravelSV.value * progress.value }],
+    transform: [{ translateX: oxSV.value }, { translateY: oySV.value + travelSV.value * progress.value }],
   }));
   const paperStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -ejectSV.value * progress.value }],
   }));
   const btnStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: btnTravelSV.value * progress.value }],
+    transform: [{ translateX: oxSV.value }, { translateY: oySV.value + travelSV.value * progress.value }],
   }));
-  const dim = useAnimatedStyle(() => ({
-    opacity: progress.value,
-  }));
+  const dim = useAnimatedStyle(() => ({ opacity: progress.value }));
   const actStyle = useAnimatedStyle(() => {
     const a = interpolate(progress.value, [0.45, 1], [0, 1], Extrapolation.CLAMP);
-    return {
-      opacity: a,
-      transform: [{ translateY: (1 - a) * 16 }],
-    };
+    return { opacity: a, transform: [{ translateY: (1 - a) * 16 }] };
   });
 
-  const requestClose = useCallback(() => {
-    if (leaving.current) return;
-    onCloseRef.current?.();
-  }, []);
-
-  const clipTop = oy + SLOT_INSET - SCREEN_H;
-  const paperTopInClip = SCREEN_H - SLOT_INSET;
-  const ejectH = geom?.ejectH ?? maxEject;
-  const canScroll = interactive && geom && geom.paperH > geom.ejectH + 1;
+  const canScroll = interactive && g.scrollable;
 
   return (
-    <Modal visible={shown} animationType="none" transparent onRequestClose={requestClose} onDismiss={fireClosed}>
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <View style={{ flex: 1, opacity: geom ? 1 : 0 }}>
-          {/* Плашка под затемнением закрывает исходную зелёную кнопку, чтобы не было «призрака». */}
-          <View
-            pointerEvents="none"
-            style={{
+    <View
+      ref={rootRef}
+      onLayout={onRootLayout}
+      collapsable={false}
+      pointerEvents={open ? 'auto' : 'none'}
+      style={[StyleSheet.absoluteFill, { zIndex: 60, elevation: 60 }]}
+      importantForAccessibility={open ? 'auto' : 'no-hide-descendants'}
+      accessibilityElementsHidden={!open}
+    >
+      <Animated.View style={[StyleSheet.absoluteFill, layerStyle]} collapsable={false}>
+        {/* Плашка под затемнением закрывает исходную кнопку, чтобы не было «призрака». */}
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            {
               position: 'absolute',
-              left: ox,
-              top: oy,
-              width: ow,
-              height: oh,
-              borderRadius: Math.round(oh * 0.32),
+              left: 0,
+              top: 0,
+              width: PRINT_W,
+              height: PRINT_BTN_H,
+              borderRadius: Math.round(PRINT_BTN_H * 0.32),
               backgroundColor: '#050507',
-            }}
-          />
+            },
+            plaqueStyle,
+          ]}
+        />
+        <Animated.View
+          pointerEvents="none"
+          style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.55)' }, dim]}
+        />
+        <Pressable style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} onPress={() => close()} />
+        <Animated.View
+          pointerEvents="box-none"
+          collapsable={false}
+          style={[
+            {
+              position: 'absolute',
+              left: 0,
+              width: PRINT_W,
+              top: SLOT_INSET - SCREEN_H,
+              height: SCREEN_H,
+              overflow: 'hidden',
+              zIndex: 2,
+            },
+            clipStyle,
+          ]}
+        >
           <Animated.View
-            pointerEvents="none"
-            style={[{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.55)' }, dim]}
-          />
-          <Pressable style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} onPress={requestClose} />
-          <Animated.View
-            pointerEvents="box-none"
+            shouldRasterizeIOS={!interactive}
+            renderToHardwareTextureAndroid={!interactive}
             collapsable={false}
-            style={[
-              {
-                position: 'absolute',
-                left: ox,
-                width: ow,
-                top: clipTop,
-                height: SCREEN_H,
-                overflow: 'hidden',
-                zIndex: 2,
-              },
-              clipStyle,
-            ]}
+            style={[{ position: 'absolute', left: 0, width: PRINT_W, top: SCREEN_H - SLOT_INSET, height: g.ejectH }, paperStyle]}
           >
-            <Animated.View
-              shouldRasterizeIOS
-              renderToHardwareTextureAndroid
-              collapsable={false}
-              style={[
-                {
-                  position: 'absolute',
-                  left: 0,
-                  width: ow,
-                  top: paperTopInClip,
-                  ...(geom ? { height: ejectH } : null),
-                },
-                paperStyle,
-              ]}
+            <ScrollView
+              scrollEnabled={!!canScroll}
+              showsVerticalScrollIndicator={!!canScroll}
+              bounces={false}
+              style={{ height: g.ejectH }}
             >
-              <ScrollView
-                scrollEnabled={!!canScroll}
-                showsVerticalScrollIndicator={!!canScroll}
-                bounces={false}
-                keyboardShouldPersistTaps="handled"
-                style={geom ? { height: ejectH } : null}
-              >
-                <View onLayout={onPaperLayout} collapsable={false}>
-                  {children}
-                </View>
-              </ScrollView>
-            </Animated.View>
+              <View onLayout={onPaperLayout} collapsable={false}>
+                {children}
+              </View>
+            </ScrollView>
           </Animated.View>
-          <Animated.View
-            pointerEvents="none"
-            shouldRasterizeIOS
-            renderToHardwareTextureAndroid
-            collapsable={false}
-            style={[
-              {
-                position: 'absolute',
-                left: ox - 12,
-                top: oy - 12,
-                width: ow + 24,
-                height: oh + 24,
-                zIndex: 3,
-                padding: 12,
-              },
-              btnStyle,
-            ]}
+        </Animated.View>
+        <Animated.View
+          pointerEvents="none"
+          shouldRasterizeIOS
+          renderToHardwareTextureAndroid
+          collapsable={false}
+          style={[
+            {
+              position: 'absolute',
+              left: -12,
+              top: -12,
+              width: PRINT_W + 24,
+              height: PRINT_BTN_H + 24,
+              zIndex: 3,
+              padding: 12,
+            },
+            btnStyle,
+          ]}
+        >
+          <AppIcon name="printer" size={PRINT_BTN_H} width="100%" variant="tileOn" />
+        </Animated.View>
+        <Animated.View
+          pointerEvents={interactive ? 'auto' : 'none'}
+          style={[{ position: 'absolute', left: 16, right: 16, bottom: ACTIONS_BOTTOM_PAD, zIndex: 4 }, actStyle]}
+        >
+          <ScaleButton
+            style={[styles.actBtn, { backgroundColor: accent, marginBottom: 0 }]}
+            onPress={onDownload}
+            accessibilityLabel="Скачать чек в PDF"
           >
-            <AppIcon name="printer" size={oh} width="100%" variant="tileOn" />
-          </Animated.View>
-          <Animated.View
-            pointerEvents={interactive ? 'auto' : 'none'}
-            style={[{ position: 'absolute', left: 16, right: 16, bottom: ACTIONS_BOTTOM_PAD, zIndex: 4 }, actStyle]}
-          >
-            <View style={styles.calcBtns}>
-              <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent, marginBottom: 0 }]} onPress={onPdf}>
-                <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
-              </ScaleButton>
-              <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent, marginBottom: 0 }]} onPress={onPhoto}>
-                <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
-              </ScaleButton>
-            </View>
-            <ScaleButton style={[styles.actBtn, { marginTop: ACT_GAP, marginBottom: 0 }]} onPress={requestClose}>
-              <Text style={styles.actBtnTxt}>Отмена</Text>
-            </ScaleButton>
-          </Animated.View>
-        </View>
-      </GestureHandlerRootView>
-    </Modal>
+            <Text style={[styles.actBtnTxt, styles.onAccent]}>Скачать</Text>
+          </ScaleButton>
+          <ScaleButton style={[styles.actBtn, { marginTop: ACT_GAP, marginBottom: 0 }]} onPress={() => close()}>
+            <Text style={styles.actBtnTxt}>Отмена</Text>
+          </ScaleButton>
+        </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -3597,7 +3632,7 @@ function PrintExportButton({ payday, onExport }) {
   };
   return (
     <View ref={printRef} collapsable={false} style={styles.exportIconBtn}>
-      <ScaleButton style={styles.exportIconHit} onPress={onPrint} accessibilityLabel="Сохранить зарплату, PDF или фото">
+      <ScaleButton style={styles.exportIconHit} onPress={onPrint} accessibilityLabel="Чек зарплаты, скачать PDF">
         <AppIcon name="printer" size={56} width="100%" variant="tileOn" />
       </ScaleButton>
     </View>
@@ -4738,28 +4773,24 @@ export default function App() {
   }, [goPage]);
 
   // стабильные пропсы страниц пейджеров: memo(PayPage/ShiftPage) не перерисовываются от каждого рендера App
-  // ── Экспорт зарплаты: PDF (expo-print) / Фото (снимок карточки) → системное «Поделиться / Сохранить»
-  const [exportP, setExportP] = useState(null);
-  const [exportOpen, setExportOpen] = useState(false);
-  const [exportOrigin, setExportOrigin] = useState(null);
-  const exportRef = useRef(null);
-  const afterExportClose = useRef(null);
+  // ── Чек зарплаты: анимация «принтера» → «Скачать» = PDF (expo-print) → системное «Сохранить в Файлы / Поделиться»
+  const printerRef = useRef(null);
+  const [exportP, setExportP] = useState(null); // зарплата чека, если нажали не на показанной (редко)
+  const exportPRef = useRef(null);
   const openExportMenu = useCallback((p, origin) => {
+    if (!p) return;
     Haptics.selectionAsync().catch(noop);
+    exportPRef.current = p;
+    const shown = siRef.current != null ? PAYDAYS[siRef.current] : null;
+    if (p === shown) {
+      printerRef.current?.open(origin);
+      return;
+    }
+    // чек другой зарплаты: сначала отрисовать его скрыто, потом печатать
     setExportP(p);
-    setExportOrigin(origin || null);
-    setExportOpen(true);
+    requestAnimationFrame(() => requestAnimationFrame(() => printerRef.current?.open(origin)));
   }, []);
-  const closeExport = useCallback(() => setExportOpen(false), []);
-  const closeExportThen = useCallback((fn) => {
-    afterExportClose.current = fn;
-    setExportOpen(false);
-  }, []);
-  const onExportClosed = useCallback(() => {
-    const fn = afterExportClose.current;
-    afterExportClose.current = null;
-    if (fn) fn();
-  }, []);
+  const onPrinterClosed = useCallback(() => setExportP(null), []);
   /** Копия временного файла под понятным именем («Зарплата_15.10.2026.pdf»), латиницей — если кириллица не прошла. */
   const namedCopy = useCallback((uri, r, ext, latin) => {
     const src = new File(uri);
@@ -4774,7 +4805,7 @@ export default function App() {
         Alert.alert('Не получилось', 'На этом устройстве нельзя поделиться файлом.');
         return;
       }
-      const opts = { mimeType, UTI, dialogTitle: 'Сохранить зарплату' };
+      const opts = { mimeType, UTI, dialogTitle: 'Скачать чек (PDF)' };
       let named = null;
       try {
         named = namedCopy(uri, r, ext, false);
@@ -4792,31 +4823,27 @@ export default function App() {
     },
     [namedCopy]
   );
-  const exportPdf = useCallback(
-    (p) => {
-      const r = payReport(stateRef.current, p, calcRef.current);
-      closeExportThen(async () => {
-        try {
-          const { uri } = await Print.printToFileAsync({ html: reportHtml(r, accentRef.current) });
-          await shareFile(uri, 'application/pdf', 'com.adobe.pdf', r, 'pdf');
-        } catch (e) {
-          Alert.alert('PDF не сохранён', String(e?.message || e));
-        }
-      });
-    },
-    [closeExportThen, shareFile]
-  );
-  const exportPhoto = useCallback(async (p) => {
-    try {
-      const r = payReport(stateRef.current, p, calcRef.current);
-      const uri = await captureRef(exportRef, { format: 'jpg', quality: 0.95, result: 'tmpfile' });
-      closeExportThen(() =>
-        shareFile(uri, 'image/jpeg', 'public.jpeg', r, 'jpg').catch((e) => Alert.alert('Фото не сохранено', String(e?.message || e)))
-      );
-    } catch (e) {
-      Alert.alert('Фото не сохранено', String(e?.message || e));
-    }
-  }, [closeExportThen, shareFile]);
+  /** «Скачать»: чек закрывается обратно в принтер, затем PDF из того же отчёта → системный лист сохранения. */
+  const downloadPdf = useCallback(() => {
+    const p = exportPRef.current;
+    if (!p) return;
+    const r = payReport(stateRef.current, p, calcRef.current);
+    const html = reportHtml(r, accentRef.current);
+    const run = async () => {
+      try {
+        const { uri } = await Print.printToFileAsync({ html });
+        await shareFile(uri, 'application/pdf', 'com.adobe.pdf', r, 'pdf');
+      } catch (e) {
+        Alert.alert('PDF не сохранён', String(e?.message || e));
+      }
+    };
+    if (printerRef.current) printerRef.current.close(run);
+    else run();
+  }, [shareFile]);
+  // чек для принтера готовится заранее: отчёт и карточка показанной зарплаты, пока открыта вкладка «Смены»
+  const printP = exportP || shownShiftPay;
+  const printR = useMemo(() => (state && printP ? payReport(state, printP, calc) : null), [state, printP, calc]);
+  const printCard = useMemo(() => (printR ? <ExportCard r={printR} accent={accent} /> : null), [printR, accent]);
 
   const payPageProps = useMemo(
     () => ({ accent, onEdit: openExpense, onToggle: toggleStatus, onReturn: returnExpenseNow, onAdd: () => openExpense(null), arc }),
@@ -5710,31 +5737,6 @@ export default function App() {
                 onPress={() => canParse && doParse(shNotes.text)}
               >
                 <Text style={[styles.actBtnTxt, styles.onAccent]}>Разобрать</Text>
-              </ScaleButton>
-            </>
-          ),
-        };
-      }
-
-      case 'export': {
-        if (!exportP) return { title: '', onClose: closeSheet, body: null };
-        const r = payReport(state, exportP, calc);
-        return {
-          title: 'Сохранить зарплату',
-          onClose: closeSheet,
-          body: (
-            <>
-              <ExportCard r={r} accent={accent} viewRef={exportRef} />
-              <View style={styles.calcBtns}>
-                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPdf(exportP)}>
-                  <Text style={[styles.actBtnTxt, styles.onAccent]}>PDF</Text>
-                </ScaleButton>
-                <ScaleButton style={[styles.actBtn, { flex: 1, backgroundColor: accent }]} onPress={() => exportPhoto(exportP)}>
-                  <Text style={[styles.actBtnTxt, styles.onAccent]}>Фото</Text>
-                </ScaleButton>
-              </View>
-              <ScaleButton style={styles.actBtn} onPress={closeSheet}>
-                <Text style={styles.actBtnTxt}>Отмена</Text>
               </ScaleButton>
             </>
           ),
@@ -6803,17 +6805,11 @@ export default function App() {
       />
       <KeyBarHost scope="main" />
       <SheetHost active={sheet} render={renderSheet} onClosed={onSheetClosed} />
-      <ExportPrinterHost
-        visible={exportOpen}
-        origin={exportOrigin}
-        accent={accent}
-        onClose={closeExport}
-        onClosed={onExportClosed}
-        onPdf={() => exportP && exportPdf(exportP)}
-        onPhoto={() => exportP && exportPhoto(exportP)}
-      >
-        {exportP ? <ExportCard r={payReport(state, exportP, calc)} accent={accent} viewRef={exportRef} /> : null}
-      </ExportPrinterHost>
+      {mounted[1] ? (
+        <ExportPrinterHost apiRef={printerRef} accent={accent} onDownload={downloadPdf} onClosed={onPrinterClosed}>
+          {printCard}
+        </ExportPrinterHost>
+      ) : null}
     </View>
   );
 

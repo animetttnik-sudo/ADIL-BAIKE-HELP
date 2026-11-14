@@ -1,6 +1,6 @@
 /**
- * Экспорт закрытой зарплаты («Смены» → «Сохранить зарплату»): PDF (expo-print из HTML) или фото
- * (снимок карточки react-native-view-shot). Чистые функции без React/RN — тесты в tests/payExport.test.mjs.
+ * Экспорт закрытой зарплаты («Смены» → принтер → «Скачать»): только PDF (expo-print из HTML).
+ * Чистые функции без React/RN — тесты в tests/payExport.test.mjs.
  *
  * payReport — всё, что попадает в файл: период, смены (в т. ч. две за один день — отдельными строками
  * и итогом дня), итоги зарплаты (те же shiftTotals, что на экране), вычеты и сумма к выплате.
@@ -90,7 +90,7 @@ export function exportFileName(r, ext, latin = false) {
 export const STAMP_APP = 'ADIL BAIKE HELP PLEASE';
 /** Нижняя дуга печати. */
 export const STAMP_BOTTOM = 'РАСЧЁТ ЗАРПЛАТЫ';
-/** Цвет «чернил» печати — полупрозрачный синий (на белом PDF и светлее — на тёмной карточке фото). */
+/** Цвет «чернил» печати — полупрозрачный синий (на белом PDF и светлее — на тёмной карточке чека). */
 export const STAMP_INK = 'rgba(28,86,196,0.72)';
 export const STAMP_INK_DARK = 'rgba(96,156,255,0.78)';
 
