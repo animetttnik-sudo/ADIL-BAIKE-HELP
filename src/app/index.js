@@ -269,6 +269,8 @@ const LG = typeof isLiquidGlassAvailable === 'function' ? !!isLiquidGlassAvailab
  * при первом заходе, когда вкладка уже полностью видна (как «Расходы» при старте).
  */
 const PaneGlassCtx = createContext(false);
+/** Внутри сплошной серой шторки: переключатели светлее и прозрачнее (не тёмные на тёмном). */
+const SheetCtx = createContext(false);
 
 /**
  * Глубина: мягкая большая тень + плотная короткая (boxShadow: тень по пути скругления,
@@ -572,7 +574,7 @@ function SheetHost({ active, render, onClosed }) {
                     showsVerticalScrollIndicator={false}
                     style={{ flexShrink: 1 }}
                   >
-                    {cfg.body}
+                    <SheetCtx.Provider value>{cfg.body}</SheetCtx.Provider>
                   </ScrollView>
                 </View>
               </Animated.View>
@@ -1510,6 +1512,7 @@ const TabPane = memo(function TabPane({ vis, x, active, reduce, children }) {
 });
 
 function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass = false, fontSize, icons }) {
+  const inSheet = useContext(SheetCtx);
   const n = labels.length;
   const isLiquid = glass; // «жидкая» плашка — только у дока
   const liquid = useSharedValue(0);
@@ -1860,7 +1863,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
   const Wrap = glass ? Glass : View;
   const capsule = (
     <Wrap
-      style={[glass ? styles.segCapGlass : styles.segCap, { height, borderRadius: height / 2 }]}
+      style={[glass ? styles.segCapGlass : styles.segCap, !glass && inSheet && styles.segCapLight, { height, borderRadius: height / 2 }]}
       intensity={50}
       depth="chrome"
     >
@@ -1882,7 +1885,7 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
             {measured && (
               <Animated.View
                 pointerEvents="none"
-                style={[styles.segInd, isLiquid && styles.segIndSolid, { borderRadius: h0 / 2 }, ind]}
+                style={[styles.segInd, isLiquid && styles.segIndSolid, !glass && inSheet && styles.segIndLight, { borderRadius: h0 / 2 }, ind]}
               />
             )}
           </View>
@@ -7360,7 +7363,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 12,
-    backgroundColor: 'rgba(118,118,128,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
   },
   adjBtnMinus: { backgroundColor: 'rgba(255,69,58,0.18)' },
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
@@ -7373,7 +7378,9 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(118,118,128,0.22)',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
   },
   pmMinusOn: { backgroundColor: '#ff453a' },
   pmPlusOn: { backgroundColor: '#30d158' },
@@ -7619,6 +7626,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(28,28,34,0.94)',
   },
   segCapGlass: { overflow: 'hidden' },
+  segCapLight: { backgroundColor: 'rgba(255,255,255,0.14)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.18)' },
+  segIndLight: { backgroundColor: 'rgba(255,255,255,0.28)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.22)' },
   segCapRow: { flex: 1 },
   // отступ под переключателем, за которым сразу идёт следующий блок
   segBlock: { marginBottom: 16 },
@@ -7878,12 +7887,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.07)',
+    backgroundColor: 'rgba(255,255,255,0.14)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.18)',
   },
-  chipOn: { backgroundColor: 'rgba(48,209,88,0.28)' },
-  chipTxt: { color: 'rgba(235,235,245,0.5)', fontSize: 13, fontWeight: '600' },
+  chipOn: { backgroundColor: 'rgba(48,209,88,0.34)', borderColor: 'rgba(48,209,88,0.5)' },
+  chipTxt: { color: 'rgba(235,235,245,0.75)', fontSize: 13, fontWeight: '600' },
   chipTxtOn: { color: '#fff' },
 
   colorRow: { flexDirection: 'row', gap: 10, marginBottom: 10, flexWrap: 'wrap' },
