@@ -19,7 +19,6 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
@@ -56,6 +55,7 @@ import Animated, {
     LayoutAnimationConfig,
     LinearTransition,
     useAnimatedKeyboard,
+    useAnimatedProps,
     useAnimatedReaction,
     useAnimatedStyle, useDerivedValue, useReducedMotion, useSharedValue,
     withDelay,
@@ -99,14 +99,15 @@ import { computeBoxes, fmtKg } from '../lib/boxes';
 import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
-import { addRecurring, isSeries, removeSeries, seriesToRemove } from '../lib/recurring';
+import { addRecurring, editRecurring, isRecurringExpense, isSeries, makeOneTime, makeRecurring, removeSeries, seriesToRemove, untilOfExpense } from '../lib/recurring';
 import { repeatShiftDraft } from '../lib/repeatShift';
 import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/listView';
 import { paydayIndexFor, searchItems } from '../lib/search';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { printerGeom } from '../lib/printerGeom';
 import { File, Paths } from 'expo-file-system';
-import Svg, { Circle, Path as SvgPath, Text as SvgText } from 'react-native-svg';
+import Svg, { Circle, Defs, G, Line, LinearGradient, Path as SvgPath, Stop, Text as SvgText } from 'react-native-svg';
+import { areaPath, chartPoints, chartScale, chartSeries, shortMoney, smoothPath, trendOf } from '../lib/chart';
 import { AppIcon } from '../ui/AppIcons';
 import { liquidShape } from '../lib/liquid';
 import { GLASS_DIAG, GLASS_TINT, GlassLens, glassLensAvailable, snapshotView } from '../ui/GlassLens';
@@ -187,7 +188,17 @@ const SEG_FONT_MAX = 1.2; // подписи капсул и дока — выс�
 function Text(props) {
   return <RNText maxFontSizeMultiplier={FONT_MAX} {...props} />;
 }
+const NUMERIC_KB = new Set(['number-pad', 'decimal-pad', 'numeric', 'phone-pad']);
+/**
+ * У цифровой клавиатуры iOS нет своей return-клавиши, и если задать returnKeyType, система/RN
+ * добавляет СВОЮ кнопку («Next»/«Done» — на iOS 26 плавающей капсулой) поверх шторки.
+ * У нас есть своя панель (Скрыть · ↑ · Далее ›), поэтому у цифровых полей return-клавишу не задаём.
+ */
 function TextInput(props) {
+  if (Platform.OS === 'ios' && NUMERIC_KB.has(props.keyboardType)) {
+    const { returnKeyType: _r, submitBehavior: _s, inputAccessoryViewButtonLabel: _l, ...rest } = props;
+    return <RNTextInput maxFontSizeMultiplier={FONT_MAX} {...rest} />;
+  }
   return <RNTextInput maxFontSizeMultiplier={FONT_MAX} {...props} />;
 }
 
@@ -206,7 +217,7 @@ try {
 } catch (_) {}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const ACCENT_PRESETS = [{ h: 145 }, { h: 210 }, { h: 280 }, { h: 30 }, { h: 350 }, { h: 190 }];
+const ACCENT = 'hsl(145, 72%, 54%)';
 const INIT_Y = 2026;
 const INIT_M = 8;
 
@@ -531,6 +542,7 @@ function SheetHost({ active, render, onClosed }) {
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
               <Animated.View style={drag}>
                 <Glass style={styles.sheet} intensity={48} depth="sheet">
+                  <View pointerEvents="none" style={styles.sheetSolid} />
                   <GestureDetector gesture={pan}>
                     <View collapsable={false}>
                       <View style={styles.handle} />
@@ -1137,6 +1149,11 @@ function useRowPress(id, onEdit) {
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
   const props = {
     onPress: edit,
+    delayLongPress: 380,
+    onLongPress: () => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(noop);
+      edit();
+    },
     onPressIn: () => setDown(true),
     onPressOut: () => setDown(false),
   };
@@ -1904,6 +1921,159 @@ function SegmentCapsule({ value, labels, onChange, onPickUI, height = 56, glass 
 }
 
 const AN_RANGES = [3, 6, 0];
+// ── «Анализ»: прозрачный неоновый график (как биржевой): зелёный — заработано, красный — расходы,
+// синий — баланс нарастающим итогом. Линии «прорисовываются» на UI-потоке (strokeDashoffset), стрелки на концах.
+const APath = Animated.createAnimatedComponent(SvgPath);
+const AG = Animated.createAnimatedComponent(G);
+const NEON = [
+  { key: 'green', color: '#3dff8f', label: 'Заработано' },
+  { key: 'red', color: '#ff3d5e', label: 'Расходы' },
+  { key: 'blue', color: '#3ea8ff', label: 'Баланс' },
+];
+const CH_H = 190; // высота области линий
+const CH_AXIS = 22; // подписи месяцев
+const CH_LABEL_W = 38; // подписи сумм слева
+const CH_PAD_X = 14;
+const CH_PAD_Y = 12;
+const CH_DRAW = { duration: 1200, easing: Easing.out(Easing.cubic) };
+
+function NeonLine({ d, len, color, prog }) {
+  const L = Math.max(1, len);
+  const ap = useAnimatedProps(() => ({ strokeDashoffset: L * (1 - prog.value) }));
+  const dash = `${L} ${L}`;
+  const common = { d, fill: 'none', strokeLinecap: 'round', strokeLinejoin: 'round', strokeDasharray: dash, animatedProps: ap };
+  return (
+    <>
+      <APath {...common} stroke={color} strokeOpacity={0.09} strokeWidth={14} />
+      <APath {...common} stroke={color} strokeOpacity={0.22} strokeWidth={7} />
+      <APath {...common} stroke={color} strokeOpacity={1} strokeWidth={2.4} />
+      <APath {...common} stroke="#ffffff" strokeOpacity={0.55} strokeWidth={0.9} />
+    </>
+  );
+}
+
+function NeonArrow({ end, color, prog }) {
+  const ap = useAnimatedProps(() => ({ opacity: interpolate(prog.value, [0.82, 1], [0, 1], Extrapolation.CLAMP) }));
+  if (!end) return null;
+  const tr = `translate(${end.x} ${end.y}) rotate(${end.angle})`;
+  return (
+    <AG animatedProps={ap}>
+      <Circle cx={end.x} cy={end.y} r={9} fill={color} fillOpacity={0.16} />
+      <G transform={tr}>
+        <SvgPath d="M-2 -6.5 L8 0 L-2 6.5 Z" fill={color} fillOpacity={0.35} transform="scale(1.5)" />
+        <SvgPath d="M-2 -5.5 L7 0 L-2 5.5 Z" fill={color} stroke="#ffffff" strokeOpacity={0.6} strokeWidth={0.8} strokeLinejoin="round" />
+      </G>
+    </AG>
+  );
+}
+
+const NeonChart = memo(function NeonChart({ M, ks }) {
+  const [w, setW] = useState(0);
+  const prog = useSharedValue(0);
+  const reduce = useReducedMotion();
+  const series = useMemo(() => chartSeries(M, ks), [M, ks]);
+  const plotW = Math.max(0, w - CH_LABEL_W);
+  const geo = useMemo(() => {
+    if (!plotW) return null;
+    const sc = chartScale([series.green, series.red, series.blue]);
+    const opt = { w: plotW, h: CH_H, lo: sc.lo, hi: sc.hi, padX: CH_PAD_X, padY: CH_PAD_Y };
+    const y = (v) => CH_PAD_Y + (1 - (v - sc.lo) / (sc.hi - sc.lo)) * (CH_H - CH_PAD_Y * 2);
+    const lines = NEON.map((n) => {
+      const pts = chartPoints(series[n.key], opt);
+      return { ...n, pts, ...smoothPath(pts), trend: trendOf(series[n.key]), last: series[n.key][series[n.key].length - 1] || 0 };
+    });
+    const blue = lines[2];
+    return { sc, y, lines, area: areaPath(blue.pts, CH_H - CH_PAD_Y), xs: chartPoints(ks.map(() => 0), opt).map((p) => p.x) };
+  }, [plotW, series, ks]);
+  const dkey = `${ks.join(',')}|${plotW}`;
+  useEffect(() => {
+    if (!plotW) return;
+    if (reduce) {
+      prog.value = 1;
+      return;
+    }
+    prog.value = 0;
+    prog.value = withTiming(1, CH_DRAW);
+  }, [dkey, plotW, reduce, prog]);
+  const areaProps = useAnimatedProps(() => ({ opacity: interpolate(prog.value, [0.3, 1], [0, 1], Extrapolation.CLAMP) }));
+  const step = ks.length > 7 ? Math.ceil(ks.length / 6) : 1;
+
+  return (
+    <View style={styles.chartCard}>
+      <View
+        style={{ height: CH_H + CH_AXIS }}
+        onLayout={(e) => {
+          const nw = Math.round(e.nativeEvent.layout.width);
+          if (nw && nw !== w) setW(nw);
+        }}
+      >
+        {geo ? (
+          <Svg width={w} height={CH_H + CH_AXIS}>
+            <Defs>
+              <LinearGradient id="neonBlueArea" x1="0" y1="0" x2="0" y2="1">
+                <Stop offset="0" stopColor="#3ea8ff" stopOpacity="0.28" />
+                <Stop offset="1" stopColor="#3ea8ff" stopOpacity="0" />
+              </LinearGradient>
+            </Defs>
+            {geo.sc.grid.map((v) => (
+              <G key={v}>
+                <Line
+                  x1={CH_LABEL_W}
+                  x2={w}
+                  y1={geo.y(v)}
+                  y2={geo.y(v)}
+                  stroke="#ffffff"
+                  strokeOpacity={v === 0 ? 0.18 : 0.06}
+                  strokeWidth={1}
+                  strokeDasharray={v === 0 ? undefined : '3 5'}
+                />
+                <SvgText x={CH_LABEL_W - 6} y={geo.y(v) + 3.5} textAnchor="end" fill="rgba(235,235,245,0.38)" fontSize={10} fontWeight="600">
+                  {shortMoney(v)}
+                </SvgText>
+              </G>
+            ))}
+            <G transform={`translate(${CH_LABEL_W} 0)`}>
+              {geo.xs.map((x, i) =>
+                i % step === 0 || i === ks.length - 1 ? (
+                  <G key={ks[i]}>
+                    <Line x1={x} x2={x} y1={CH_PAD_Y} y2={CH_H - CH_PAD_Y} stroke="#ffffff" strokeOpacity={0.04} strokeWidth={1} />
+                    <SvgText x={x} y={CH_H + 14} textAnchor="middle" fill="rgba(235,235,245,0.45)" fontSize={10.5} fontWeight="600">
+                      {MONTHS[+ks[i].slice(5) - 1].slice(0, 3).toLowerCase()}
+                    </SvgText>
+                  </G>
+                ) : null
+              )}
+              {geo.area ? <AG animatedProps={areaProps}><SvgPath d={geo.area} fill="url(#neonBlueArea)" /></AG> : null}
+              {geo.lines.map((l) => (
+                <NeonLine key={`${l.key}-${dkey}`} d={l.d} len={l.len} color={l.color} prog={prog} />
+              ))}
+              {geo.lines.map((l) => (
+                <NeonArrow key={`a-${l.key}`} end={l.end} color={l.color} prog={prog} />
+              ))}
+            </G>
+          </Svg>
+        ) : null}
+      </View>
+      {geo ? (
+        <View style={styles.chartLegend}>
+          {geo.lines.map((l) => (
+            <View key={l.key} style={styles.chartLeg}>
+              <View style={[styles.chartDot, { backgroundColor: l.color, boxShadow: `0px 0px 8px ${l.color}` }]} />
+              <View style={{ flexShrink: 1 }}>
+                <Text style={styles.chartLegK} numberOfLines={1}>{l.label}</Text>
+                <Text style={[styles.chartLegV, { color: l.color }]} numberOfLines={1}>
+                  {l.trend > 0 ? '▲ ' : l.trend < 0 ? '▼ ' : ''}
+                  {shortMoney(l.last)}
+                </Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+});
+
 function AnalysisView({ state, accent }) {
   const [range, setRange] = useState(6);
   const M = useMemo(() => monthStats(state, (x) => displayStatus(x) === 'paid'), [state]);
@@ -1950,6 +2120,7 @@ function AnalysisView({ state, accent }) {
               <Stat k="Оплачено" v={money(ts)} />
             </View>
           </ItemCard>
+          <NeonChart M={M} ks={ks} />
           <Text style={styles.sectionLabel}>По месяцам</Text>
           <ItemCard style={styles.listCard}>
             {ks.map((k, i) => (
@@ -4410,11 +4581,8 @@ export default function App() {
     if (fn) fn();
   }, []);
 
-  const accent = useMemo(() => {
-    const h = state?.settings?.hue ?? 145;
-    const l = state?.settings?.light ?? 54;
-    return `hsl(${h}, 72%, ${l}%)`;
-  }, [state?.settings?.hue, state?.settings?.light]);
+  // «Кастомизация» убрана: акцент всегда стандартный зелёный (старые settings.hue/light и custom.bg в данных игнорируются)
+  const accent = ACCENT;
   const accentRef = useRef(accent);
   accentRef.current = accent;
 
@@ -4429,9 +4597,11 @@ export default function App() {
       date: e.date,
       amount: e.amount != null ? String(e.amount) : '',
       title: e.title || '',
-      // новый расход: «Одноразовый» по умолчанию; «Постоянный» — до даты until (по умолчанию через год)
-      rec: false,
-      until: id ? null : addDays(e.date, 365),
+      // новый расход: «Одноразовый» по умолчанию; «Постоянный» — до даты until (по умолчанию через год).
+      // существующий: текущий тип и «до» из правила — можно переключить (долгое нажатие / тап)
+      rec: id ? isRecurringExpense(st, e) : false,
+      wasRec: id ? isRecurringExpense(st, e) : false,
+      until: untilOfExpense(st, e, addDays(e.date, 365)),
     });
     setSheet('exp');
   }, []);
@@ -4927,8 +5097,16 @@ export default function App() {
     patch((prev) => {
       const expenses = [...prev.expenses];
       if (editId) {
+        const fields = { date, amount, title, untilDate: form.until };
+        // одноразовый → постоянный: правило «каждое это число до»; соседние зарплаты досеваем сразу
+        if (form.rec && !form.wasRec) {
+          const k = piRef.current ?? 0;
+          return seedPaydays(makeRecurring(prev, editId, fields, uid), PAYDAYS.slice(Math.max(0, k - 1), k + 2));
+        }
+        // постоянный → одноразовый: будущие неоплаченные убираются, правило снимается
+        if (!form.rec && form.wasRec) return makeOneTime(prev, editId, fields);
+        if (form.rec) return editRecurring(prev, editId, fields);
         const i = expenses.findIndex((x) => x.id === editId);
-        // старый тип («постоянный») при правке снимаем: отредактированный расход — уже не автодобавленный
         if (i >= 0) {
           const { type: _oldType, ...rest } = expenses[i];
           expenses[i] = { ...rest, date, amount, title, edited: true };
@@ -5011,17 +5189,6 @@ export default function App() {
     patch((prev) => withCarry(prev, p, v));
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
     setSheet(null);
-  };
-
-  const pickBg = async () => {
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 0.8,
-    });
-    if (!res.canceled && res.assets?.[0]?.uri) {
-      patch((p) => ({ ...p, custom: { ...p.custom, bg: res.assets[0].uri } }));
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(noop);
-    }
   };
 
   const paid = state.expenses.filter((e) => displayStatus(e) === 'paid');
@@ -5407,9 +5574,57 @@ export default function App() {
    * Сумму смены не меняет: недостача минусуется из итога зарплаты; излишек — только для сведения
    * (красный, в зарплату не идёт). Недостача < 500 — зелёная, ≥ 500 — красная.
    */
-  const adjField = (kb, { key = 'shortage', note, label, segs } = {}) => {
+  const adjField = (kb, { key = 'shortage', note, label, segs, pm } = {}) => {
     const plus = !!form.surplus;
     const v = form[key] || '';
+    const setPlus = (on) => {
+      Haptics.selectionAsync().catch(noop);
+      setForm((f) => ({ ...f, surplus: on }));
+    };
+    if (pm) {
+      // компактно: подпись = текущий выбор, справа от суммы −/+ (минус красный, плюс зелёный)
+      const tone = plus ? styles.good : styles.bad;
+      return (
+        <View style={styles.field}>
+          <Text style={[styles.label, v ? tone : null]}>{plus ? 'Излишек' : 'Недостача'}</Text>
+          <View style={styles.bigField}>
+            <Text style={[styles.adjSign, v ? tone : styles.amtDim]}>{plus ? '+' : '−'}</Text>
+            <TextInput
+              {...kb.props}
+              style={[styles.bigInput, { fontSize: 26 }, !!v && tone]}
+              keyboardType="number-pad"
+              value={v}
+              onChangeText={(t) => setForm((f) => ({ ...f, [key]: t.replace(/[^0-9]/g, '') }))}
+              placeholder="0"
+              placeholderTextColor="rgba(235,235,245,0.25)"
+            />
+            <View style={styles.pmRow}>
+              <Pressable
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel="Недостача"
+                accessibilityState={{ selected: !plus }}
+                style={[styles.pmBtn, !plus ? styles.pmMinusOn : null]}
+                onPress={() => setPlus(false)}
+              >
+                <Text style={[styles.pmTxt, { color: !plus ? '#fff' : '#ff453a' }]}>−</Text>
+              </Pressable>
+              <Pressable
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel="Излишек"
+                accessibilityState={{ selected: plus }}
+                style={[styles.pmBtn, plus ? styles.pmPlusOn : null]}
+                onPress={() => setPlus(true)}
+              >
+                <Text style={[styles.pmTxt, { color: plus ? '#0b2a14' : '#30d158' }]}>+</Text>
+              </Pressable>
+            </View>
+          </View>
+          {kb.bar}
+        </View>
+      );
+    }
     const tone = plus || shortTone(v) === 'bad' ? styles.bad : styles.good;
     return (
       <View style={styles.field}>
@@ -5426,10 +5641,7 @@ export default function App() {
                 accessibilityRole="button"
                 accessibilityState={{ selected: plus === on }}
                 style={[styles.adjBtn, plus === on && styles.adjBtnMinus]}
-                onPress={() => {
-                  Haptics.selectionAsync().catch(noop);
-                  setForm((f) => ({ ...f, surplus: on }));
-                }}
+                onPress={() => setPlus(on)}
               >
                 <Text style={[styles.adjBtnTxt, plus === on && styles.bad]}>{lab}</Text>
               </Pressable>
@@ -5790,7 +6002,6 @@ export default function App() {
           body: (
             <>
               <View style={styles.field}>
-                <Text style={styles.label}>Сумма</Text>
                 <View style={styles.bigField}>
                   <TextInput
                     {...kAmt.props}
@@ -5812,7 +6023,6 @@ export default function App() {
                 {kAmt.bar}
               </View>
               <View style={styles.field}>
-                <Text style={styles.label}>За что</Text>
                 <TextInput
                   {...kTitle.props}
                   style={styles.input}
@@ -5823,16 +6033,14 @@ export default function App() {
                 />
                 {kTitle.bar}
               </View>
-              {!editId && (
-                <View style={styles.segBlock}>
-                  <SegmentCapsule
-                    value={form.rec ? 0 : 1}
-                    labels={['Постоянный', 'Одноразовый']}
-                    height={50}
-                    onChange={(i) => setForm((f) => ({ ...f, rec: i === 0 }))}
-                  />
-                </View>
-              )}
+              <View style={styles.segBlock}>
+                <SegmentCapsule
+                  value={form.rec ? 0 : 1}
+                  labels={['Постоянный', 'Одноразовый']}
+                  height={50}
+                  onChange={(i) => setForm((f) => ({ ...f, rec: i === 0, until: f.until || addDays(f.date, 365) }))}
+                />
+              </View>
               <DateWheel
                 value={form.date}
                 accent={accent}
@@ -5840,7 +6048,7 @@ export default function App() {
                   setForm((f) => ({ ...f, date: d, until: f.until && f.until < d ? d : f.until }))
                 }
               />
-              {!editId && form.rec ? (
+              {form.rec ? (
                 <DateWheel
                   label="До"
                   value={form.until}
@@ -5902,7 +6110,7 @@ export default function App() {
                     </Text>
                   </View>
                 </ItemCard>
-                {adjField(kShort)}
+                {adjField(kShort, { pm: true })}
 
                 <ScaleButton
                   style={[styles.actBtn, { backgroundColor: accent }]}
@@ -5925,11 +6133,14 @@ export default function App() {
             ),
           };
         }
-        const SK = ['amount', 'title', 'shortage', 'place'];
+        // поля в цепочке «Далее ›» — только видимые: свой тип и филиал — когда раскрыты
+        const typeOpen = !!form.typeOpen;
+        const placeOpen = !!form.placeOpen || !!form.place;
+        const SK = ['amount', ...(typeOpen ? ['title'] : []), 'shortage', ...(placeOpen ? ['place'] : [])];
         const kAmt = fieldKb('amount', SK, 'Сумма');
         const kTitle = fieldKb('title', SK, 'Тип смены');
         const kShort = fieldKb('shortage', SK, form.surplus ? 'Излишек' : 'Недостача');
-        const kPlace = fieldKb('place', SK, 'Место');
+        const kPlace = fieldKb('place', SK, 'Павильон');
         return {
           title: editId ? 'Смена' : 'Новая смена',
           onClose: closeSheet,
@@ -5941,7 +6152,6 @@ export default function App() {
           body: (
             <>
               <View style={styles.field}>
-                <Text style={styles.label}>Сумма за смену</Text>
                 <View style={styles.bigField}>
                   <TextInput
                     {...kAmt.props}
@@ -5968,44 +6178,75 @@ export default function App() {
               </View>
               <DateWheel value={form.date} accent={accent} onChange={(d) => setForm((f) => ({ ...f, date: d }))} />
               <View style={styles.field}>
-                <Text style={styles.label}>Тип смены</Text>
-                <TextInput
-                  {...kTitle.props}
-                  style={styles.input}
-                  value={form.title}
-                  onChangeText={(t) => setForm((f) => ({ ...f, title: t }))}
-                  placeholder="ночь касса"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
-                {kTitle.bar}
-                <View style={styles.chipWrap}>
-                  {CALC_TITLES.map((t) => (
-                    <ScaleButton
-                      key={t}
-                      style={[styles.chip, form.title === t && styles.chipOn]}
-                      onPress={() => {
-                        Haptics.selectionAsync().catch(noop);
-                        setForm((f) => ({ ...f, title: t }));
-                      }}
-                    >
-                      <Text style={[styles.chipTxt, form.title === t && styles.chipTxtOn]}>{t}</Text>
-                    </ScaleButton>
-                  ))}
+                {/* тип смены — одна строка; варианты под ней только по нажатию */}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: typeOpen }}
+                  style={({ pressed }) => [styles.optRow, pressed && styles.rowPressed]}
+                  onPress={() => {
+                    Haptics.selectionAsync().catch(noop);
+                    setForm((f) => ({ ...f, typeOpen: !f.typeOpen }));
+                  }}
+                >
+                  <Text style={styles.optK}>Тип смены</Text>
+                  <Text style={styles.optV} numberOfLines={1}>
+                    {form.title || 'ночь касса'}
+                  </Text>
+                  <View style={{ transform: [{ rotate: typeOpen ? '90deg' : '0deg' }] }}>
+                    <GlyphChev />
+                  </View>
+                </Pressable>
+                {typeOpen ? (
+                  <Animated.View entering={FadeIn.duration(160)}>
+                    <View style={styles.chipWrap}>
+                      {CALC_TITLES.map((t) => (
+                        <ScaleButton
+                          key={t}
+                          style={[styles.chip, form.title === t && styles.chipOn]}
+                          onPress={() => {
+                            Haptics.selectionAsync().catch(noop);
+                            setForm((f) => ({ ...f, title: t, typeOpen: false }));
+                          }}
+                        >
+                          <Text style={[styles.chipTxt, form.title === t && styles.chipTxtOn]}>{t}</Text>
+                        </ScaleButton>
+                      ))}
+                    </View>
+                    <TextInput
+                      {...kTitle.props}
+                      style={[styles.input, { marginTop: 10 }]}
+                      value={form.title}
+                      onChangeText={(t) => setForm((f) => ({ ...f, title: t }))}
+                      placeholder="Свой тип"
+                      placeholderTextColor="rgba(235,235,245,0.3)"
+                    />
+                    {kTitle.bar}
+                  </Animated.View>
+                ) : null}
+              </View>
+              {adjField(kShort, { pm: true })}
+              {placeOpen ? (
+                <View style={styles.field}>
+                  <TextInput
+                    {...kPlace.props}
+                    style={styles.input}
+                    value={form.place || ''}
+                    onChangeText={(t) => setForm((f) => ({ ...f, place: t }))}
+                    placeholder="Павильон / филиал, напр. Аламедин"
+                    placeholderTextColor="rgba(235,235,245,0.3)"
+                    autoFocus={!!form.placeOpen && !form.place}
+                  />
+                  {kPlace.bar}
                 </View>
-              </View>
-              {adjField(kShort)}
-              <View style={styles.field}>
-                <Text style={styles.label}>Место (необязательно)</Text>
-                <TextInput
-                  {...kPlace.props}
-                  style={styles.input}
-                  value={form.place || ''}
-                  onChangeText={(t) => setForm((f) => ({ ...f, place: t }))}
-                  placeholder="напр. Аламедин"
-                  placeholderTextColor="rgba(235,235,245,0.3)"
-                />
-                {kPlace.bar}
-              </View>
+              ) : (
+                <ScaleButton
+                  style={styles.actBtn}
+                  onPress={() => setForm((f) => ({ ...f, placeOpen: true }))}
+                  accessibilityLabel="Другой павильон"
+                >
+                  <Text style={[styles.actBtnTxt, { color: accent }]}>Другой павильон</Text>
+                </ScaleButton>
+              )}
               {editId && (
                 <ScaleButton
                   style={[styles.actBtn, styles.dangerBtn]}
@@ -6026,7 +6267,6 @@ export default function App() {
         const autoN = autoAddedRecurring(state).length;
         const nav = [
           { key: 'backup', icon: 'copy', title: 'Перенос данных', sub: 'скопировать или вставить все данные' },
-          { key: 'custom', icon: 'drop', title: 'Кастомизация', sub: 'фото фона, цвет акцента' },
           { key: 'analysis', icon: 'chart', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
           { key: 'stats', icon: 'pie', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
           {
@@ -6119,85 +6359,6 @@ export default function App() {
                   <Text style={styles.actBtnTxt}>Вернуть как было до вставки</Text>
                 </ScaleButton>
               )}
-            </>
-          ),
-        };
-      }
-
-      case 'custom': {
-        const light = state.settings.light ?? 54;
-        const LIGHTS = [36, 44, 54, 62, 70];
-        const li = LIGHTS.indexOf(light);
-        return {
-          title: 'Кастомизация',
-          onClose: toSettings,
-          body: (
-            <>
-              <Text style={styles.sectionLabel}>Фон</Text>
-              <View style={styles.calcBtns}>
-                <ScaleButton style={[styles.actBtn, { flex: 1 }]} onPress={pickBg}>
-                  <Text style={styles.actBtnTxt}>{state.custom?.bg ? 'Сменить фото' : 'Фото из галереи'}</Text>
-                </ScaleButton>
-                {!!state.custom?.bg && (
-                  <ScaleButton
-                    style={[styles.actBtn, styles.dangerBtn, { flex: 1, marginTop: 0 }]}
-                    onPress={() => {
-                      patch((p) => ({ ...p, custom: { ...p.custom, bg: null } }));
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
-                    }}
-                  >
-                    <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать</Text>
-                  </ScaleButton>
-                )}
-              </View>
-
-              <Text style={[styles.sectionLabel, { marginTop: 10 }]}>Цвет акцента</Text>
-              <ItemCard style={[styles.listCard, styles.padCard]}>
-                <View style={styles.colorRow}>
-                  {ACCENT_PRESETS.map((c) => {
-                    const active = state.settings.hue === c.h;
-                    return (
-                      <ScaleButton
-                        key={c.h}
-                        style={[styles.colorDot, active && styles.colorDotOn]}
-                        onPress={() => {
-                          patch((p) => ({ ...p, settings: { ...p.settings, hue: c.h } }));
-                          Haptics.selectionAsync().catch(noop);
-                        }}
-                      >
-                        <View style={[styles.colorFill, { backgroundColor: `hsl(${c.h},72%,${light}%)` }]} />
-                      </ScaleButton>
-                    );
-                  })}
-                </View>
-                <Text style={styles.lSub}>Любой оттенок</Text>
-                <View style={styles.hueTrack}>
-                  {[0, 30, 60, 120, 180, 210, 260, 300, 330].map((h) => (
-                    <Pressable
-                      key={h}
-                      hitSlop={{ top: 8, bottom: 8 }}
-                      onPress={() => {
-                        patch((p) => ({ ...p, settings: { ...p.settings, hue: h } }));
-                        Haptics.selectionAsync().catch(noop);
-                      }}
-                      style={[styles.hueSeg, { backgroundColor: `hsl(${h},70%,50%)` }, state.settings.hue === h && styles.hueSegOn]}
-                    />
-                  ))}
-                </View>
-              </ItemCard>
-
-              <Text style={[styles.sectionLabel, { marginTop: 4 }]}>Яркость · {light}%</Text>
-              <SegmentCapsule
-                value={li < 0 ? 2 : li}
-                labels={LIGHTS.map(String)}
-                height={48}
-                onChange={(i) => patch((p) => ({ ...p, settings: { ...p.settings, light: LIGHTS[i] } }))}
-              />
-              <View style={[styles.previewRow]}>
-                <View style={[styles.previewBtn, { backgroundColor: accent }]}>
-                  <Text style={[styles.actBtnTxt, styles.onAccent]}>Так выглядит кнопка</Text>
-                </View>
-              </View>
             </>
           ),
         };
@@ -6656,18 +6817,9 @@ export default function App() {
   const content = (
     <View style={styles.root} ref={SNAP_ROOT} collapsable={false} onTouchEnd={() => SNAP_BUS.kick && SNAP_BUS.kick()}>
       <StatusBar style="light" />
-      {state.custom?.bg ? (
-        <View style={StyleSheet.absoluteFill} pointerEvents="none">
-          <Image source={{ uri: state.custom.bg }} style={StyleSheet.absoluteFill} resizeMode="cover" blurRadius={4} />
-          <View style={styles.bgScrim} />
-        </View>
-      ) : (
-        <>
-          <View style={[styles.blob, styles.blobA, { backgroundColor: accent }]} />
-          <View style={[styles.blob, styles.blobB]} />
-          <View style={styles.bgScrim} />
-        </>
-      )}
+      <View style={[styles.blob, styles.blobA, { backgroundColor: accent }]} />
+      <View style={[styles.blob, styles.blobB]} />
+      <View style={styles.bgScrim} />
 
       <View style={styles.header}>
         {page !== 2 ? (
@@ -7076,6 +7228,29 @@ const styles = StyleSheet.create({
   adjBtnPlus: { backgroundColor: 'rgba(48,209,88,0.18)' },
   adjBtnTxt: { color: 'rgba(235,235,245,0.6)', fontSize: 12, fontWeight: '700' },
   adjSign: { fontSize: 26, fontWeight: '700', marginRight: 4 },
+  pmRow: { flexDirection: 'row', gap: 8, marginLeft: 8 },
+  pmBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(118,118,128,0.22)',
+  },
+  pmMinusOn: { backgroundColor: '#ff453a' },
+  pmPlusOn: { backgroundColor: '#30d158' },
+  pmTxt: { fontSize: 26, fontWeight: '700', lineHeight: 30 },
+  optRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minHeight: 52,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  optK: { color: 'rgba(235,235,245,0.6)', fontSize: 16 },
+  optV: { flex: 1, textAlign: 'right', color: '#fff', fontSize: 16, fontWeight: '600' },
   quickOpen: { marginBottom: 4 },
   gapNote: { color: 'rgba(235,235,245,0.55)', fontSize: 13, lineHeight: 17, marginTop: -2, marginBottom: 6 },
   qeProgress: { height: 3, borderRadius: 2, marginHorizontal: 4, marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
@@ -7374,7 +7549,13 @@ const styles = StyleSheet.create({
   },
   sheetDim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.62)',
+  },
+  // плотный тёмный слой шторки: стекло остаётся только по краю, фон почти не просвечивает
+  sheetSolid: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 28,
+    backgroundColor: 'rgba(16,16,20,0.9)',
   },
   sheet: {
     borderRadius: 28,
@@ -7567,6 +7748,21 @@ const styles = StyleSheet.create({
   colorFill: { flex: 1, borderRadius: 20 },
   hueSegOn: { borderWidth: 2, borderColor: '#fff' },
   padCard: { padding: 16 },
+  // неоновый график: прозрачная карточка — только тонкая кромка, без заливки
+  chartCard: {
+    borderRadius: 22,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+    paddingTop: 10,
+    paddingBottom: 12,
+    paddingRight: 10,
+    marginBottom: 14,
+  },
+  chartLegend: { flexDirection: 'row', justifyContent: 'space-between', paddingLeft: 14, paddingRight: 4, marginTop: 6, gap: 8 },
+  chartLeg: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
+  chartDot: { width: 9, height: 9, borderRadius: 5 },
+  chartLegK: { color: 'rgba(235,235,245,0.55)', fontSize: 12, fontWeight: '600' },
+  chartLegV: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'] },
   rowPressed: { backgroundColor: 'rgba(255,255,255,0.06)' },
   previewRow: { marginTop: 16, marginBottom: 6 },
   previewBtn: { height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center' },

@@ -154,3 +154,78 @@ export function removeSeries(app, id) {
     undo: { kind: 'series', items: indexes.map((i) => ({ item: app.expenses[i], index: i })), rules: dropRules },
   };
 }
+
+/** Расход «постоянный»: есть активное правило по rid или старый type 'recurring'. */
+export function isRecurringExpense(app, e) {
+  if (!e) return false;
+  const r = ruleOfExpense(app, e);
+  return (!!r && isActiveRule(r)) || e.type === 'recurring';
+}
+
+/** Дата «до» для шторки расхода: из правила, иначе через год от даты (как у нового постоянного). */
+export function untilOfExpense(app, e, fallback) {
+  const r = ruleOfExpense(app, e);
+  return r && isActiveRule(r) ? r.untilDate : fallback;
+}
+
+/**
+ * Сделать существующий расход постоянным (долгое нажатие → «Постоянный»): этот расход остаётся
+ * (с новыми суммой/датой/названием) и становится первым в серии; правило «каждое это число до untilDate»
+ * добавит следующие месяцы при досеве. Возвращает новое состояние.
+ */
+export function makeRecurring(app, id, { date, amount, title, untilDate }, makeId) {
+  const i = (app.expenses || []).findIndex((x) => x.id === id);
+  if (i < 0) return app;
+  const day = Number(date.slice(8, 10));
+  const until = untilDate && untilDate >= date ? untilDate : date;
+  const rule = {
+    id: makeId(),
+    title,
+    amount,
+    day,
+    dayOfMonth: day,
+    startDate: date,
+    untilDate: until,
+    months: [date.slice(0, 7)],
+  };
+  const { edited: _e, ...rest } = app.expenses[i];
+  const expenses = [...app.expenses];
+  expenses[i] = { ...rest, date, amount, title, type: 'recurring', rid: rule.id };
+  // старое правило этого расхода (если было, но неактивное) заменяем
+  const rules = rulesOf(app).filter((r) => r.id !== rest.rid);
+  return { ...app, expenses, recurring: [...rules, rule] };
+}
+
+/**
+ * Сделать постоянный расход одноразовым: этот остаётся (с новыми полями), будущие неоплаченные
+ * такие же удаляются, правило снимается — новые не появятся. Прошлые и оплаченные остаются.
+ */
+export function makeOneTime(app, id, { date, amount, title }) {
+  const e = (app.expenses || []).find((x) => x.id === id);
+  if (!e) return app;
+  const drop = new Set(seriesToRemove(app, id).map((x) => x.id));
+  drop.delete(id);
+  const dropRules = new Set(rulesFor(app, e).map((r) => r.id));
+  const expenses = app.expenses
+    .filter((x) => !drop.has(x.id))
+    .map((x) => {
+      if (x.id !== id) return x;
+      const { type: _t, rid: _r, ...rest } = x;
+      return { ...rest, date, amount, title, edited: true };
+    });
+  const next = { ...app, expenses };
+  if (dropRules.size) next.recurring = rulesOf(app).filter((r) => !dropRules.has(r.id));
+  return next;
+}
+
+/** Постоянный остаётся постоянным: правим этот расход и дату «до» правила. */
+export function editRecurring(app, id, { date, amount, title, untilDate }) {
+  const e = (app.expenses || []).find((x) => x.id === id);
+  if (!e) return app;
+  const expenses = app.expenses.map((x) => (x.id === id ? { ...x, date, amount, title, edited: true } : x));
+  const next = { ...app, expenses };
+  if (e.rid && untilDate) {
+    next.recurring = rulesOf(app).map((r) => (r.id === e.rid ? { ...r, untilDate: untilDate >= (r.startDate || date) ? untilDate : r.startDate || date } : r));
+  }
+  return next;
+}
