@@ -105,6 +105,7 @@ import { dueLabel, filterCounts, filterExpenses, filterShifts } from '../lib/lis
 import { paydayIndexFor, searchItems } from '../lib/search';
 import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from '../lib/payExport';
 import { printerGeom } from '../lib/printerGeom';
+import { DOW_ORDER, editTemplateDay, templatesOf, toggleTemplateDay } from '../lib/modeTemplates';
 import { File, Paths } from 'expo-file-system';
 import Svg, { Circle, Defs, G, Line, LinearGradient, Path as SvgPath, Stop, Text as SvgText } from 'react-native-svg';
 import { areaPath, chartPoints, chartScale, chartSeries, shortMoney, smoothPath, trendOf } from '../lib/chart';
@@ -133,6 +134,7 @@ import {
   paydaysInMonth,
   defaultState,
   seedMonth,
+  applyMode,
   seedPaydays,
   seedShiftPaydays,
   paydayForDate,
@@ -541,8 +543,7 @@ function SheetHost({ active, render, onClosed }) {
           {cfg && (
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
               <Animated.View style={drag}>
-                <Glass style={styles.sheet} intensity={48} depth="sheet">
-                  <View pointerEvents="none" style={styles.sheetSolid} />
+                <View style={styles.sheet}>
                   <GestureDetector gesture={pan}>
                     <View collapsable={false}>
                       <View style={styles.handle} />
@@ -573,7 +574,7 @@ function SheetHost({ active, render, onClosed }) {
                   >
                     {cfg.body}
                   </ScrollView>
-                </Glass>
+                </View>
               </Animated.View>
             </KeyboardAvoidingView>
           )}
@@ -1144,8 +1145,12 @@ const CARD_EXIT = () => {
  * поэтому: тап по карточке — изменить (там же «Удалить расход»), кнопка — статус.
  */
 /** Нажатие на строку: подсветка — ровным слоем на ВСЮ карточку (по её скруглению), а не на часть строки. */
+const ROW_HI_IN = { duration: 120, easing: Easing.out(Easing.quad) };
+const ROW_HI_OUT = { duration: 260, easing: Easing.out(Easing.cubic) };
 function useRowPress(id, onEdit) {
-  const [down, setDown] = useState(false);
+  // подсветка нажатия — shared value на UI-потоке (раньше setState перерисовывал карточку со стеклом → рывок)
+  const hiOp = useSharedValue(0);
+  const hiStyle = useAnimatedStyle(() => ({ opacity: hiOp.value }));
   const edit = useCallback(() => onEdit(id), [id, onEdit]);
   const props = {
     onPress: edit,
@@ -1154,10 +1159,14 @@ function useRowPress(id, onEdit) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(noop);
       edit();
     },
-    onPressIn: () => setDown(true),
-    onPressOut: () => setDown(false),
+    onPressIn: () => {
+      hiOp.value = withTiming(1, ROW_HI_IN);
+    },
+    onPressOut: () => {
+      hiOp.value = withTiming(0, ROW_HI_OUT);
+    },
   };
-  const hi = <View pointerEvents="none" style={[styles.rowHi, down && styles.rowHiOn]} />;
+  const hi = <Animated.View pointerEvents="none" style={[styles.rowHi, hiStyle]} />;
   return { props, hi };
 }
 
@@ -1356,8 +1365,9 @@ function EmptyState({ icon, title, text, action, onAction, accent = '#30d158' })
  * не сжимались, когда палец просто начинает скролл.
  */
 // мягкое «вдавливание» панели и пружинистый возврат
-const PRESS_IN = { duration: 110, easing: Easing.out(Easing.quad) };
-const PRESS_OUT = { damping: 18, stiffness: 260, mass: 0.7 };
+// плавно: вдавливание 170 мс ease-out, возврат — пружина почти без перелёта (без «дрожи»)
+const PRESS_IN = { duration: 170, easing: Easing.out(Easing.cubic) };
+const PRESS_OUT = { damping: 28, stiffness: 320, mass: 1, overshootClamping: false };
 function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) {
   const scale = useSharedValue(1);
   const anim = useAnimatedStyle(() => ({
@@ -1367,7 +1377,7 @@ function ScaleButton({ onPress, style, children, hitSlop, accessibilityLabel }) 
     <APressable
       unstable_pressDelay={70}
       onPressIn={() => {
-        scale.value = withTiming(0.965, PRESS_IN);
+        scale.value = withTiming(0.97, PRESS_IN);
       }}
       onPressOut={() => {
         scale.value = withSpring(1, PRESS_OUT);
@@ -3780,8 +3790,8 @@ function ExportPrinterHost({ apiRef, accent, children, onDownload, onClosed }) {
           >
             <Text style={[styles.actBtnTxt, styles.onAccent]}>Скачать</Text>
           </ScaleButton>
-          <ScaleButton style={[styles.actBtn, { marginTop: ACT_GAP, marginBottom: 0 }]} onPress={() => close()}>
-            <Text style={styles.actBtnTxt}>Отмена</Text>
+          <ScaleButton style={[styles.actBtn, styles.dangerBtn, { marginTop: ACT_GAP, marginBottom: 0 }]} onPress={() => close()}>
+            <Text style={[styles.actBtnTxt, styles.solidTxt]}>Отмена</Text>
           </ScaleButton>
         </Animated.View>
       </Animated.View>
@@ -4007,6 +4017,12 @@ function newExpenseDate(k) {
 function adjFromForm(f, key = 'shortage') {
   const n = Number(f?.[key]) || 0;
   return f?.surplus ? -n : n;
+}
+/** Правленая вручную смена больше не «автосмена режима» — режим её не трогает. */
+function dropAuto(s) {
+  if (!s || !('auto' in s || 'autoAmount' in s)) return s;
+  const { auto: _a, autoAmount: _b, ...rest } = s;
+  return rest;
 }
 /** Место смены (пусто — поле убирается). */
 function withPlace(s, v) {
@@ -5136,7 +5152,7 @@ export default function App() {
           shifts[i] = withPlace(
             withShortage(
               {
-                ...shifts[i],
+                ...dropAuto(shifts[i]),
                 date,
                 amount,
                 title: title || 'ночь касса',
@@ -5249,6 +5265,30 @@ export default function App() {
   };
 
   const toSettings = () => setSheet('settings');
+  /** С какой даты режим меняет автосмены: начало периода смен, в который попадает сегодня. */
+  const modeFrom = () => workPeriod(paydayOnOrBefore(addDays(todayIso(), 20))).start;
+  /**
+   * «Учёба / Работа»: раньше переключение только ДОСЕВАЛО смены (и только в стартовом месяце),
+   * поэтому при возврате на «Учёбу» лишние будни оставались. Теперь нетронутые автосмены
+   * с начала текущего периода приводятся к шаблону режима; правленые не трогаются.
+   */
+  const switchMode = (mode) => {
+    Haptics.selectionAsync().catch(noop);
+    patch((p) => applyMode(p, mode, modeFrom()));
+  };
+  const openTemplates = () => {
+    Haptics.selectionAsync().catch(noop);
+    setForm({ tplMode: state.settings.mode === 'work' ? 'work' : 'study', tplDay: null });
+    setSheet('tpl');
+  };
+  /** Правка шаблона; если это шаблон текущего режима — сразу применяем к нетронутым автосменам. */
+  const patchTemplate = (fn) => {
+    patch((p) => {
+      const next = fn(p);
+      const cur = p.settings.mode === 'work' ? 'work' : 'study';
+      return form.tplMode === cur ? applyMode(next, cur, modeFrom()) : next;
+    });
+  };
   const closeSheet = () => setSheet(null);
 
   // ── «+»: на «Расходах» — меню у кнопки, на других вкладках — прежняя шторка
@@ -6057,6 +6097,9 @@ export default function App() {
                   onChange={(d) => setForm((f) => ({ ...f, until: d < f.date ? f.date : d }))}
                 />
               ) : null}
+              <ScaleButton style={[styles.actBtn, styles.okBtn]} onPress={saveExpense} accessibilityLabel="Сохранить расход">
+                <Text style={[styles.actBtnTxt, styles.solidTxt]}>Сохранить</Text>
+              </ScaleButton>
               {editId && (
                 <ScaleButton
                   style={[styles.actBtn, styles.dangerBtn]}
@@ -6065,7 +6108,7 @@ export default function App() {
                     closeThen(() => confirmDeleteExpense(id));
                   }}
                 >
-                  <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Удалить расход</Text>
+                  <Text style={[styles.actBtnTxt, styles.solidTxt]}>Удалить расход</Text>
                 </ScaleButton>
               )}
             </>
@@ -6135,7 +6178,7 @@ export default function App() {
         }
         // поля в цепочке «Далее ›» — только видимые: свой тип и филиал — когда раскрыты
         const typeOpen = !!form.typeOpen;
-        const placeOpen = !!form.placeOpen || !!form.place;
+        const placeOpen = form.placeOpen != null ? !!form.placeOpen : !!form.place;
         const SK = ['amount', ...(typeOpen ? ['title'] : []), 'shortage', ...(placeOpen ? ['place'] : [])];
         const kAmt = fieldKb('amount', SK, 'Сумма');
         const kTitle = fieldKb('title', SK, 'Тип смены');
@@ -6225,8 +6268,22 @@ export default function App() {
                 ) : null}
               </View>
               {adjField(kShort, { pm: true })}
+              {/* «Другой павильон» — переключатель: второй тап прячет поле и стирает павильон */}
+              <ScaleButton
+                style={[styles.actBtn, styles.okBtn]}
+                onPress={() =>
+                  setForm((f) => {
+                    const open = f.placeOpen != null ? !!f.placeOpen : !!f.place;
+                    return open ? { ...f, placeOpen: false, place: '' } : { ...f, placeOpen: true };
+                  })
+                }
+                accessibilityLabel="Другой павильон"
+                accessibilityState={{ expanded: placeOpen }}
+              >
+                <Text style={[styles.actBtnTxt, styles.solidTxt]}>{placeOpen ? 'Другой павильон  ✕' : 'Другой павильон'}</Text>
+              </ScaleButton>
               {placeOpen ? (
-                <View style={styles.field}>
+                <Animated.View style={styles.field} entering={FadeIn.duration(200)} exiting={FadeOut.duration(150)}>
                   <TextInput
                     {...kPlace.props}
                     style={styles.input}
@@ -6237,16 +6294,8 @@ export default function App() {
                     autoFocus={!!form.placeOpen && !form.place}
                   />
                   {kPlace.bar}
-                </View>
-              ) : (
-                <ScaleButton
-                  style={styles.actBtn}
-                  onPress={() => setForm((f) => ({ ...f, placeOpen: true }))}
-                  accessibilityLabel="Другой павильон"
-                >
-                  <Text style={[styles.actBtnTxt, { color: accent }]}>Другой павильон</Text>
-                </ScaleButton>
-              )}
+                </Animated.View>
+              ) : null}
               {editId && (
                 <ScaleButton
                   style={[styles.actBtn, styles.dangerBtn]}
@@ -6255,9 +6304,106 @@ export default function App() {
                     closeThen(() => confirmDeleteShift(id));
                   }}
                 >
-                  <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Убрать этот день</Text>
+                  <Text style={[styles.actBtnTxt, styles.solidTxt]}>Убрать этот день</Text>
                 </ScaleButton>
               )}
+            </>
+          ),
+        };
+      }
+
+      case 'tpl': {
+        const tm = form.tplMode === 'work' ? 'work' : 'study';
+        const list = templatesOf(state)[tm];
+        const DOWN = { 1: 'Понедельник', 2: 'Вторник', 3: 'Среда', 4: 'Четверг', 5: 'Пятница', 6: 'Суббота', 0: 'Воскресенье' };
+        return {
+          title: 'Шаблон режима',
+          onClose: toSettings,
+          body: (
+            <>
+              <View style={styles.segBlock}>
+                <SegmentCapsule
+                  value={tm === 'work' ? 1 : 0}
+                  labels={['Учёба', 'Работа']}
+                  height={46}
+                  onChange={(i) => setForm((f) => ({ ...f, tplMode: i === 1 ? 'work' : 'study', tplDay: null }))}
+                />
+              </View>
+              <ItemCard style={styles.listCard}>
+                {DOW_ORDER.map((d, i) => {
+                  const e = list.find((x) => x.dow === d);
+                  const open = form.tplDay === d && !!e;
+                  return (
+                    <View key={d} style={i < 6 && styles.lRowSep}>
+                      <Pressable
+                        style={({ pressed }) => [styles.lRow, pressed && styles.rowPressed]}
+                        onPress={() => {
+                          Haptics.selectionAsync().catch(noop);
+                          if (!e) patchTemplate((p) => toggleTemplateDay(p, tm, d));
+                          setForm((f) => ({ ...f, tplDay: f.tplDay === d && e ? null : d }));
+                        }}
+                        accessibilityRole="button"
+                        accessibilityState={{ checked: !!e, expanded: open }}
+                      >
+                        <Pressable
+                          hitSlop={10}
+                          onPress={() => {
+                            Haptics.selectionAsync().catch(noop);
+                            patchTemplate((p) => toggleTemplateDay(p, tm, d));
+                            setForm((f) => ({ ...f, tplDay: e ? null : d }));
+                          }}
+                          style={[styles.tplCheck, e && { backgroundColor: '#30d158', borderColor: '#30d158' }]}
+                          accessibilityLabel={e ? `Выключить: ${DOWN[d]}` : `Включить: ${DOWN[d]}`}
+                        >
+                          {e ? <Text style={styles.tplCheckTxt}>✓</Text> : null}
+                        </Pressable>
+                        <Text style={[styles.lTitle, { flex: 1 }, !e && { color: 'rgba(235,235,245,0.4)' }]}>{DOWN[d]}</Text>
+                        {e ? (
+                          <Text style={styles.lVal} numberOfLines={1}>
+                            {e.title}
+                            {e.amount ? ` · ${money(e.amount)}` : ''}
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                      {open ? (
+                        <Animated.View entering={FadeIn.duration(180)} style={{ paddingHorizontal: 14, paddingBottom: 12 }}>
+                          <View style={[styles.chipWrap, { marginTop: 0 }]}>
+                            {CALC_TITLES.map((t) => (
+                              <ScaleButton
+                                key={t}
+                                style={[styles.chip, e.title === t && styles.chipOn]}
+                                onPress={() => patchTemplate((p) => editTemplateDay(p, tm, d, { title: t }))}
+                              >
+                                <Text style={[styles.chipTxt, e.title === t && styles.chipTxtOn]}>{t}</Text>
+                              </ScaleButton>
+                            ))}
+                          </View>
+                          <View style={[styles.bigField, { minHeight: 56, marginTop: 10 }]}>
+                            <TextInput
+                              style={[styles.bigInput, { fontSize: 22 }]}
+                              keyboardType="number-pad"
+                              keyboardAppearance="dark"
+                              inputAccessoryViewID={KB_NONE}
+                              value={e.amount ? String(e.amount) : ''}
+                              onChangeText={(t) => {
+                                const v = t.replace(/[^0-9]/g, '');
+                                patchTemplate((p) => editTemplateDay(p, tm, d, { amount: v ? Number(v) : null }));
+                              }}
+                              maxLength={9}
+                              placeholder="сумма — пусто"
+                              placeholderTextColor="rgba(235,235,245,0.25)"
+                            />
+                            <Text style={styles.bigUnit}>сом</Text>
+                          </View>
+                        </Animated.View>
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </ItemCard>
+              <Text style={styles.fieldNote}>
+                Эти смены режим добавляет сам с текущего периода. Смены с суммой, недостачей или правленые вручную не меняются.
+              </Text>
             </>
           ),
         };
@@ -6287,20 +6433,12 @@ export default function App() {
                   value={state.settings.mode === 'work' ? 1 : 0}
                   labels={['Учёба', 'Работа']}
                   height={50}
-                  onChange={(i) =>
-                    patch((p) =>
-                      seedMonth(
-                        {
-                          ...p,
-                          settings: { ...p.settings, mode: i === 1 ? 'work' : 'study' },
-                        },
-                        viewY,
-                        viewM
-                      )
-                    )
-                  }
+                  onChange={(i) => switchMode(i === 1 ? 'work' : 'study')}
                 />
               </View>
+              <ScaleButton style={[styles.actBtn, { marginTop: -6 }]} onPress={openTemplates} accessibilityLabel="Изменить шаблон режимов">
+                <Text style={[styles.actBtnTxt, { color: accent }]}>Изменить шаблон</Text>
+              </ScaleButton>
               <ItemCard style={styles.listCard}>
                 {nav.map((n, i) => (
                   <Pressable
@@ -6421,7 +6559,7 @@ export default function App() {
                   );
                 }}
               >
-                <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>
+                <Text style={[styles.actBtnTxt, styles.solidTxt]}>
                   {list.length ? `Удалить ${list.length}` : 'Нечего удалять'}
                 </Text>
               </ScaleButton>
@@ -7551,13 +7689,13 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.62)',
   },
-  // плотный тёмный слой шторки: стекло остаётся только по краю, фон почти не просвечивает
-  sheetSolid: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: 28,
-    backgroundColor: 'rgba(16,16,20,0.9)',
-  },
+  // шторка — сплошная системная тёмно-серая (iOS secondarySystemBackground), без стекла: фон не просвечивает
   sheet: {
+    backgroundColor: '#1C1C1E',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.1)',
+    boxShadow: '0px 18px 48px rgba(0,0,0,0.6), 0px 3px 10px rgba(0,0,0,0.32)',
+    overflow: 'hidden',
     borderRadius: 28,
     marginHorizontal: 8,
     marginBottom: 16,
@@ -7623,7 +7761,20 @@ const styles = StyleSheet.create({
   bigUnit: { color: 'rgba(235,235,245,0.4)', fontSize: 17, fontWeight: '600' },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
   onAccent: { color: '#102012' },
-  dangerBtn: { backgroundColor: 'rgba(255,69,58,0.1)', borderColor: 'rgba(255,69,58,0.25)', marginTop: 4 },
+  dangerBtn: { backgroundColor: '#ff453a', borderColor: '#ff453a', marginTop: 4 },
+  okBtn: { backgroundColor: '#30d158', borderColor: '#30d158' },
+  tplCheck: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 2,
+    borderColor: 'rgba(235,235,245,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  tplCheckTxt: { color: '#fff', fontSize: 15, fontWeight: '800', lineHeight: 18 },
+  solidTxt: { color: '#fff', fontWeight: '700' },
   listCard: { marginBottom: 14 },
   lRow: {
     flexDirection: 'row',

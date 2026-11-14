@@ -2,6 +2,7 @@
  * Даты, периоды и зарплаты (чистые функции, без React) — общие для App и тестов.
  */
 import { seedRecurringMonth } from './recurring.js';
+import { autoShift, EMPTY_TEMPLATES, entryFor, isPristineAuto } from './modeTemplates.js';
 export const KEY = 'zp_app_v1';
 export const ANCHOR = '2026-09-04';
 export const MONTHS = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
@@ -75,6 +76,8 @@ export function defaultState() {
     expenses: [],
     shifts: [],
     removed: [],
+    // шаблоны режимов: новый пользователь настраивает свои («Настройки» → «Изменить шаблон»)
+    modeTemplates: { study: [...EMPTY_TEMPLATES.study], work: [...EMPTY_TEMPLATES.work] },
   };
 }
 
@@ -84,7 +87,7 @@ export function defaultState() {
  * не появлялся пустым и не «допрыгивал» кадром позже.
  * Возвращает тот же объект, если ничего не добавилось.
  */
-export function seedMonth(state, viewY, viewM) {
+export function seedMonth(state, viewY, viewM, fromDate) {
   if (!state) return state;
   let changed = false;
   const next = {
@@ -97,22 +100,71 @@ export function seedMonth(state, viewY, viewM) {
   };
   // «Постоянные платежи»: активные правила (с датой «до») добавляют расход в то же число месяца
   if (seedRecurringMonth(next, viewY, viewM, uid)) changed = true;
+  const mode = state.settings && state.settings.mode === 'work' ? 'work' : 'study';
+  const have = new Set(next.shifts.map((s) => s.date));
+  const gone = new Set(next.removed);
   periodsTouchingMonth(viewY, viewM).forEach((period) => {
     for (let d = period.start; d <= period.end; d = addDays(d, 1)) {
-      if (next.removed.includes(d) || next.shifts.some((s) => s.date === d)) continue;
-      const dow = parse(d).getDay();
-      if (state.settings.mode === 'study' && !(dow === 5 || dow === 6 || dow === 0)) continue;
-      next.shifts.push({
-        id: uid(),
-        date: d,
-        title: 'ночь касса',
-        amount: null,
-        payday: period.payday,
-      });
+      if (fromDate && d < fromDate) continue;
+      if (gone.has(d) || have.has(d)) continue;
+      // смены режима — по шаблону (дни недели, тип, сумма); без шаблона — прежнее поведение
+      const entry = entryFor(state, mode, parse(d).getDay());
+      if (!entry) continue;
+      next.shifts.push(autoShift(uid(), d, period.payday, entry));
+      have.add(d);
       changed = true;
     }
   });
   return changed ? next : state;
+}
+
+/**
+ * Применить режим (и/или изменённый шаблон) с даты fromDate: нетронутые автосмены приводятся к шаблону
+ * режима (лишние — убираются, тип/сумма — обновляются), недостающие дни — досеваются.
+ * Правленые вручную, с суммой, из «Расчёта» и т. п. — не трогаются; убранные пользователем дни не возвращаются.
+ * months — [y, m] месяцы для досева (обычно от fromDate до последней смены).
+ */
+export function applyMode(state, mode, fromDate, months) {
+  if (!state) return state;
+  const m = mode === 'work' ? 'work' : 'study';
+  let next = { ...state, settings: { ...state.settings, mode: m } };
+  const shifts = [];
+  for (const s of state.shifts) {
+    if (!s || s.date < fromDate || !isPristineAuto(s)) {
+      shifts.push(s);
+      continue;
+    }
+    const entry = entryFor(next, m, parse(s.date).getDay());
+    if (!entry) continue; // режим этот день не добавляет — убираем
+    const want = autoShift(s.id, s.date, s.payday, entry);
+    if (s.title === want.title && (s.amount ?? null) === want.amount && s.auto && s.autoAmount === want.autoAmount) shifts.push(s);
+    else shifts.push(want);
+  }
+  next.shifts = shifts;
+  const list = months && months.length ? months : monthsFrom(fromDate, state.shifts);
+  for (const [y, mm] of list) next = seedMonth(next, y, mm, fromDate);
+  return next;
+}
+
+/** Месяцы от fromDate до последней смены (минимум месяц fromDate и следующий). */
+export function monthsFrom(fromDate, shifts) {
+  let last = fromDate;
+  for (const s of shifts || []) if (s && typeof s.date === 'string' && s.date > last) last = s.date;
+  const out = [];
+  let y = Number(fromDate.slice(0, 4));
+  let mm = Number(fromDate.slice(5, 7)) - 1;
+  const ly = Number(last.slice(0, 4));
+  const lm = Number(last.slice(5, 7)) - 1;
+  let guard = 0;
+  while ((y < ly || (y === ly && mm <= lm) || out.length < 2) && guard++ < 36) {
+    out.push([y, mm]);
+    mm += 1;
+    if (mm > 11) {
+      mm = 0;
+      y += 1;
+    }
+  }
+  return out;
 }
 
 /** Досеять месяцы, которые задевают периоды СМЕН этих зарплат ([p−20, p−7]) — для страниц «Смен». */
@@ -137,7 +189,8 @@ export const paydayForDate = (date) => workPeriod(paydayOnOrBefore(addDays(date,
 
 /**
  * Приводит загруженный zp_app_v1 к ожидаемой форме (старые/неполные
- * сохранения: нет removed/custom/recurring и т. п.). Формат не меняется —
+ * сохранения: нет removed/custom/recurring и т. п.). Нет modeTemplates — не страшно: templatesOf
+ * отдаёт встроенные шаблоны (прежнее поведение режимов), так у старых сохранений ничего не меняется. Формат не меняется —
  * только добавляются недостающие пустые поля. Тот же объект, если всё на месте.
  */
 export function normalizeApp(raw) {
