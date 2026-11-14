@@ -6427,7 +6427,7 @@ export default function App() {
           onClose: closeSheet,
           body: (
             <>
-              <Text style={styles.sectionLabel}>Режим смен</Text>
+              <Text style={[styles.sectionLabel, { textAlign: 'center', marginLeft: 0 }]}>Режим смен</Text>
               <View style={styles.segBlock}>
                 <SegmentCapsule
                   value={state.settings.mode === 'work' ? 1 : 0}
