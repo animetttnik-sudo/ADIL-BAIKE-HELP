@@ -5,7 +5,8 @@ import {
   toggledStatus, undoCarry, defaultPayday, shouldAutoAdvance, pagerRange, paydayMode,
   toggleInState,
 } from '../src/lib/totals.js';
-import { defaultState, seedMonth, seedPaydays, PAYDAYS, ANCHOR } from '../src/lib/periods.js';
+import { seedMonth, seedPaydays, PAYDAYS, ANCHOR } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 import { applyImport, previewImport } from '../src/lib/planImport.js';
 import { PLAN_BLOCKS, PLAN_ID } from '../src/lib/plan2026.js';
 

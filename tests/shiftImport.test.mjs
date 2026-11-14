@@ -8,7 +8,8 @@ import { SHIFTS_NOTE, SHIFTS_NOTE_REF } from '../src/lib/shiftsNote.js';
 import { bonusLossOf, adjOf, carryOf, payTotals, shiftNet, shiftTotals, shiftsInPeriod, surplusOf, withCarry, withShortage } from '../src/lib/shifts.js';
 import { syncCalcShifts } from '../src/lib/link.js';
 import { DEFAULT_RATES } from '../src/lib/calc.js';
-import { PAYDAYS, defaultState, normalizeApp, paydayForDate, seedShiftPaydays, workPeriod } from '../src/lib/periods.js';
+import { PAYDAYS, normalizeApp, paydayForDate, seedShiftPaydays, workPeriod } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 
 const NOTE = readFileSync(new URL('../scripts/shifts.txt', import.meta.url), 'utf8');
 const parsed = () => parseShifts(NOTE, { ref: SHIFTS_NOTE_REF });

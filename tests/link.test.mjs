@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { syncCalcShifts, calcPayForDay, isLinkedShift } from '../src/lib/link.js';
 import { DEFAULT_RATES } from '../src/lib/calc.js';
-import { defaultState, seedMonth, normalizeApp, paydayForDate, money, periodsTouchingMonth } from '../src/lib/periods.js';
+import { seedMonth, normalizeApp, paydayForDate, money, periodsTouchingMonth } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 
 let n = 0;
 const mkId = () => `id${++n}`;

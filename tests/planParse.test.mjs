@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { parsePlan, PLAN_REF, inferYear, stripBlocks, blockSum, paydayFor } from '../src/lib/planParse.js';
 import { PLAN_BLOCKS } from '../src/lib/plan2026.js';
 import { previewImport, applyImport } from '../src/lib/planImport.js';
-import { defaultState } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 
 const TEXT = readFileSync(new URL('../scripts/plan.txt', import.meta.url), 'utf8');
 

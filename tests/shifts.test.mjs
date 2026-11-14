@@ -6,9 +6,8 @@ import {
 } from '../src/lib/shifts.js';
 import { syncCalcShifts, calcPayForDay } from '../src/lib/link.js';
 import { DEFAULT_RATES } from '../src/lib/calc.js';
-import {
-  PAYDAYS, ANCHOR, workPeriod, paydayForDate, addDays, defaultState, normalizeApp, seedShiftPaydays,
-} from '../src/lib/periods.js';
+import { PAYDAYS, ANCHOR, workPeriod, paydayForDate, addDays, normalizeApp, seedShiftPaydays } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 
 let n = 0;
 const mkId = () => `s${++n}`;

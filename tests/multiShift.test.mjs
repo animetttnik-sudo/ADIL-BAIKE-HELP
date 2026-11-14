@@ -8,7 +8,8 @@ import {
 } from '../src/lib/link.js';
 import { DEFAULT_RATES } from '../src/lib/calc.js';
 import { payTotals, shiftsInPeriod, dayTotals, shiftTotals } from '../src/lib/shifts.js';
-import { defaultState, paydayForDate, normalizeApp } from '../src/lib/periods.js';
+import { paydayForDate, normalizeApp } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 import { parseShifts } from '../src/lib/shiftParse.js';
 import { applyShiftImport, previewShiftImport } from '../src/lib/shiftImport.js';
 import { makeBackup, parseBackup, summarize } from '../src/lib/backup.js';

@@ -86,7 +86,7 @@ test('normalizeApp: целые данные — тот же объект; бит
   const n = normApp(bad);
   assert.deepEqual(n.expenses.map((e) => e.id), ['a']);
   assert.deepEqual(n.shifts.map((e) => e.id), ['s']);
-  assert.ok(normApp([]).expenses.length > 0); // массив вместо объекта — стартовое состояние
+  assert.ok(Array.isArray(normApp([]).expenses)); // массив вместо объекта — пустое стартовое состояние
 });
 
 test('копия битого сохранения не попадает в перенос данных и не удаляется при вставке', () => {

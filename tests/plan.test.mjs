@@ -8,7 +8,8 @@ import {
   applyImport, checkPlan, previewImport, normTitle, groupPaydayOf, autoAddedRecurring, autoAddedLeft, removeExpenses,
 } from '../src/lib/planImport.js';
 import { expensesInPeriod } from '../src/lib/totals.js';
-import { defaultState, seedMonth } from '../src/lib/periods.js';
+import { seedMonth } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 
 const TEXT = readFileSync(new URL('../scripts/plan.txt', import.meta.url), 'utf8');
 const { blocks, warnings } = parsePlan(TEXT);

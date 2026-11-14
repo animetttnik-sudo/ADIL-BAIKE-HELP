@@ -64,7 +64,6 @@ import Animated, {
     withTiming
 } from 'react-native-reanimated';
 import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
-import { PLAN_BLOCKS, PLAN_ID } from '../lib/plan2026';
 import {
   carryInState,
   defaultPayday,
@@ -6029,15 +6028,6 @@ export default function App() {
           { key: 'analysis', icon: 'chart', title: 'Анализ', sub: 'по месяцам, лучшие и худшие' },
           { key: 'stats', icon: 'pie', title: 'Результаты', sub: 'заработано и оплачено за всё время' },
           {
-            key: 'plan',
-            icon: 'document',
-            title: 'Импорт плана',
-            sub:
-              state.plan?.id === PLAN_ID
-                ? `добавлено ${state.plan.added ?? ''} · ${fmtShort(state.plan.importedAt.slice(0, 10))}`
-                : 'расходы сен 2026 – сен 2027 из заметки',
-          },
-          {
             key: 'cleanup',
             icon: 'trash',
             title: 'Удалить автодобавленные платежи',
@@ -6277,13 +6267,6 @@ export default function App() {
         };
       }
 
-      case 'plan':
-        return {
-          title: 'Импорт плана',
-          onClose: toSettings,
-          body: importBody({ blocks: PLAN_BLOCKS, planId: PLAN_ID, label: 'Импорт плана' }),
-        };
-
       case 'notes': {
         const P = notes.parsed;
         if (P) {
@@ -6349,17 +6332,6 @@ export default function App() {
                   }}
                 >
                   <Text style={styles.actBtnTxt}>Вставить</Text>
-                </ScaleButton>
-                <ScaleButton
-                  style={[styles.actBtn, styles.notesBtn]}
-                  onPress={() => {
-                    Haptics.selectionAsync().catch(noop);
-                    Keyboard.dismiss();
-                    setImpAll(false);
-                    setNotes((x) => ({ ...x, parsed: { blocks: PLAN_BLOCKS, unparsed: [], planId: PLAN_ID } }));
-                  }}
-                >
-                  <Text style={styles.actBtnTxt}>Мой годовой план</Text>
                 </ScaleButton>
               </View>
               <ScaleButton

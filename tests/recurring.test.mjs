@@ -1,7 +1,8 @@
 // Постоянные платежи: правило «каждое это число до даты», досев без дублей, удаление серии
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { defaultState, seedMonth, normalizeApp } from '../src/lib/periods.js';
+import { seedMonth, normalizeApp } from '../src/lib/periods.js';
+import { defaultState } from './fixtureState.mjs';
 import { addRecurring, isSeries, removeSeries, seriesToRemove } from '../src/lib/recurring.js';
 import { restoreRemoved } from '../src/lib/undo.js';
 import { autoAddedRecurring } from '../src/lib/planImport.js';
