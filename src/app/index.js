@@ -107,6 +107,9 @@ import { exportFileName, payReport, reportHtml, STAMP_INK_DARK, stampSpec } from
 import { printerGeom } from '../lib/printerGeom';
 import { DOW_ORDER, editTemplateDay, templatesOf, toggleTemplateDay } from '../lib/modeTemplates';
 import { File, Paths } from 'expo-file-system';
+import * as DocumentPicker from 'expo-document-picker';
+import { pdfLines } from '../lib/pdfText';
+import { buildImport, calcCountsFromImport } from '../lib/salesImport';
 import Svg, { Circle, Defs, G, Line, LinearGradient, Path as SvgPath, Stop, Text as SvgText } from 'react-native-svg';
 import { areaPath, chartPoints, chartScale, chartSeries, shortMoney, smoothPath, trendOf } from '../lib/chart';
 import { AppIcon } from '../ui/AppIcons';
@@ -2946,7 +2949,7 @@ function CalcSavedList({ calc, date: cur, accent, onPick }) {
 
 const CalcView = memo(function CalcView({
   calc, date, day, accent, linkedShift, manualOnDate, adj, onAdj, scrollRef, scrollY, scrollTop,
-  onPatchDay, onRole, onTime, onOpenRates, onReset, onShowShift, onOpenSection,
+  onPatchDay, onRole, onTime, onOpenRates, onReset, onShowShift, onOpenSection, onImportPdf,
   slots = [1], slot = 1, onSlot, onAddSlot, dayTotal,
 }) {
 
@@ -3162,6 +3165,12 @@ const CalcView = memo(function CalcView({
         </ScaleButton>
         <ScaleButton style={[styles.actBtn, { flex: 1 }]} onPress={onReset}>
           <Text style={[styles.actBtnTxt, { color: '#ff453a' }]}>Сбросить</Text>
+        </ScaleButton>
+      </Animated.View>
+      {/* отчёт продаж кассы (СТмах → PDF) → позиции «Кассы» и зерновой кофе */}
+      <Animated.View layout={ROW_LAYOUT}>
+        <ScaleButton style={[styles.actBtn, styles.okBtn, { marginTop: 0 }]} onPress={onImportPdf} accessibilityLabel="Импорт PDF отчёта кассы">
+          <Text style={[styles.actBtnTxt, styles.solidTxt]}>Импорт PDF</Text>
         </ScaleButton>
       </Animated.View>
 
@@ -4064,6 +4073,7 @@ export default function App() {
   const [shNotes, setShNotes] = useState({ text: '', parsed: null }); // импорт смен: текст и разбор
   const [impClear, setImpClear] = useState(true); // импорт смен: убрать пустые заготовки
   const [toast, setToast] = useState(null); // { k, text, undo }
+  const [pdfImp, setPdfImp] = useState(null); // результат «Импорт PDF» до подтверждения
 
   // Расходы: показанная зарплата (индекс в PAYDAYS) + shared values пейджера
   const [pi, setPi] = useState(null);
@@ -4317,6 +4327,7 @@ export default function App() {
       openRates: () => calcH.current.openRates?.(),
       reset: () => calcH.current.reset?.(),
       showShift: () => calcH.current.showShift?.(),
+      importPdf: () => calcH.current.importPdf?.(),
     }),
     []
   );
@@ -5101,7 +5112,42 @@ export default function App() {
     if (k >= 0) requestAnimationFrame(() => jumpShiftIdx(k));
   };
 
-  calcH.current = { openRates: openCalcRates, reset: resetCalc, showShift: showCalcShift };
+  /** «Импорт PDF»: выбрать отчёт продаж → текст PDF (чистый JS) → позиции → шторка с проверкой. */
+  const importPdf = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false });
+      if (res.canceled || !res.assets || !res.assets[0]) return;
+      const a = res.assets[0];
+      const bytes = await new File(a.uri).bytes();
+      const imp = buildImport(pdfLines(bytes));
+      if (!imp.calc.length && !imp.drinks.length && !imp.coffee.length && !imp.unknown.length) {
+        Alert.alert('Ничего не нашлось', 'В PDF нет строк вида «название — количество».');
+        return;
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
+      setPdfImp({ ...imp, file: a.name || 'PDF' });
+      setSheet('pdfImp');
+    } catch (e) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(noop);
+      Alert.alert('Не получилось прочитать PDF', String(e?.message || e));
+    }
+  };
+  /** Количества из отчёта → расчёт текущей даты: позиции кассы заменяются, «… 350мл» → «Зерн.кофе». */
+  const applyPdfImport = () => {
+    if (!pdfImp) return;
+    const counts = calcCountsFromImport(pdfImp);
+    const ids = Object.keys(counts);
+    patchDay((d) => {
+      const next = { ...d.counts };
+      for (const id of ids) next[id] = [counts[id]];
+      return { ...d, counts: next };
+    });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
+    setToast({ k: Date.now(), text: `Добавлено в расчёт: ${ids.length} поз.` });
+    setPdfImp(null);
+    setSheet(null);
+  };
+  calcH.current = { openRates: openCalcRates, reset: resetCalc, showShift: showCalcShift, importPdf };
 
   const saveExpense = () => {
     const amount = Number(form.amount) || 0;
@@ -6792,6 +6838,49 @@ export default function App() {
             />
           ) : null,
         };
+      case 'pdfImp': {
+        if (!pdfImp) return { title: '', onClose: closeSheet, body: null };
+        const fq = (q) => (Number.isInteger(q) ? String(q) : String(q).replace('.', ','));
+        const n = Object.keys(calcCountsFromImport(pdfImp)).length;
+        const block = (title, list, note) =>
+          list.length ? (
+            <>
+              <Text style={styles.sectionLabel}>{title}</Text>
+              <ItemCard style={styles.listCard}>
+                {list.map((x, i) => (
+                  <View key={x.key || `${x.name}-${i}`} style={[styles.lRow, i < list.length - 1 && styles.lRowSep]}>
+                    <Text style={[styles.lTitle, { flex: 1 }, note && { color: 'rgba(235,235,245,0.55)' }]} numberOfLines={1}>
+                      {x.label || x.name}
+                    </Text>
+                    <Text style={[styles.lVal, { fontVariant: ['tabular-nums'] }]}>{fq(x.qty)}</Text>
+                  </View>
+                ))}
+              </ItemCard>
+            </>
+          ) : null;
+        return {
+          title: 'Импорт PDF',
+          onClose: () => {
+            setPdfImp(null);
+            closeSheet();
+          },
+          body: (
+            <>
+              {block('Касса', pdfImp.calc)}
+              {block('Кофе · в «Зерн.кофе»', pdfImp.coffee)}
+              {block('Напитки', pdfImp.drinks)}
+              {block('Не распознано', pdfImp.unknown, true)}
+              <ScaleButton
+                style={[styles.actBtn, styles.okBtn, !n && { opacity: 0.45 }]}
+                onPress={() => n && applyPdfImport()}
+                accessibilityLabel="Добавить в расчёт"
+              >
+                <Text style={[styles.actBtnTxt, styles.solidTxt]}>Добавить в расчёт</Text>
+              </ScaleButton>
+            </>
+          ),
+        };
+      }
       case 'calcQuick':
         return {
           title: 'Быстрый ввод',
@@ -7068,6 +7157,7 @@ export default function App() {
                     onOpenRates={calcStable.openRates}
                     onReset={calcStable.reset}
                     onShowShift={calcStable.showShift}
+                    onImportPdf={calcStable.importPdf}
                   />
                 )}
               </View>

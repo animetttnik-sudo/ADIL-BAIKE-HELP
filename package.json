@@ -13,6 +13,7 @@
     "expo-clipboard": "~58.0.4",
     "expo-constants": "~58.0.13",
     "expo-device": "~58.0.5",
+    "expo-document-picker": "~58.0.5",
     "expo-file-system": "~58.0.13",
     "expo-font": "~58.0.9",
     "expo-glass-effect": "~58.0.4",
@@ -30,6 +31,7 @@
     "expo-system-ui": "~58.0.6",
     "expo-updates": "~58.0.18",
     "expo-web-browser": "~58.0.6",
+    "pako": "^2.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.0",
@@ -55,7 +57,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs tests/multiShift.test.mjs tests/liquid.test.mjs tests/analysis.test.mjs tests/persist.test.mjs tests/undo.test.mjs tests/repeatShift.test.mjs tests/listView.test.mjs tests/search.test.mjs tests/recurring.test.mjs tests/icons.test.mjs tests/printerGeom.test.mjs tests/expenseEdit.test.mjs tests/chart.test.mjs tests/modeTemplates.test.mjs",
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs tests/multiShift.test.mjs tests/liquid.test.mjs tests/analysis.test.mjs tests/persist.test.mjs tests/undo.test.mjs tests/repeatShift.test.mjs tests/listView.test.mjs tests/search.test.mjs tests/recurring.test.mjs tests/icons.test.mjs tests/printerGeom.test.mjs tests/expenseEdit.test.mjs tests/chart.test.mjs tests/modeTemplates.test.mjs tests/salesImport.test.mjs",
     "publish": "npm test && npx eas-cli@latest update --branch main --message \"$(git log -1 --pretty=%s)\" --environment production --platform all --non-interactive"
   },
   "private": true
