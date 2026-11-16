@@ -57,7 +57,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs tests/multiShift.test.mjs tests/liquid.test.mjs tests/analysis.test.mjs tests/persist.test.mjs tests/undo.test.mjs tests/repeatShift.test.mjs tests/listView.test.mjs tests/search.test.mjs tests/recurring.test.mjs tests/icons.test.mjs tests/printerGeom.test.mjs tests/expenseEdit.test.mjs tests/chart.test.mjs tests/modeTemplates.test.mjs tests/salesImport.test.mjs",
+    "test": "node --test tests/calc.test.mjs tests/link.test.mjs tests/plan.test.mjs tests/planParse.test.mjs tests/shifts.test.mjs tests/shiftImport.test.mjs tests/totals.test.mjs tests/quickEntry.test.mjs tests/gap.test.mjs tests/boxes.test.mjs tests/backup.test.mjs tests/multiShift.test.mjs tests/liquid.test.mjs tests/analysis.test.mjs tests/persist.test.mjs tests/undo.test.mjs tests/repeatShift.test.mjs tests/listView.test.mjs tests/search.test.mjs tests/recurring.test.mjs tests/icons.test.mjs tests/printerGeom.test.mjs tests/expenseEdit.test.mjs tests/chart.test.mjs tests/modeTemplates.test.mjs tests/salesImport.test.mjs tests/extras.test.mjs",
     "publish": "npm test && npx eas-cli@latest update --branch main --message \"$(git log -1 --pretty=%s)\" --environment production --platform all --non-interactive"
   },
   "private": true

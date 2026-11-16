@@ -96,6 +96,7 @@ import {
 } from '../lib/calc';
 import { quickCanPlus, quickShown, quickStep, quickValue } from '../lib/quickEntry';
 import { computeBoxes, fmtKg } from '../lib/boxes';
+import { computeCups, computeDrinks, computeSauces, EXTRA_ITEMS } from '../lib/extras';
 import { monthAvg, monthStats } from '../lib/analysis';
 import { createWriter, validAppState, validCalcState } from '../lib/persist';
 import { removeExpense, removeShift, restoreRemoved } from '../lib/undo';
@@ -2879,9 +2880,48 @@ function CalcSummaryList({ day, rates }) {
 }
 
 /** «Расход» (бывш. «Расход ингредиентов») — в шторке. */
-function CalcUsageList({ day, rates }) {
+/** Строка «Расхода», которую можно поправить вручную (напитки, соусы, одноразовые стаканы): тап — подсчёт. */
+const UseRow = memo(function UseRow({ id, label, value, last, onOpen }) {
+  const { props, hi } = useRowPress(id, onOpen);
+  return (
+    <Pressable {...props} style={[styles.sumRow, last && styles.boxLast]} accessibilityLabel={`${label}: ${value}`}>
+      {hi}
+      <Text style={[styles.sumL, !value && styles.useZero]}>{label}</Text>
+      <Text style={[styles.sumV, !value && styles.useZero]}>{fmtNum(value)}</Text>
+    </Pressable>
+  );
+});
+
+/** Блок «Расхода»: заголовок + карточка строк (с id — правятся тапом). */
+function UseBlock({ title, sub, rows, onOpen }) {
+  return (
+    <>
+      <View style={[styles.gHead, styles.boxHead]}>
+        <Text style={styles.gTitle}>{title}</Text>
+        {sub ? <Text style={styles.gSub}>{sub}</Text> : null}
+      </View>
+      <ItemCard style={styles.sumCard}>
+        {rows.map((r, i) =>
+          r.id ? (
+            <UseRow key={r.key} id={r.id} label={r.label} value={r.value} last={i === rows.length - 1} onOpen={onOpen} />
+          ) : (
+            <View key={r.key} style={[styles.sumRow, i === rows.length - 1 && styles.boxLast]}>
+              <Text style={[styles.sumL, !r.value && styles.useZero]}>{r.label}</Text>
+              <Text style={[styles.sumV, !r.value && styles.useZero]}>{fmtNum(r.value)}</Text>
+            </View>
+          )
+        )}
+      </ItemCard>
+    </>
+  );
+}
+
+function CalcUsageList({ day, rates, onOpen }) {
   const res = useMemo(() => computeCalc(day.counts, rates, day.staff, !!day.gap), [day.counts, rates, day.staff, day.gap]);
   const boxes = useMemo(() => computeBoxes(day.counts), [day.counts]);
+  const drinks = useMemo(() => computeDrinks(day.counts), [day.counts]);
+  const cups = useMemo(() => computeCups(day.counts), [day.counts]);
+  const sauces = useMemo(() => computeSauces(day.counts), [day.counts]);
   return (
     <View>
       <ItemCard style={styles.sumCard}>
@@ -2892,6 +2932,8 @@ function CalcUsageList({ day, rates }) {
           </View>
         ))}
       </ItemCard>
+      <UseBlock title="Напитки" sub="шт" rows={drinks} onOpen={onOpen} />
+      <UseBlock title="Стаканы и крышки" sub="из кофе" rows={cups} onOpen={onOpen} />
       <View style={[styles.gHead, styles.boxHead]}>
         <Text style={styles.gTitle}>Коробки и фри</Text>
         <Text style={styles.gSub}>порции</Text>
@@ -2904,6 +2946,7 @@ function CalcUsageList({ day, rates }) {
           </View>
         ))}
       </ItemCard>
+      <UseBlock title="Соусы" sub="С · Ч · Б · К" rows={sauces} onOpen={onOpen} />
     </View>
   );
 }
@@ -4227,7 +4270,7 @@ export default function App() {
   const calcBack = useRef(null);
   const openCalcItem = useCallback((id) => {
     Haptics.selectionAsync().catch(noop);
-    calcBack.current = sheetNow.current === 'calcPos' ? 'calcPos' : null;
+    calcBack.current = sheetNow.current === 'calcPos' || sheetNow.current === 'calcUse' ? sheetNow.current : null;
     setCalcItem(id);
     setSheet('calcItem');
   }, []);
@@ -5132,7 +5175,10 @@ export default function App() {
       Alert.alert('Не получилось прочитать PDF', String(e?.message || e));
     }
   };
-  /** Количества из отчёта → расчёт текущей даты: позиции кассы заменяются, «… 350мл» → «Зерн.кофе». */
+  /**
+   * Количества из отчёта → расчёт текущей даты (заменяются, не прибавляются): позиции кассы, «… 350» →
+   * «Зерн.кофе», напитки / соусы / одноразовые стаканы → строки «Расхода».
+   */
   const applyPdfImport = () => {
     if (!pdfImp) return;
     const counts = calcCountsFromImport(pdfImp);
@@ -6868,7 +6914,9 @@ export default function App() {
             <>
               {block('Касса', pdfImp.calc)}
               {block('Кофе · в «Зерн.кофе»', pdfImp.coffee)}
-              {block('Напитки', pdfImp.drinks)}
+              {block('Напитки · в «Расход»', pdfImp.drinks)}
+              {block('Стаканы · в «Расход»', pdfImp.cups || [])}
+              {block('Соусы · в «Расход»', pdfImp.sauces || [])}
               {block('Не распознано', pdfImp.unknown, true)}
               <ScaleButton
                 style={[styles.actBtn, styles.okBtn, !n && { opacity: 0.45 }]}
@@ -6904,7 +6952,7 @@ export default function App() {
         return {
           title: 'Расход',
           onClose: closeSheet,
-          body: calcDay ? <CalcUsageList day={calcDay} rates={calc.rates} /> : null,
+          body: calcDay ? <CalcUsageList day={calcDay} rates={calc.rates} onOpen={openCalcItem} /> : null,
         };
       case 'calcSaved':
         return {
@@ -6926,7 +6974,7 @@ export default function App() {
         };
 
       case 'calcItem': {
-        const it = CALC_ITEMS.find((x) => x.id === calcItem);
+        const it = CALC_ITEMS.find((x) => x.id === calcItem) || EXTRA_ITEMS.find((x) => x.id === calcItem);
         const t = calcDay ? talliesOf(calcDay.counts[calcItem]) : [0];
         return {
           title: it ? it.name : '',
@@ -8212,6 +8260,7 @@ const styles = StyleSheet.create({
   boxHead: { marginTop: 16 },
   boxGap: { marginTop: 14 },
   boxLast: { borderBottomWidth: 0 },
+  useZero: { color: 'rgba(235,235,245,0.35)' },
   sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15 },
   sumDim: { color: 'rgba(235,235,245,0.4)' },
   sumV: { color: '#fff', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },

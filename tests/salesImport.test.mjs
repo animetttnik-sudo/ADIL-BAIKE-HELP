@@ -146,5 +146,48 @@ test('позиции кассы: точные, усечённые, трансл�
   assert.equal(id('КП'), 'kp');
   assert.equal(id('КС'), 'ks');
   assert.equal(id('Пакет'), null);
-  assert.equal(id('Соус сырный'), null);
+  assert.equal(id('Соус сырный'), 'sc_cheese'); // соусы теперь пишутся в «Расход»
+});
+
+test('соусы С Ч Б К: RU/EN, со словом «соус» и без; «Cheeseburger» и «Хот Дог сырный» — не соус', () => {
+  const id = (s) => (matchProduct(s) || {}).calcId || null;
+  for (const s of ['Сырный', 'Соус сырный', 'Сырный соус 25г', 'Cheese sauce', 'СОУС СЫР']) assert.equal(id(s), 'sc_cheese', s);
+  for (const s of ['Чесночный', 'Соус чесночный', 'Чесноч.', 'Garlic sauce']) assert.equal(id(s), 'sc_garlic', s);
+  for (const s of ['Барбекю', 'Барбекью', 'Соус барбекю', 'BBQ', 'BBQ sauce']) assert.equal(id(s), 'sc_bbq', s);
+  for (const s of ['Кетчуп', 'Соус кетчуп', 'Ketchup', 'кетчап']) assert.equal(id(s), 'sc_ketchup', s);
+  assert.equal(id('Хот Дог сырный'), 'hdCheese');
+  assert.notEqual(id('Cheeseburger'), 'sc_cheese');
+  const imp = buildImport(['Кетчуп 3', 'Сырный 5', 'Соус сырный 2', 'BBQ 1', 'Чесночный 4']);
+  assert.deepEqual(imp.sauces.map((x) => [x.label, x.qty]), [['Кетчуп', 3], ['Сырный', 7], ['Барбекю', 1], ['Чесночный', 4]]);
+  assert.deepEqual(calcCountsFromImport(imp), { sc_ketchup: 3, sc_cheese: 7, sc_bbq: 1, sc_garlic: 4 });
+});
+
+test('напитки → строки расчёта; без объёма/вкуса — в «Не распознано»', () => {
+  const id = (s) => (matchProduct(s) || {}).calcId || null;
+  const cases = {
+    'Кока-кола 1л': 'dr_cola1', 'Coca-Cola 0,5': 'dr_cola05', 'Кола зеро 1л': 'dr_zero1', 'Coca Cola Zero 0.5': 'dr_zero05',
+    'Фанта 1л': 'dr_fanta1', 'Fanta 0.5L': 'dr_fanta05', 'Спрайт 1 л': 'dr_sprite1', 'Sprite 500мл': 'dr_sprite05',
+    'Фьюс клубника': 'dr_fuseStr', 'Fuse tea peach': 'dr_fusePeach', 'Фьюсти манго': 'dr_fuseMango', 'Фьюс ромашка': 'dr_fuseCham',
+    'Пико апельсин': 'dr_pikoOr', 'Pulpy grape': 'dr_pikoGr', 'Бонаква 0,5': 'dr_bonaqua',
+  };
+  for (const [k, v] of Object.entries(cases)) assert.equal(id(k), v, k);
+  const imp = buildImport(['Кола 1л 2', 'Coca-Cola 1L 3', 'Фанта 4', 'Спрайт 0,5 1']);
+  assert.deepEqual(imp.drinks.map((x) => [x.calcId, x.qty]), [['dr_cola1', 5], ['dr_sprite05', 1]]);
+  assert.deepEqual(imp.unknown.map((x) => x.name), ['Фанта']);
+  assert.deepEqual(calcCountsFromImport(imp), { dr_cola1: 5, dr_sprite05: 1 });
+});
+
+test('кофе и стаканы: «Кофе» — касса, «350» в названии — зерновой, «Стаканы одноразовые» — своя строка', () => {
+  const id = (s) => (matchProduct(s) || {}).calcId || null;
+  assert.equal(id('Кофе'), 'coffee');
+  assert.equal(id('Латте 350мл'), 'beans');
+  assert.equal(id('Американо 350'), 'beans');
+  assert.equal(id('Капучино 350 мл'), 'beans');
+  assert.equal(id('Стаканы одноразовые'), 'cupsDisp');
+  assert.equal(id('Одноразовый стакан'), 'cupsDisp');
+  const imp = buildImport(['Кофе 6', 'Американо 350 2', 'Латте 350мл 1', 'Стаканы одноразовые 10']);
+  assert.deepEqual(calcCountsFromImport(imp), { coffee: 6, cupsDisp: 10, beans: 3 });
+  // голое 350 в названии не путается с количеством/ценой
+  assert.deepEqual(parseSalesLine('Американо 350 2 180 360'), { name: 'Американо 350', qty: 2, raw: 'Американо 350 2 180 360' });
+  assert.equal(parseSalesLine('Бургер 350 2 700', { priceFirst: true }).qty, 2); // 350 здесь цена
 });

@@ -4,10 +4,12 @@
  *
  * parseSalesLines(lines) → [{ name, qty, raw }] — строки «название … количество [цена сумма]»;
  *   заголовки, даты, «Итого/Всего», строки без букв или без количества — пропускаются.
- * matchProduct(name) → { group: 'calc'|'drink'|'coffee', key, label, calcId? } или null.
- * buildImport(lines) → { calc: [...], drinks: [...], coffee: [...], unknown: [...] } (сложены по key).
+ * matchProduct(name) → { group: 'calc'|'drink'|'coffee'|'sauce'|'cups', key, label, calcId? } или null.
+ *   calcId — куда пишется в расчёт дня (позиция кассы, «Зерн.кофе», строка напитка/соуса/стаканов).
+ * buildImport(lines) → { calc, drinks, coffee, sauces, cups, unknown } (сложены по key).
  */
 import { CALC_ITEMS } from './calc.js';
+import { drinkRowId } from './extras.js';
 
 // ── нормализация ──────────────────────────────────────────────────────────
 // латинские буквы-двойники внутри русских слов и наоборот (СТмах печатает вперемешку)
@@ -94,6 +96,16 @@ export function parseSalesLine(line, opts = {}) {
     nameToks = [...nameToks, toks[i]];
     tail.shift();
     i++;
+  }
+  // «Американо 350 2 …» — голое 350 (объём зернового кофе) перед числами, если оно не «кол-во × цена = сумма»
+  if (toks[i] === '350' && tail.length >= 2) {
+    const fits3 = tail.length === 3 && Math.abs(tail[0] * tail[1] - tail[2]) <= Math.max(1, tail[2] * 0.01);
+    const fits2 = tail.length === 2 && tail[1] >= tail[0];
+    if (!fits3 && !fits2) {
+      nameToks = [...nameToks, toks[i]];
+      tail.shift();
+      i++;
+    }
   }
   if (!nameToks.length || !tail.length) return null;
   const name = nameToks.join(' ').replace(/[\s.:;,-]+$/, '').trim();
@@ -228,32 +240,66 @@ function matchCalc(n) {
   return best ? { group: 'calc', key: `calc:${best.it.id}`, label: best.it.label, calcId: best.it.id } : null;
 }
 
+// соусы — порядок С Ч Б К: [ключ, название, id строки, полные слова, корни (только рядом со словом «соус»)]
+const SAUCES = [
+  ['cheese', 'Сырный', 'sc_cheese', ['сырный', 'cheese', 'сыр'], ['сыр', 'chees']],
+  ['garlic', 'Чесночный', 'sc_garlic', ['чесночный', 'garlic'], ['чесн', 'garl']],
+  ['bbq', 'Барбекю', 'sc_bbq', ['барбекю', 'барбекью', 'bbq', 'barbecue', 'barbeque', 'бб'], ['барбек', 'bbq', 'barbe']],
+  ['ketchup', 'Кетчуп', 'sc_ketchup', ['кетчуп', 'кетчап', 'ketchup'], ['кетч', 'кетчап', 'ketch']],
+];
+const SAUCE_WORDS = /(^|\s)(соус\S*|sauce\S*|дип|dip)(?=\s|$)/;
+const PORTION = /(^|\s)\d+\s*(г|гр|g|мл|ml)(?=\s|$)/g;
+/**
+ * Соус: «Соус сырный», «Cheese sauce 25г» — по корню; одно слово без «соус» («Сырный», «Кетчуп», «BBQ»,
+ * «Чесноч.») — только полное слово или его начало (≥3 букв), чтобы «Cheeseburger»/«Хот дог сырный» не стали соусом.
+ */
+function matchSauce(n) {
+  const withWord = SAUCE_WORDS.test(n);
+  const rest = n.replace(SAUCE_WORDS, ' ').replace(PORTION, ' ').replace(/\./g, ' ').replace(/\s+/g, ' ').trim();
+  const toks = rest.split(' ').filter(Boolean);
+  let f;
+  if (withWord) f = SAUCES.find(([, , , full, roots]) => toks.some((t) => full.includes(t) || roots.some((r) => t.startsWith(r))));
+  else if (toks.length === 1) {
+    const t = toks[0];
+    f = SAUCES.find(([, , , full]) => full.some((w) => w === t || (t.length >= 3 && w.length > 3 && w.startsWith(t))));
+  }
+  return f ? { group: 'sauce', key: `sauce:${f[0]}`, label: f[1], calcId: f[2] } : null;
+}
+
+const withRow = (m) => ({ ...m, calcId: drinkRowId(m.key) });
+
 /** Распознать название позиции отчёта. */
 export function matchProduct(name) {
   const n0 = norm(name);
   if (!n0) return null;
-  // зерновой кофе: название всегда заканчивается на «350мл» / «350 ml»
-  if (/350\s*(мл|ml|m l)\.?$/.test(n0) || /350\s*(мл|ml)\b/.test(n0)) {
+  // «Стаканы одноразовые» — так и пишутся
+  if (/(стакан\S*\s+одноразов|одноразов\S*\s+стакан)/.test(n0)) {
+    return { group: 'cups', key: 'cups:disp', label: 'Стаканы одноразовые', calcId: 'cupsDisp' };
+  }
+  // зерновой кофе: «350мл» в конце или просто число 350 в названии
+  if (/(^|\D)350(\D|$)/.test(n0)) {
     const base = n0.replace(/350\s*(мл|ml|m l)\.?/g, '').trim();
     const c = COFFEE.find(([, , al]) => has(base, al));
-    const pretty = c ? c[1] : String(name).replace(/\s*350\s*(мл|ml)\.?\s*$/i, '').trim().replace(/^./, (x) => x.toUpperCase());
+    const pretty = c ? c[1] : String(name).replace(/\s*350\s*(мл|ml)?\.?\s*/i, ' ').trim().replace(/^./, (x) => x.toUpperCase());
     return { group: 'coffee', key: `coffee:${c ? c[0] : norm(pretty)}`, label: `${pretty} 350мл`, calcId: 'beans' };
   }
+  const sauce = matchSauce(n0);
+  if (sauce) return sauce;
   const { size, rest } = sizeOf(n0);
   const n = rest;
   if (has(n, FUSE_NAMES)) {
     const f = FUSE_FLAV.find(([, , al]) => has(n, al));
-    return { group: 'drink', key: `fuse:${f ? f[0] : '?'}`, label: `Фьюсти${f ? ` ${f[1]}` : ''} 0,5` };
+    return withRow({ group: 'drink', key: `fuse:${f ? f[0] : '?'}`, label: `Фьюсти${f ? ` ${f[1]}` : ''} 0,5` });
   }
   if (has(n, PULPY_NAMES)) {
     const f = PULPY_FLAV.find(([, , al]) => has(n, al));
-    return { group: 'drink', key: `pulpy:${f ? f[0] : '?'}`, label: `Пико${f ? ` ${f[1]}` : ''} 0,5` };
+    return withRow({ group: 'drink', key: `pulpy:${f ? f[0] : '?'}`, label: `Пико${f ? ` ${f[1]}` : ''} 0,5` });
   }
-  if (has(n, BONAQUA)) return { group: 'drink', key: 'bonaqua:0.5', label: 'Бон аква 0,5' };
+  if (has(n, BONAQUA)) return withRow({ group: 'drink', key: 'bonaqua:0.5', label: 'Бон аква 0,5' });
   const soda = SODA.find((d) => d.test(n));
   if (soda) {
     const sz = size === 1 ? '1л' : size === 0.5 ? '0,5' : '';
-    return { group: 'drink', key: `${soda.key}:${size || '?'}`, label: sz ? `${soda.label} ${sz}` : `${soda.label} (объём?)` };
+    return withRow({ group: 'drink', key: `${soda.key}:${size || '?'}`, label: sz ? `${soda.label} ${sz}` : `${soda.label} (объём?)` });
   }
   return matchCalc(n0);
 }
@@ -261,11 +307,12 @@ export function matchProduct(name) {
 /** Строки PDF → сгруппированный результат импорта. */
 export function buildImport(lines) {
   const rows = parseSalesLines(lines);
-  const acc = { calc: new Map(), drink: new Map(), coffee: new Map() };
+  const acc = { calc: new Map(), drink: new Map(), coffee: new Map(), sauce: new Map(), cups: new Map() };
   const unknown = [];
   for (const r of rows) {
     const m = matchProduct(r.name);
-    if (!m) {
+    // напиток без объёма/вкуса некуда записать — пусть будет виден в «Не распознано»
+    if (!m || (m.group === 'drink' && !m.calcId)) {
       unknown.push({ name: r.name, qty: r.qty });
       continue;
     }
@@ -275,16 +322,27 @@ export function buildImport(lines) {
     else g.set(m.key, { ...m, qty: r.qty });
   }
   const list = (g) => [...g.values()].map((x) => ({ ...x, qty: Math.round(x.qty * 1000) / 1000 }));
-  return { calc: list(acc.calc), drinks: list(acc.drink), coffee: list(acc.coffee), unknown, rows: rows.length };
+  return {
+    calc: list(acc.calc),
+    drinks: list(acc.drink),
+    coffee: list(acc.coffee),
+    sauces: list(acc.sauce),
+    cups: list(acc.cups),
+    unknown,
+    rows: rows.length,
+  };
 }
 
 /**
- * Количества для расчёта дня: позиции кассы — как в отчёте (заменяют подсчёт), зерновой кофе — сумма
- * всех «… 350мл» в «Зерн.кофе». Возвращает { [calcId]: qty }.
+ * Количества для расчёта дня (заменяют подсчёт — повторный импорт не удваивает): позиции кассы, напитки,
+ * соусы, одноразовые стаканы — как в отчёте; зерновой кофе — сумма всех «… 350» в «Зерн.кофе»
+ * (из него же — зерновые крышки и стаканы; из «Кофе» — белые крышки и стаканы кофе). { [calcId]: qty }.
  */
 export function calcCountsFromImport(imp) {
   const out = {};
-  for (const x of imp.calc || []) out[x.calcId] = (out[x.calcId] || 0) + x.qty;
+  for (const x of [...(imp.calc || []), ...(imp.drinks || []), ...(imp.sauces || []), ...(imp.cups || [])]) {
+    if (x.calcId) out[x.calcId] = (out[x.calcId] || 0) + x.qty;
+  }
   const beans = (imp.coffee || []).reduce((a, x) => a + x.qty, 0);
   if (beans) out.beans = (out.beans || 0) + beans;
   return out;
