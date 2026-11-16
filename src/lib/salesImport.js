@@ -244,7 +244,7 @@ function matchCalc(n) {
 const SAUCES = [
   ['cheese', 'Сырный', 'sc_cheese', ['сырный', 'cheese', 'сыр'], ['сыр', 'chees']],
   ['garlic', 'Чесночный', 'sc_garlic', ['чесночный', 'garlic'], ['чесн', 'garl']],
-  ['bbq', 'Барбекю', 'sc_bbq', ['барбекю', 'барбекью', 'bbq', 'barbecue', 'barbeque', 'бб'], ['барбек', 'bbq', 'barbe']],
+  ['bbq', 'Барбекю', 'sc_bbq', ['барбекю', 'барбекью', 'bbq', 'barbecue', 'barbeque'], ['барбек', 'bbq', 'barbe']],
   ['ketchup', 'Кетчуп', 'sc_ketchup', ['кетчуп', 'кетчап', 'ketchup'], ['кетч', 'кетчап', 'ketch']],
 ];
 const SAUCE_WORDS = /(^|\s)(соус\S*|sauce\S*|дип|dip)(?=\s|$)/;
