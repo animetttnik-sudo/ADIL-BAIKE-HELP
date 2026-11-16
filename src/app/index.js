@@ -2897,7 +2897,7 @@ function UseBlock({ title, sub, rows, onOpen }) {
   return (
     <>
       <View style={[styles.gHead, styles.boxHead]}>
-        <Text style={styles.gTitle}>{title}</Text>
+        <Text style={styles.useHeadT}>{title}</Text>
         {sub ? <Text style={styles.gSub}>{sub}</Text> : null}
       </View>
       <ItemCard style={styles.sumCard}>
@@ -2935,7 +2935,7 @@ function CalcUsageList({ day, rates, onOpen }) {
       <UseBlock title="Напитки" sub="шт" rows={drinks} onOpen={onOpen} />
       <UseBlock title="Стаканы и крышки" sub="из кофе" rows={cups} onOpen={onOpen} />
       <View style={[styles.gHead, styles.boxHead]}>
-        <Text style={styles.gTitle}>Коробки и фри</Text>
+        <Text style={styles.useHeadT}>Коробки и фри</Text>
         <Text style={styles.gSub}>порции</Text>
       </View>
       <ItemCard style={styles.sumCard}>
@@ -7936,7 +7936,7 @@ const styles = StyleSheet.create({
   lKey: { color: 'rgba(235,235,245,0.6)', fontSize: 15, flexShrink: 1 },
   lVal: { color: '#fff', fontSize: 16, fontWeight: '600', fontVariant: ['tabular-nums'] },
   lValBig: { fontSize: 20, fontWeight: '700' },
-  lTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  lTitle: { color: '#fff', fontSize: 16, fontWeight: '600', textAlign: 'left' },
   lSub: { color: 'rgba(235,235,245,0.42)', fontSize: 12, marginTop: 2 },
   sectionLabel: {
     color: 'rgba(235,235,245,0.5)',
@@ -7946,6 +7946,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     marginBottom: 8,
     marginLeft: 6,
+    textAlign: 'left',
   },
   label: {
     color: 'rgba(235,235,245,0.5)',
@@ -8261,9 +8262,11 @@ const styles = StyleSheet.create({
   boxGap: { marginTop: 14 },
   boxLast: { borderBottomWidth: 0 },
   useZero: { color: 'rgba(235,235,245,0.35)' },
-  sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15 },
+  // «Расход»: заголовок блока по левому краю, подпись сразу за ним
+  useHeadT: { color: '#fff', fontSize: 15, fontWeight: '600', textAlign: 'left' },
+  sumL: { color: 'rgba(235,235,245,0.75)', fontSize: 15, flex: 1, textAlign: 'left' },
   sumDim: { color: 'rgba(235,235,245,0.4)' },
-  sumV: { color: '#fff', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  sumV: { color: '#fff', fontSize: 15, fontWeight: '600', fontVariant: ['tabular-nums'], marginLeft: 12 },
   tallyRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
   tallyDel: { color: '#ff453a', fontSize: 16, fontWeight: '700', width: 18, textAlign: 'center' },
   showAll: { textAlign: 'center', paddingVertical: 8 },

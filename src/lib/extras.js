@@ -9,21 +9,30 @@ import { itemTotal } from './calc.js';
 
 export const DRINK_ROWS = [
   { id: 'dr_cola1', name: 'Кола 1л' },
-  { id: 'dr_cola05', name: 'Кола 0,5' },
   { id: 'dr_zero1', name: 'Кола зеро 1л' },
-  { id: 'dr_zero05', name: 'Кола зеро 0,5' },
   { id: 'dr_fanta1', name: 'Фанта 1л' },
-  { id: 'dr_fanta05', name: 'Фанта 0,5' },
   { id: 'dr_sprite1', name: 'Спрайт 1л' },
+  { id: 'dr_cola05', name: 'Кола 0,5' },
+  { id: 'dr_zero05', name: 'Кола зеро 0,5' },
+  { id: 'dr_fanta05', name: 'Фанта 0,5' },
   { id: 'dr_sprite05', name: 'Спрайт 0,5' },
+  { id: 'dr_bonaqua', name: 'Бон аква 0,5' },
   { id: 'dr_fuseStr', name: 'Фьюсти клубника' },
   { id: 'dr_fusePeach', name: 'Фьюсти персик' },
   { id: 'dr_fuseMango', name: 'Фьюсти манго' },
   { id: 'dr_fuseCham', name: 'Фьюсти ромашка' },
   { id: 'dr_pikoOr', name: 'Пико апельсин' },
   { id: 'dr_pikoGr', name: 'Пико виноград' },
-  { id: 'dr_bonaqua', name: 'Бон аква 0,5' },
 ];
+
+/** Порядок напитков (литровые → 0,5 → Бон аква → Фьюсти → Пико) — для превью импорта. */
+export const sortDrinks = (list) => {
+  const at = (x) => {
+    const i = DRINK_ROWS.findIndex((d) => d.id === x.calcId);
+    return i < 0 ? DRINK_ROWS.length : i;
+  };
+  return [...list].sort((a, b) => at(a) - at(b));
+};
 
 /** Соусы — в порядке С Ч Б К (как в списке владельца). */
 export const SAUCE_ROWS = [

@@ -9,7 +9,7 @@
  * buildImport(lines) → { calc, drinks, coffee, sauces, cups, unknown } (сложены по key).
  */
 import { CALC_ITEMS } from './calc.js';
-import { drinkRowId } from './extras.js';
+import { drinkRowId, sortDrinks } from './extras.js';
 
 // ── нормализация ──────────────────────────────────────────────────────────
 // латинские буквы-двойники внутри русских слов и наоборот (СТмах печатает вперемешку)
@@ -324,7 +324,7 @@ export function buildImport(lines) {
   const list = (g) => [...g.values()].map((x) => ({ ...x, qty: Math.round(x.qty * 1000) / 1000 }));
   return {
     calc: list(acc.calc),
-    drinks: list(acc.drink),
+    drinks: sortDrinks(list(acc.drink)),
     coffee: list(acc.coffee),
     sauces: list(acc.sauce),
     cups: list(acc.cups),

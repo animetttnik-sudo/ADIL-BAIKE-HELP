@@ -6,8 +6,8 @@ import { CALC_ITEMS } from '../src/lib/calc.js';
 
 test('порядок строк: напитки как в списке, соусы С Ч Б К, стаканы/крышки', () => {
   assert.deepEqual(DRINK_ROWS.map((d) => d.name), [
-    'Кола 1л', 'Кола 0,5', 'Кола зеро 1л', 'Кола зеро 0,5', 'Фанта 1л', 'Фанта 0,5', 'Спрайт 1л', 'Спрайт 0,5',
-    'Фьюсти клубника', 'Фьюсти персик', 'Фьюсти манго', 'Фьюсти ромашка', 'Пико апельсин', 'Пико виноград', 'Бон аква 0,5',
+    'Кола 1л', 'Кола зеро 1л', 'Фанта 1л', 'Спрайт 1л', 'Кола 0,5', 'Кола зеро 0,5', 'Фанта 0,5', 'Спрайт 0,5',
+    'Бон аква 0,5', 'Фьюсти клубника', 'Фьюсти персик', 'Фьюсти манго', 'Фьюсти ромашка', 'Пико апельсин', 'Пико виноград',
   ]);
   assert.deepEqual(SAUCE_ROWS.map((s) => s.name), ['С', 'Ч', 'Б', 'К']);
   assert.deepEqual(computeCups({}).map((c) => c.label), ['Белые крышки', 'Стаканы кофе', 'Стаканы одноразовые', 'Зерновые крышки', 'Зерновые стаканы']);
@@ -27,4 +27,10 @@ test('старые расчёты без новых строк — нули; с�
   const cups = Object.fromEntries(computeCups({ coffee: [4, 2], beans: 3, cupsDisp: [10] }).map((c) => [c.key, c.value]));
   assert.deepEqual(cups, { lidWhite: 6, cupCoffee: 6, cupsDisp: 10, lidGrain: 3, cupGrain: 3 });
   assert.equal(computeDrinks({ dr_fanta1: [2, 1] }).find((d) => d.id === 'dr_fanta1').value, 3);
+});
+
+test('превью импорта: напитки в том же порядке, что и в «Расходе»', async () => {
+  const { buildImport } = await import('../src/lib/salesImport.js');
+  const imp = buildImport(['Пико апельсин 1', 'Бонаква 0,5 2', 'Спрайт 0,5 3', 'Фьюс персик 4', 'Кола 1л 5', 'Фанта 1л 6']);
+  assert.deepEqual(imp.drinks.map((x) => x.calcId), ['dr_cola1', 'dr_fanta1', 'dr_sprite05', 'dr_bonaqua', 'dr_fusePeach', 'dr_pikoOr']);
 });
