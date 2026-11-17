@@ -1,0 +1,44 @@
+name: EAS Update
+
+# Публикует обновление в Expo при каждом пуше в main.
+# Нужен секрет EXPO_TOKEN: Settings → Secrets and variables → Actions.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: eas-update
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for EXPO_TOKEN
+        run: |
+          if [ -z "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "Добавь секрет EXPO_TOKEN в настройки репозитория (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish update
+        run: eas update --branch main --environment production --auto --non-interactive
