@@ -23,6 +23,7 @@ export const CATS = {
   refund: { label: 'Возвраты за курс', kind: 'in' },
   myBanks: { label: 'На мои счета в других банках', kind: 'out' },
   loan: { label: 'Кредиты и рассрочка', kind: 'out' },
+  edu: { label: 'Образование', kind: 'out' },
   bills: { label: 'Связь и услуги банка', kind: 'out' },
   delivery: { label: 'Доставка еды', kind: 'out' },
   cafe: { label: 'Кафе и фастфуд', kind: 'out' },
@@ -234,6 +235,8 @@ export function autoCat(op) {
     return 'income';
   }
   if (/потребительск|рассрочк|погашение по кредиту/i.test(all) || /автосписание.*кредит/i.test(d)) return 'loan';
+  // контракт на учёбу: КНУ и другие вузы
+  if (/(^|[^А-ЯЁA-Z])(КНУ|KNU)([^А-ЯЁA-Z]|$)|баласагын|университет|универ|академи|институт|колледж|контракт.*обуч|обучени|образовани|за учёбу|за учебу/i.test(all)) return 'edu';
   if (/^(megaline|megacom|beeline|o!|мой дом|элсом|ксэ|газ|водоканал|тазалык)/i.test(t) && !/o!bank/i.test(t)) return 'bills';
   if (/годовое обслуживание|комиссия/i.test(d)) return 'bills';
   if (/o!bank/i.test(t) || /перевод/i.test(t)) return 'transfer';
@@ -265,6 +268,7 @@ export function labelOf(op, cat = autoCat(op)) {
   if (cat === 'loan') return op.type === 'Операции по карте' ? 'Автосписание по кредиту' : op.type;
   if (cat === 'bills') return /годовое обслуживание/i.test(d) ? 'Обслуживание карты' : op.type;
   if (cat === 'bus') return 'Тулпар';
+  if (cat === 'edu' && /КНУ|KNU|баласагын/i.test(`${op.type} ${d}`)) return 'КНУ · контракт';
   if (cat === 'myBanks' || cat === 'myBanksIn') return /o!bank/i.test(`${op.type} ${d}`) ? 'O!Bank · мой номер' : who === 'Simbank' ? 'Simbank · мой номер' : 'Мой номер';
   if (who) return who;
   if (op.type === 'Операции по карте') {

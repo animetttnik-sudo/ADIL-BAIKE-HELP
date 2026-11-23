@@ -223,3 +223,12 @@ test('старые отметки v1 переносятся в объяснен�
   const b = normalizeBank({ tags: { a: 'family', b: 'own', c: 'income' } });
   assert.deepEqual(b.notes, { a: { k: 'family' } });
 });
+
+test('КНУ — образование (контракт), не «Другое»', () => {
+  const b = emptyBank();
+  const mk = (type, desc) => viewOp({ id: 'k', date: '2026-10-01', time: '10:00', amount: -25000, type, desc, account: '1' }, b);
+  assert.equal(mk('КНУ им. Ж.Баласагына', 'Оплата услуг. Получатель: КНУ.').cat, 'edu');
+  assert.equal(mk('КНУ им. Ж.Баласагына', '').label, 'КНУ · контракт');
+  assert.equal(mk('Оплата услуг', 'Получатель: KNU. Контракт за обучение').cat, 'edu');
+  assert.equal(mk('Оплата услуг', 'Получатель: Кнут-сервис').cat, 'other');
+});
