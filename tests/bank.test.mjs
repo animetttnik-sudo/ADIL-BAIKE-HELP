@@ -3,9 +3,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  advice,
-  catOf,
+  chartOf,
   checkTotals,
+  cutOf,
+  explainOptions,
+  normalizeBank,
+  suggestionsOf,
+  viewOp,
   emptyBank,
   mergeStatement,
   parseStatement,
@@ -59,13 +63,14 @@ test('разбор: счёт, период, владелец, операции, 
   assert.equal(st.client, 'ИВАНОВ ПЕТР');
   assert.equal(st.ops.length, 9);
   assert.ok(checkTotals(st).ok);
-  const glovo = st.ops.find((o) => o.amount === -803.5);
-  assert.equal(glovo.cat, 'delivery');
-  assert.equal(glovo.label, 'Glovo');
-  assert.equal(st.ops.find((o) => o.amount === -698.25).cat, 'subs');
-  assert.equal(st.ops.find((o) => o.amount === -2500).cat, 'loan');
+  const b = emptyBank();
+  const v = (amt) => viewOp(st.ops.find((o) => o.amount === amt), b);
+  assert.equal(v(-803.5).cat, 'delivery');
+  assert.equal(v(-803.5).label, 'Glovo');
+  assert.equal(v(-698.25).cat, 'subs');
+  assert.equal(v(-2500).cat, 'loan');
   // две одинаковые поездки в одну минуту — две разные операции
-  const bus = st.ops.filter((o) => o.cat === 'bus');
+  const bus = st.ops.filter((o) => viewOp(o, b).cat === 'bus');
   assert.equal(bus.length, 2);
   assert.notEqual(bus[0].id, bus[1].id);
 });
@@ -90,39 +95,80 @@ test('повторная загрузка не задваивает, неско�
   assert.equal(Object.keys(left.ops).length, 9);
 });
 
-test('свои счета не считаются; перевод от себя («Петр И.») — свой номер', () => {
+test('свои счета Mbank не считаются; свой номер в другом банке — считается', () => {
   const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
   assert.deepEqual(bank.ownPhones, ['996507000001']);
   const s = summarize(bank, periodOf('2026-10-10', 'month'));
-  assert.equal(s.income, 9500); // 1097 между своими и 2000 с своего номера не доход
-  assert.equal(s.must, 2500);
-  assert.equal(s.ask, 500);
-  assert.equal(s.unmarked.length, 1);
+  assert.equal(s.own.length, 1); // 1097 между своими — отдельно
+  assert.equal(s.income, 11500); // 9500 наличными + 2000 с моего номера
+  assert.equal(s.spent, 4535.75);
+  assert.ok(s.incomes.some((c) => c.cat === 'myBanksIn'));
+  assert.equal(s.unclear.length, 1); // перевод Бактыгул М.
 });
 
-test('ручная отметка меняет категорию только этого перевода', () => {
+test('объяснение убирает расход из непонятных и задаёт категорию', () => {
   const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
   const tr = Object.values(bank.ops).find((o) => o.amount === -500);
-  const own = Object.values(bank.ops).find((o) => o.amount === 2000);
-  const b2 = { ...bank, tags: { [tr.id]: 'family', [own.id]: 'income' } };
-  assert.equal(catOf(tr, b2), 'tFamily');
-  assert.equal(catOf(own, b2), 'incomeTr');
-  const s = summarize(b2, periodOf('2026-10-10', 'month'));
-  assert.equal(s.unmarked.length, 0);
-  assert.equal(s.income, 11500);
+  const b2 = { ...bank, notes: { [tr.id]: { k: 'service', text: 'стрижка' } } };
+  const v = viewOp(tr, b2);
+  assert.equal(v.cat, 'service');
+  assert.equal(v.note, 'Услуга: стрижка');
+  assert.equal(summarize(b2, periodOf('2026-10-10', 'month')).unclear.length, 0);
 });
 
-test('периоды: месяц и зарплатные 2 недели', () => {
-  assert.equal(periodOf('2026-10-20', 'month').title, 'Октябрь 2026');
-  const p = periodOf('2026-10-20', 'pay');
-  assert.equal(p.start, '2026-10-16');
-  assert.equal(p.end, '2026-10-29');
+test('варианты объяснения: мелкий QR — туалет первым; прошлый выбор для того же человека — первым', () => {
+  const extra = ['10.10.2026 10:00 Оплата по QR: - 15,00', 'Оплата услуг. Получатель: Оплата по QR. 1240040005807240/'];
+  const lines = ST('1030000000000111', extra).map((l) =>
+    l.startsWith('Всего списаний') ? 'Всего списаний 4 550,75 KGS' : l
+  );
+  const st = parseStatement(lines);
+  assert.ok(checkTotals(st).ok);
+  const { bank } = mergeStatement(emptyBank(), st);
+  const qr = viewOp(Object.values(bank.ops).find((o) => o.amount === -15), bank);
+  assert.equal(qr.cat, 'unknown');
+  assert.equal(explainOptions(qr, bank)[0], 'toilet');
+  const tr = Object.values(bank.ops).find((o) => o.amount === -500);
+  const other = { ...tr, id: 'x', date: '2026-10-11' };
+  const b2 = { ...bank, ops: { ...bank.ops, x: other }, notes: { [tr.id]: { k: 'family' } } };
+  assert.equal(explainOptions(viewOp(other, b2), b2)[0], 'family');
+});
+
+test('возвраты за курс — приход', () => {
+  const extra = ['09.10.2026 10:00 Операции по карте: + 3,00', 'Возврат после корректировки платежа'];
+  const lines = ST('1030000000000111', extra).map((l) =>
+    l.startsWith('Всего пополнений') ? 'Всего пополнений 12 600,00 KGS' : l
+  );
+  const { bank } = mergeStatement(emptyBank(), parseStatement(lines));
+  const s = summarize(bank, periodOf('2026-10-10', 'month'));
+  assert.equal(s.income, 11503);
+});
+
+test('цель и статус: режимы 10/20/30 и свой процент', () => {
   const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
-  assert.equal(periodsOf(bank, 'month').length, 1);
-  assert.ok(periodsOf(bank, 'pay').length >= 1);
+  // приход 11500, расход 4535.75 → сохранено ≈60.6%
+  const p = periodOf('2026-10-10', 'month');
+  assert.equal(summarize(bank, p).status, 'good');
+  const turbo = normalizeBank({ ...bank, goal: { k: 'turbo', pct: 58 } });
+  assert.equal(summarize(turbo, p).pct, 58);
+  assert.equal(summarize(turbo, p).status, 'near');
+  const t2 = normalizeBank({ ...bank, goal: { k: 'turbo', pct: 70 } });
+  assert.equal(summarize(t2, p).status, 'bad');
+  assert.equal(normalizeBank({ goal: { k: 'active' } }).goal.k, 'active');
+  assert.equal(summarize(normalizeBank({ ...bank, goal: { k: 'active' } }), p).pct, 30);
 });
 
-test('советы: минус, доставка, подписки, неотмеченные переводы; кредиты не советуем урезать', () => {
+test('график: столбик на каждую операцию, линия итога и цель', () => {
+  const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
+  const s = summarize(bank, periodOf('2026-10-10', 'month'));
+  const ch = chartOf(s);
+  assert.equal(ch.bars.length, s.views.length);
+  const last = ch.line[ch.line.length - 1];
+  assert.equal(Math.round(last.v * 100) / 100, s.net);
+  assert.equal(Math.round(last.g), Math.round(s.income * 0.2));
+  assert.ok(ch.bars.every((b) => b.t >= 0 && b.t <= 1));
+});
+
+test('можно урезать и предложения', () => {
   const extra = [
     '20.10.2026 22:00 Операции по карте: - 9 000,00',
     '57002022\\417\\Bishkek\\YANDEX EDA\\ 57002022\\',
@@ -132,22 +178,16 @@ test('советы: минус, доставка, подписки, неотме
   );
   const { bank } = mergeStatement(emptyBank(), parseStatement(lines));
   const s = summarize(bank, periodOf('2026-10-10', 'month'));
-  const ks = advice(s, null).map((a) => a.k);
-  assert.ok(ks.includes('minus'));
+  const cut = cutOf(s, bank);
+  assert.ok(cut.list.some((c) => c.cat === 'delivery'));
+  assert.ok(!cut.list.some((c) => c.cat === 'loan'));
+  const ks = suggestionsOf(s, bank).map((x) => x.k);
+  assert.ok(ks.includes('goal'));
   assert.ok(ks.includes('delivery'));
   assert.ok(ks.includes('subs'));
-  assert.ok(ks.includes('unmarked'));
-  assert.ok(!ks.some((k) => k.includes('loan')));
 });
 
-test('возвраты банка не доход — уменьшают траты', () => {
-  const extra = ['09.10.2026 10:00 Операции по карте: + 3,00', 'Возврат после корректировки платежа'];
-  const lines = ST('1030000000000111', extra).map((l) =>
-    l.startsWith('Всего пополнений') ? 'Всего пополнений 12 600,00 KGS' : l
-  );
-  const { bank } = mergeStatement(emptyBank(), parseStatement(lines));
-  const s = summarize(bank, periodOf('2026-10-10', 'month'));
-  assert.equal(s.income, 9500);
-  assert.equal(s.refunds, 3);
-  assert.equal(s.opt, 698.25 + 34 + 803.5 - 3);
+test('старые отметки v1 переносятся в объяснения', () => {
+  const b = normalizeBank({ tags: { a: 'family', b: 'own', c: 'income' } });
+  assert.deepEqual(b.notes, { a: { k: 'family' } });
 });

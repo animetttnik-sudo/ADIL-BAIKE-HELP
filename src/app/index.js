@@ -111,7 +111,8 @@ import { File, Paths } from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
 import { pdfLines } from '../lib/pdfText';
 import { buildImport, calcCountsFromImport } from '../lib/salesImport';
-import { advice as bankAdvice, BANK_KEY, catOf, checkTotals, isOwnAuto, mergeStatement, normalizeBank, parseStatement, periodsOf, removeAccount, shortAcc, summarize as bankSummary, taggable, tagsFor } from '../lib/bank';
+import { CATS as CATS_BANK, chartOf as bankChart, checkTotals, cutOf as bankCut, EXPLAIN as BANK_EXPLAIN, explainOptions, MODES as BANK_MODES, mergeStatement, normalizeBank, parseStatement, periodsOf, removeAccount, shortAcc, suggestionsOf as bankTips, summarize as bankSummary, TURBO as BANK_TURBO, BANK_KEY } from '../lib/bank';
+import { Picker } from '@react-native-picker/picker';
 import Svg, { Circle, Defs, G, Line, LinearGradient, Path as SvgPath, Stop, Text as SvgText } from 'react-native-svg';
 import { areaPath, chartPoints, chartScale, chartSeries, shortMoney, smoothPath, trendOf } from '../lib/chart';
 import { AppIcon } from '../ui/AppIcons';
@@ -2188,75 +2189,274 @@ function AnalysisView({ state, accent }) {
 }
 
 // ───────────────────────── Банк ─────────────────────────
+// «Анализ трат · Mbank»: непонятные расходы (объяснение колесом) → карточка с неоновым
+// биржевым графиком и целью → «Можно урезать» / «Предложения» → свои счета, выписки.
 
-const BANK_MODES = ['pay', 'month'];
+// цвета — как у неонового графика «Анализа»
+const BK_NEON = { good: '#3dff8f', near: '#ffd60a', bad: '#ff3d5e' };
+const NEON_IN = '#3dff8f';
+const NEON_OUT = '#ff3d5e';
 const fmtOpDate = (d) => `${+d.slice(8)} ${MONTHS_R[+d.slice(5, 7) - 1]}`;
+const fmtDayShort = (d) => `${+d.slice(8)} ${MONTHS_R[+d.slice(5, 7) - 1].slice(0, 3)}`;
 const signed = (n) => `${n < 0 ? '−' : '+'}${money(Math.abs(n))}`;
 
-/** Строка операции; у переводов по тапу — отметки «что это было». */
-const BankOpRow = memo(function BankOpRow({ op, bank, last, open, onOpen, onTag, accent }) {
-  const can = taggable(op);
-  const tag = bank.tags[op.id];
-  const auto = !tag && isOwnAuto(op, bank);
-  const cat = catOf(op, bank);
-  const note = tag
-    ? (tagsFor(op).find((t) => t.k === tag) || {}).label
-    : auto
-      ? 'свой номер — не считается'
-      : can && cat === 'transfer'
-        ? 'не отмечено'
-        : null;
+/**
+ * Биржевой график периода: сверху линия накопленного итога (приход − расход) цвета статуса
+ * (зелёный / жёлтый — близко к цели / красный — ниже цели), пунктир — цель; снизу на каждую
+ * операцию столбик: пополнение — зелёный вверх, расход — красный вниз, длина ∝ сумме.
+ */
+const BankChart = memo(function BankChart({ chart, status, period }) {
+  const [w, setW] = useState(0);
+  const prog = useSharedValue(0);
+  const reduce = useReducedMotion();
+  const H = 200;
+  const LINE_T = 12;
+  const LINE_B = 120;
+  const BASE = 160;
+  const HALF = 30;
+  const LW = CH_LABEL_W;
+  const PX = 10;
+  const color = BK_NEON[status] || BK_NEON.good;
+  const geo = useMemo(() => {
+    if (!w) return null;
+    const pw = w - LW;
+    const vals = chart.line.flatMap((p) => [p.v, p.g]);
+    const sc = chartScale([vals]);
+    const X = (t) => PX + t * (pw - PX * 2);
+    const Y = (v) => LINE_T + ((sc.hi - v) / (sc.hi - sc.lo)) * (LINE_B - LINE_T);
+    // биржевая линия: итог на конец каждого дня, прямые отрезки между днями
+    const pts = chart.line.map((p) => ({ x: X(p.t), y: Y(p.v) }));
+    const goal = chart.line.map((p, i) => `${i ? 'L' : 'M'}${X(p.t)},${Y(p.g)}`).join('');
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p.x},${p.y}`).join('');
+    const last = pts[pts.length - 1];
+    const area = `${line}L${last.x},${LINE_B}L${pts[0].x},${LINE_B}Z`;
+    const maxA = Math.max(1, ...chart.bars.map((b) => Math.abs(b.a)));
+    const bars = chart.bars.map((b) => {
+      const l = Math.max(2, Math.sqrt(Math.abs(b.a) / maxA) * HALF); // крупнее покупка — длиннее столбик
+      const x = X(b.t);
+      return { up: b.a > 0, d: b.a > 0 ? `M${x},${BASE - 2}L${x},${BASE - 2 - l}` : `M${x},${BASE + 2}L${x},${BASE + 2 + l}` };
+    });
+    const pre = pts[pts.length - 2] || pts[0];
+    const angle = pts.length > 1 ? (Math.atan2(last.y - pre.y, last.x - pre.x) * 180) / Math.PI : 0;
+    return { sc, Y, line, len, goal, area, bars, end: { x: last.x, y: last.y, angle } };
+  }, [w, chart, LW]);
+  const dkey = `${period.key}|${chart.line.length}|${w}`;
+  useEffect(() => {
+    if (!w) return;
+    if (reduce) {
+      prog.value = 1;
+      return;
+    }
+    prog.value = 0;
+    prog.value = withTiming(1, CH_DRAW);
+  }, [dkey, w, reduce, prog]);
+  const fade = useAnimatedProps(() => ({ opacity: interpolate(prog.value, [0.25, 1], [0, 1], Extrapolation.CLAMP) }));
+  const mid = addDays(period.start, Math.round((parse(period.end) - parse(period.start)) / 86400000 / 2));
   return (
-    <View style={[styles.lRow, { flexDirection: 'column', alignItems: 'stretch' }, !last && styles.lRowSep]}>
-      <Pressable
-        disabled={!can}
-        onPress={() => {
-          Haptics.selectionAsync().catch(noop);
-          onOpen(open ? null : op.id);
-        }}
-        style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
-      >
-        <View style={{ flex: 1, paddingRight: 10 }}>
-          <Text style={styles.lTitle} numberOfLines={1}>
-            {op.label}
-          </Text>
-          <Text style={[styles.lSub, note === 'не отмечено' && { color: '#ff9f0a' }]} numberOfLines={1}>
-            {fmtOpDate(op.date)} · {op.time} · {shortAcc(op.account)}
-            {note ? ` · ${note}` : ''}
-          </Text>
-        </View>
-        <Text style={[styles.lVal, op.amount > 0 && styles.good]}>{signed(op.amount)}</Text>
-      </Pressable>
-      {open && can ? (
-        <View style={styles.bankTags}>
-          <FilterChips
-            options={tagsFor(op).map((t) => ({ k: t.k, label: t.label }))}
-            value={tag || (auto ? 'own' : null)}
-            onChange={(k) => onTag(op.id, k)}
-            accent={accent}
-            wrap
-          />
-          {tag ? (
-            <Pressable onPress={() => onTag(op.id, null)} hitSlop={8} style={{ marginTop: 8 }}>
-              <Text style={styles.lSub}>Снять отметку</Text>
-            </Pressable>
-          ) : null}
-        </View>
+    <View
+      onLayout={(e) => {
+        const nw = Math.round(e.nativeEvent.layout.width);
+        if (nw && nw !== w) setW(nw);
+      }}
+      style={{ height: H + 16 }}
+    >
+      {geo ? (
+        <Svg width={w} height={H}>
+          <Defs>
+            <LinearGradient id="bkArea" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={color} stopOpacity={0.26} />
+              <Stop offset="1" stopColor={color} stopOpacity={0} />
+            </LinearGradient>
+          </Defs>
+          {geo.sc.grid.map((v) => (
+            <G key={v}>
+              <Line
+                x1={LW}
+                x2={w}
+                y1={geo.Y(v)}
+                y2={geo.Y(v)}
+                stroke="#ffffff"
+                strokeOpacity={v === 0 ? 0.18 : 0.06}
+                strokeDasharray={v === 0 ? undefined : '3 5'}
+              />
+              <SvgText x={LW - 6} y={geo.Y(v) + 3.5} textAnchor="end" fill="rgba(235,235,245,0.38)" fontSize={10} fontWeight="600">
+                {shortMoney(v)}
+              </SvgText>
+            </G>
+          ))}
+          <G transform={`translate(${LW} 0)`}>
+            <AG animatedProps={fade}>
+              <SvgPath d={geo.area} fill="url(#bkArea)" />
+              <SvgPath d={geo.goal} stroke="#ffffff" strokeOpacity={0.4} strokeWidth={1.2} strokeDasharray="4 4" fill="none" />
+            </AG>
+            <NeonLine d={geo.line} len={geo.len} color={color} prog={prog} />
+            <NeonArrow end={geo.end} color={color} prog={prog} />
+            <Line x1={0} x2={w - LW} y1={BASE} y2={BASE} stroke="#ffffff" strokeOpacity={0.12} />
+            <AG animatedProps={fade}>
+              {geo.bars.map((b, i) => (
+                <G key={i}>
+                  <SvgPath d={b.d} stroke={b.up ? NEON_IN : NEON_OUT} strokeOpacity={0.25} strokeWidth={5} strokeLinecap="round" />
+                  <SvgPath d={b.d} stroke={b.up ? NEON_IN : NEON_OUT} strokeWidth={1.8} strokeLinecap="round" />
+                </G>
+              ))}
+            </AG>
+          </G>
+        </Svg>
       ) : null}
+      <View style={[styles.bkAxis, { left: LW }]}>
+        <Text style={styles.bkAxisTxt}>{fmtDayShort(period.start)}</Text>
+        <Text style={styles.bkAxisTxt}>{fmtDayShort(mid)}</Text>
+        <Text style={styles.bkAxisTxt}>{fmtDayShort(period.end)}</Text>
+      </View>
     </View>
   );
 });
 
-/**
- * Вкладка «Банк»: выписки MBANK по всем счетам → один общий кошелёк. Переводы между своими
- * счетами не считаются; периоды — 2 недели (как зарплата) или месяц; советы — только по
- * необязательным тратам. Данные — в своём ключе zp_bank_v1 (попадает в резервную копию).
- */
-function BankView({ accent, apiRef, onToast }) {
+/** Нижняя карточка с колесом (как выбор даты): Отмена / заголовок / Готово. */
+function WheelModal({ open, title, sub, onCancel, onDone, accent, children }) {
+  // открытие задаёт родитель (open); после закрытия Modal живёт, пока карточка уезжает вниз
+  const [wasOpen, setWasOpen] = useState(open);
+  const [leaving, setLeaving] = useState(false);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setLeaving(!open);
+  }
+  const shown = open || leaving;
+  const ty = useSharedValue(SCREEN_H);
+  const back = useSharedValue(0);
+  useEffect(() => {
+    if (open) {
+      ty.value = SCREEN_H;
+      back.value = withTiming(1, BACK_IN);
+      ty.value = withTiming(0, { duration: 280, easing: Easing.out(Easing.cubic) });
+    } else {
+      back.value = withTiming(0, SHEET_OUT);
+      ty.value = withTiming(SCREEN_H, SHEET_OUT, (fin) => {
+        'worklet';
+        if (fin) scheduleOnRN(setLeaving, false);
+      });
+    }
+  }, [open, ty, back]);
+  const card = useAnimatedStyle(() => ({ transform: [{ translateY: ty.value }] }));
+  const dim = useAnimatedStyle(() => ({ opacity: back.value }));
+  return (
+    <Modal visible={shown} transparent animationType="none" onRequestClose={onCancel}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={styles.wheelBack}>
+          <Animated.View style={[styles.wheelDim, dim]} pointerEvents="none" />
+          <Pressable style={StyleSheet.absoluteFill} onPress={onCancel} />
+          <Animated.View onStartShouldSetResponder={() => true} style={[styles.wheelCard, card]}>
+            <View style={styles.handle} />
+            <View style={styles.wheelBar}>
+              <Pressable hitSlop={10} onPress={onCancel}>
+                <Text style={styles.linkMuted}>Отмена</Text>
+              </Pressable>
+              <View style={{ flex: 1, alignItems: 'center', paddingHorizontal: 8 }}>
+                <Text style={styles.sheetTitle} numberOfLines={1}>
+                  {title}
+                </Text>
+                {sub ? (
+                  <Text style={styles.lSub} numberOfLines={1}>
+                    {sub}
+                  </Text>
+                ) : null}
+              </View>
+              <Pressable
+                hitSlop={10}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(noop);
+                  onDone();
+                }}
+              >
+                <Text style={[styles.link, { color: accent }]}>Готово</Text>
+              </Pressable>
+            </View>
+            {children}
+          </Animated.View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+const WHEEL_ITEM = { color: '#fff', fontSize: 22 };
+
+/** Строка операции в списках шторок. */
+function BankRow({ v, last, onPress }) {
+  const body = (
+    <>
+      <View style={{ flex: 1, paddingRight: 10 }}>
+        <Text style={styles.lTitle} numberOfLines={1}>
+          {v.label}
+        </Text>
+        <Text style={styles.lSub} numberOfLines={1}>
+          {fmtOpDate(v.date)} · {v.time}
+          {v.note ? ` · ${v.note}` : ''}
+        </Text>
+      </View>
+      <Text style={[styles.lVal, v.amount > 0 && { color: NEON_IN }]}>{signed(v.amount)}</Text>
+    </>
+  );
+  if (!onPress) return <View style={[styles.lRow, !last && styles.lRowSep]}>{body}</View>;
+  return (
+    <Pressable onPress={onPress} style={[styles.lRow, !last && styles.lRowSep]}>
+      {body}
+    </Pressable>
+  );
+}
+
+/** Категории с полоской доли; по нажатию раскрываются операции. */
+function BankCatList({ cats, total, color, onOp }) {
+  const [open, setOpen] = useState(null);
+  const max = Math.max(1, ...cats.map((c) => c.sum));
+  return (
+    <ItemCard style={styles.listCard}>
+      {cats.map((c, i) => {
+        const on = open === c.cat;
+        return (
+          <View key={c.cat}>
+            <Pressable
+              onPress={() => {
+                Haptics.selectionAsync().catch(noop);
+                setOpen(on ? null : c.cat);
+              }}
+              style={[styles.anRow, i === cats.length - 1 && !on && { borderBottomWidth: 0 }]}
+            >
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                <Text style={styles.lTitle}>{c.label}</Text>
+                <Text style={styles.lVal}>{money(c.sum)}</Text>
+              </View>
+              <View style={styles.anTrack}>
+                <View style={[styles.anFill, { width: `${(c.sum / max) * 100}%`, backgroundColor: color }]} />
+              </View>
+              <Text style={styles.lSub}>
+                {c.n} {plural(c.n, 'операция', 'операции', 'операций')}
+                {total ? ` · ${Math.round((c.sum / total) * 100)}%` : ''}
+              </Text>
+            </Pressable>
+            {on ? (
+              <View style={styles.bankSub}>
+                {c.ops.map((v, j) => (
+                  <BankRow key={v.id} v={v} last={j === c.ops.length - 1} onPress={onOp && (v.note || v.unclear) ? () => onOp(v) : null} />
+                ))}
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+    </ItemCard>
+  );
+}
+
+function BankView({ accent, apiRef, onToast, onHead }) {
   const [bank, setBank] = useState(null);
   const [pi, setPi] = useState(0);
-  const [openCat, setOpenCat] = useState(null);
-  const [openOp, setOpenOp] = useState(null);
+  const [sheet, setSheet] = useState(null);
+  const [explain, setExplain] = useState(null); // { v, opts, k, text }
+  const [perPick, setPerPick] = useState(null); // { mode, key }
+  const [turboOpen, setTurboOpen] = useState(false);
   const bankRef = useRef(null);
   useEffect(() => {
     bankRef.current = bank;
@@ -2298,7 +2498,7 @@ function BankView({ accent, apiRef, onToast }) {
         try {
           const st = parseStatement(pdfLines(await new File(a.uri).bytes()));
           if (!st.account || !st.ops.length) {
-            msgs.push(`${a.name || 'PDF'}: не похоже на выписку MBANK`);
+            msgs.push(`${a.name || 'PDF'}: не похоже на выписку Mbank`);
             continue;
           }
           const chk = checkTotals(st);
@@ -2307,7 +2507,7 @@ function BankView({ accent, apiRef, onToast }) {
           ok++;
           msgs.push(
             `Счёт ${shortAcc(st.account)}: новых ${r.added}${r.skipped ? `, уже были ${r.skipped}` : ''}` +
-              (chk.ok ? '' : '\n⚠️ сумма операций не сошлась с итогом банка — часть строк могла не прочитаться')
+              (chk.ok ? '' : '\n⚠️ сумма операций не сошлась с итогом банка')
           );
         } catch (e) {
           msgs.push(`${a.name || 'PDF'}: не получилось прочитать (${String(e?.message || e)})`);
@@ -2323,42 +2523,81 @@ function BankView({ accent, apiRef, onToast }) {
       Alert.alert('Не получилось открыть PDF', String(e?.message || e));
     }
   }, [save]);
-  useEffect(() => {
-    if (apiRef) apiRef.current = { importFiles };
-  }, [apiRef, importFiles]);
 
   const mode = bank ? bank.mode : 'pay';
   const periods = useMemo(() => (bank ? periodsOf(bank, mode) : []), [bank, mode]);
   const idx = Math.min(pi, Math.max(0, periods.length - 1));
   const period = periods[idx];
   const sum = useMemo(() => (bank && period ? bankSummary(bank, period) : null), [bank, period]);
-  const prevSum = useMemo(
-    () => (bank && periods[idx + 1] ? bankSummary(bank, periods[idx + 1]) : null),
-    [bank, periods, idx]
-  );
-  const tips = useMemo(() => (sum ? bankAdvice(sum, prevSum) : []), [sum, prevSum]);
+  const chart = useMemo(() => (sum ? bankChart(sum) : null), [sum]);
+  const cut = useMemo(() => (sum ? bankCut(sum, bank) : null), [sum, bank]);
+  const tips = useMemo(() => (sum ? bankTips(sum, bank) : []), [sum, bank]);
+  const tipsSave = tips.reduce((a, t) => a + (t.save || 0), 0);
 
-  const onTag = useCallback(
-    (id, k) => {
-      const b = bankRef.current;
-      const tags = { ...b.tags };
-      if (k) tags[id] = k;
-      else delete tags[id];
-      Haptics.selectionAsync().catch(noop);
-      save({ ...b, tags });
-      if (k) setOpenOp(null);
-    },
-    [save]
-  );
-  const setMode = (i) => {
-    const m = BANK_MODES[i];
-    if (!bank || m === bank.mode) return;
-    save({ ...bank, mode: m });
-    setPi(0);
-    setOpenCat(null);
+  const openPeriod = useCallback(() => {
+    const b = bankRef.current;
+    if (!b || !Object.keys(b.ops).length) return;
+    Haptics.selectionAsync().catch(noop);
+    setPerPick({ mode: b.mode, key: null });
+  }, []);
+  useEffect(() => {
+    if (apiRef) apiRef.current = { importFiles, openPeriod };
+  }, [apiRef, importFiles, openPeriod]);
+  const headTitle = period ? (mode === 'month' ? period.title : period.title) : null;
+  useEffect(() => {
+    onHead?.(headTitle);
+  }, [onHead, headTitle]);
+
+  const openExplain = useCallback((v) => {
+    const b = bankRef.current;
+    const opts = explainOptions(v, b);
+    const cur = b.notes[v.id];
+    Haptics.selectionAsync().catch(noop);
+    setExplain({ v, opts, k: cur ? cur.k : opts[0], text: cur?.text || '' });
+  }, []);
+  const doneExplain = () => {
+    if (!explain) return;
+    const ex = BANK_EXPLAIN[explain.k];
+    const text = explain.text.trim();
+    if (ex.need && !text) {
+      Alert.alert(ex.need, 'Напиши пару слов — так позже будет понятно, на что ушли деньги.');
+      return;
+    }
+    const b = bankRef.current;
+    save({ ...b, notes: { ...b.notes, [explain.v.id]: ex.need ? { k: explain.k, text } : { k: explain.k } } });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(noop);
+    setExplain(null);
+  };
+  const clearExplain = () => {
+    const b = bankRef.current;
+    const notes = { ...b.notes };
+    delete notes[explain.v.id];
+    save({ ...b, notes });
+    setExplain(null);
+  };
+
+  const donePeriod = () => {
+    if (!perPick) return;
+    const b = bankRef.current;
+    const list = periodsOf(b, perPick.mode);
+    const i = perPick.key ? Math.max(0, list.findIndex((p) => p.key === perPick.key)) : 0;
+    if (perPick.mode !== b.mode) save({ ...b, mode: perPick.mode });
+    setPi(i);
+    setPerPick(null);
+  };
+
+  const setGoal = (g) => {
+    Haptics.selectionAsync().catch(noop);
+    save({ ...bankRef.current, goal: { ...bankRef.current.goal, ...g } });
+  };
+  const toggleCut = (cat) => {
+    const b = bankRef.current;
+    const has = b.cut.includes(cat);
+    Haptics.selectionAsync().catch(noop);
+    save({ ...b, cut: has ? b.cut.filter((c) => c !== cat) : [...b.cut, cat] });
   };
   const askRemove = (num) =>
-    Alert.alert(`Убрать счёт ${shortAcc(num)}?`, 'Удалятся его операции и отметки. Выписку можно загрузить снова.', [
+    Alert.alert(`Убрать счёт ${shortAcc(num)}?`, 'Удалятся его операции и объяснения. Выписку можно загрузить снова.', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Убрать',
@@ -2370,14 +2609,176 @@ function BankView({ accent, apiRef, onToast }) {
       },
     ]);
 
+  const renderSheet = (key) => {
+    const close = () => setSheet(null);
+    if (!bank || !sum) return { title: '', onClose: close, body: null };
+    switch (key) {
+      case 'cut': {
+        const others = sum.expenses.filter((c) => !bank.cut.includes(c.cat) && CATS_BANK[c.cat]?.kind === 'out');
+        return {
+          title: 'Можно урезать',
+          onClose: close,
+          body: (
+            <>
+              <ItemCard style={[styles.listCard, styles.padCard]}>
+                <Text style={styles.k}>Не первой необходимости</Text>
+                <Text style={[styles.bigPay, { marginTop: 4, color: NEON_OUT }]} numberOfLines={1} adjustsFontSizeToFit>
+                  {money(cut.total)}
+                </Text>
+                <Text style={styles.lSub}>
+                  {sum.spent ? `${Math.round((cut.total / sum.spent) * 100)}% всех расходов · ${period.full}` : period.full}
+                </Text>
+              </ItemCard>
+              {cut.list.length ? <BankCatList cats={cut.list} total={cut.total} color={NEON_OUT} onOp={openExplain} /> : null}
+              <Text style={styles.sectionLabel}>Что считать необязательным</Text>
+              <ItemCard style={styles.listCard}>
+                {[...cut.list, ...others].map((c, i, arr) => {
+                  const on = bank.cut.includes(c.cat);
+                  return (
+                    <Pressable key={c.cat} onPress={() => toggleCut(c.cat)} style={[styles.lRow, i < arr.length - 1 && styles.lRowSep]}>
+                      <Text style={styles.lKey}>{c.label}</Text>
+                      <View style={[styles.bkCheck, on && { backgroundColor: NEON_OUT, borderColor: NEON_OUT }]}>
+                        {on ? <AppIcon name="check" size={14} variant="glyph" color="#fff" /> : null}
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ItemCard>
+            </>
+          ),
+        };
+      }
+      case 'tips':
+        return {
+          title: 'Предложения',
+          onClose: close,
+          body: (
+            <>
+              {tips.map((t) => (
+                <Glass key={t.k} style={styles.bkTip} intensity={34}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.lTitle, t.tone === 'bad' && { color: NEON_OUT }]}>{t.title}</Text>
+                    <Text style={[styles.lSub, { fontSize: 14, marginTop: 4, lineHeight: 19 }]}>{t.text}</Text>
+                  </View>
+                  {t.save ? <Text style={styles.bkSave}>−{money(t.save)}</Text> : null}
+                </Glass>
+              ))}
+              {!tips.length ? <EmptyState icon="check" title="Всё в порядке" text="Необязательных трат почти нет." accent={accent} /> : null}
+            </>
+          ),
+        };
+      case 'own':
+        return {
+          title: 'Между своими счетами',
+          onClose: close,
+          body: (
+            <>
+              <Text style={[styles.hint, { marginBottom: 10 }]}>
+                Переводы между счетами Mbank не входят ни в приход, ни в расход — иначе суммы задвоятся.
+              </Text>
+              <ItemCard style={styles.listCard}>
+                {sum.own.map((v, i) => (
+                  <BankRow key={v.id} v={{ ...v, label: `Счёт ${shortAcc(v.account)}` }} last={i === sum.own.length - 1} />
+                ))}
+              </ItemCard>
+            </>
+          ),
+        };
+      case 'goal': {
+        const turbo = bank.goal.k === 'turbo';
+        return {
+          title: 'Цель',
+          onClose: close,
+          body: (
+            <>
+              <Text style={[styles.hint, { marginBottom: 10 }]}>Приход должен превышать расход на выбранный процент.</Text>
+              <ItemCard style={styles.listCard}>
+                {BANK_MODES.map((m, i) => {
+                  const on = bank.goal.k === m.k;
+                  return (
+                    <Pressable
+                      key={m.k}
+                      onPress={() => setGoal({ k: m.k })}
+                      onLongPress={
+                        m.k === 'active'
+                          ? () => {
+                              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(noop);
+                              setTurboOpen(true);
+                            }
+                          : undefined
+                      }
+                      delayLongPress={900}
+                      style={[styles.lRow, (i < BANK_MODES.length - 1 || turboOpen || turbo) && styles.lRowSep]}
+                    >
+                      <Text style={[styles.lTitle, on && { color: accent }]}>{m.label}</Text>
+                      <Text style={[styles.lVal, on && { color: accent }]}>{m.pct}%</Text>
+                    </Pressable>
+                  );
+                })}
+                {turboOpen || turbo ? (
+                  <View style={[styles.lRow, { flexDirection: 'column', alignItems: 'stretch', paddingVertical: 12 }]}>
+                    <Pressable onPress={() => setGoal({ k: 'turbo' })} style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                      <Text style={[styles.lTitle, { color: turbo ? NEON_OUT : '#fff' }]}>⚡ {BANK_TURBO.label}</Text>
+                      <Text style={[styles.lVal, turbo && { color: NEON_OUT }]}>{bank.goal.pct}%</Text>
+                    </Pressable>
+                    <View style={styles.bkStep}>
+                      {[-5, -1, 1, 5].map((d) => (
+                        <ScaleButton
+                          key={d}
+                          style={styles.bkStepBtn}
+                          onPress={() => setGoal({ k: 'turbo', pct: Math.min(90, Math.max(1, bank.goal.pct + d)) })}
+                        >
+                          <Text style={styles.actBtnTxt}>{d > 0 ? `+${d}` : `−${-d}`}</Text>
+                        </ScaleButton>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+              </ItemCard>
+              {!turboOpen && !turbo ? <Text style={styles.hint}> </Text> : null}
+            </>
+          ),
+        };
+      }
+      case 'accounts':
+        return {
+          title: 'Выписки Mbank',
+          onClose: close,
+          body: (
+            <>
+              <ItemCard style={styles.listCard}>
+                {Object.values(bank.accounts).map((a, i) => (
+                  <Pressable key={a.num} onLongPress={() => askRemove(a.num)} style={[styles.lRow, styles.lRowSep]}>
+                    <View>
+                      <Text style={styles.lTitle}>Счёт {shortAcc(a.num)}</Text>
+                      <Text style={styles.lSub}>
+                        {fmtOpDate(a.from)} – {fmtOpDate(a.to)}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))}
+                <Pressable onPress={importFiles} style={styles.lRow}>
+                  <Text style={[styles.lTitle, { color: accent }]}>Загрузить выписки</Text>
+                  <GlyphChev />
+                </Pressable>
+              </ItemCard>
+              <Text style={styles.hint}>Удерживай счёт, чтобы убрать его.</Text>
+            </>
+          ),
+        };
+      default:
+        return { title: '', onClose: close, body: null };
+    }
+  };
+
   if (!bank) return null;
-  const accounts = Object.values(bank.accounts);
-  if (!accounts.length || !period || !sum) {
+  const hasOps = Object.keys(bank.ops).length > 0;
+  if (!hasOps || !period || !sum) {
     return (
       <EmptyState
         icon="bank"
-        title="Загрузи выписки MBANK"
-        text="Скачай в приложении MBANK выписку в PDF по каждому счёту и выбери их здесь — можно все сразу. Переводы между своими счетами не посчитаются."
+        title="Загрузи выписки Mbank"
+        text="Скачай в приложении Mbank выписку в PDF по каждому счёту и выбери их здесь — можно все сразу."
         action="Выбрать PDF"
         onAction={importFiles}
         accent={accent}
@@ -2385,215 +2786,175 @@ function BankView({ accent, apiRef, onToast }) {
     );
   }
 
-  const spentMax = Math.max(1, ...sum.expenses.map((c) => c.sum));
-  const unmarked = sum.unmarked;
+  const color = BK_NEON[sum.status];
+  const pctLine =
+    sum.rate == null
+      ? sum.spent > 0
+        ? 'Прихода не было'
+        : 'Операций нет'
+      : sum.rate < 0
+        ? `Расход больше прихода на ${money(sum.spent - sum.income)}`
+        : `Сохранено ${Math.round(sum.rate)}%`;
+  const cutNames = cut.list.slice(0, 3).map((c) => c.label.toLowerCase()).join(', ');
+  const perList = perPick ? periodsOf(bank, perPick.mode) : [];
+  const exOpt = explain ? BANK_EXPLAIN[explain.k] : null;
+
   return (
     <>
-      <View style={{ marginBottom: 12 }}>
-        <SegmentCapsule value={BANK_MODES.indexOf(mode)} labels={['2 недели', 'Месяц']} height={46} onChange={setMode} />
-      </View>
-
-      <View style={styles.bankNav}>
-        <ScaleButton
-          style={[styles.bankNavBtn, idx >= periods.length - 1 && { opacity: 0.3 }]}
-          onPress={() => idx < periods.length - 1 && setPi(idx + 1)}
-          accessibilityLabel="Раньше"
-        >
-          <AppIcon name="chevronLeft" size={18} variant="glyph" color="#fff" />
-        </ScaleButton>
-        <View style={{ flex: 1, alignItems: 'center' }}>
-          <Text style={styles.lTitle} numberOfLines={1}>
-            {period.title}
-          </Text>
-          <Text style={styles.lSub}>
-            {idx === 0 ? 'последний период' : `${idx} назад`} · {accounts.length} {plural(accounts.length, 'счёт', 'счёта', 'счетов')}
-          </Text>
-        </View>
-        <ScaleButton
-          style={[styles.bankNavBtn, idx === 0 && { opacity: 0.3 }]}
-          onPress={() => idx > 0 && setPi(idx - 1)}
-          accessibilityLabel="Позже"
-        >
-          <AppIcon name="chevronRight" size={18} variant="glyph" color="#fff" />
-        </ScaleButton>
-      </View>
-
-      <ItemCard style={[styles.listCard, styles.padCard]}>
-        <Text style={styles.k}>Итог за период</Text>
-        <Text
-          style={[styles.bigPay, { marginTop: 4, color: sum.net >= 0 ? accent : '#ff453a' }]}
-          numberOfLines={1}
-          adjustsFontSizeToFit
-        >
-          {signed(sum.net)}
-        </Text>
-        <View style={styles.statRow}>
-          <Stat k="Пришло" v={money(sum.income)} tone="good" />
-          <Stat k="Ушло" v={money(sum.spent)} tone="bad" />
-        </View>
-        <View style={styles.statRow}>
-          <Stat k="Обязательное" v={money(sum.must)} />
-          <Stat k="Можно урезать" v={money(sum.opt)} />
-        </View>
-        {sum.refunds ? (
-          <Text style={[styles.lSub, { marginTop: 10 }]}>
-            Возвраты от банка {money(sum.refunds)} сом — уже вычтены из трат, это не доход
-          </Text>
-        ) : null}
-        {sum.own ? (
-          <Text style={[styles.lSub, { marginTop: 10 }]}>
-            Не посчитано {sum.own} {plural(sum.own, 'перевод', 'перевода', 'переводов')} между своими счетами
-          </Text>
-        ) : null}
-      </ItemCard>
-
-      {tips.length ? <Text style={styles.sectionLabel}>Где урезать</Text> : null}
-      {tips.map((t) => (
-        <ItemCard key={t.k} style={[styles.listCard, styles.padCard]}>
-          <Text style={[styles.lTitle, t.tone === 'bad' && styles.bad, t.tone === 'good' && styles.good]}>{t.title}</Text>
-          <Text style={[styles.lSub, { fontSize: 13, marginTop: 4 }]}>{t.text}</Text>
-        </ItemCard>
-      ))}
-
-      {unmarked.length ? (
+      {sum.unclear.length ? (
         <>
-          <Text style={styles.sectionLabel}>Отметь переводы</Text>
-          <ItemCard style={styles.listCard}>
-            {unmarked.map((op, i) => (
-              <BankOpRow
-                key={op.id}
-                op={op}
-                bank={bank}
-                last={i === unmarked.length - 1}
-                open={openOp === op.id}
-                onOpen={setOpenOp}
-                onTag={onTag}
-                accent={accent}
-              />
-            ))}
-          </ItemCard>
-        </>
-      ) : null}
-
-      <Text style={styles.sectionLabel}>Расходы</Text>
-      <ItemCard style={styles.listCard}>
-        {sum.expenses.map((c, i) => {
-          const on = openCat === c.cat;
-          return (
-            <View key={c.cat}>
-              <Pressable
-                onPress={() => {
-                  Haptics.selectionAsync().catch(noop);
-                  setOpenCat(on ? null : c.cat);
-                }}
-                style={[styles.anRow, i === sum.expenses.length - 1 && !on && { borderBottomWidth: 0 }]}
-              >
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                  <Text style={styles.lTitle}>{c.label}</Text>
-                  <Text style={styles.lVal}>{money(c.sum)}</Text>
-                </View>
-                <View style={styles.anTrack}>
-                  <View
-                    style={[
-                      styles.anFill,
-                      {
-                        width: `${(c.sum / spentMax) * 100}%`,
-                        backgroundColor: c.kind === 'must' ? 'rgba(235,235,245,0.45)' : c.kind === 'ask' ? '#ff9f0a' : '#ff453a',
-                      },
-                    ]}
-                  />
-                </View>
-                <Text style={styles.lSub}>
-                  {c.n} {plural(c.n, 'операция', 'операции', 'операций')}
-                  {c.kind === 'must' ? ' · обязательное' : ''} · {Math.round((c.sum / Math.max(1, sum.spent)) * 100)}% трат
-                </Text>
-              </Pressable>
-              {on ? (
-                <View style={styles.bankSub}>
-                  {c.ops.map((op, j) => (
-                    <BankOpRow
-                      key={op.id}
-                      op={op}
-                      bank={bank}
-                      last={j === c.ops.length - 1}
-                      open={openOp === op.id}
-                      onOpen={setOpenOp}
-                      onTag={onTag}
-                      accent={accent}
-                    />
-                  ))}
-                </View>
-              ) : null}
+          <View style={styles.bkHead}>
+            <Text style={styles.bkHeadTxt}>Непонятные расходы</Text>
+            <View style={styles.bkBadge}>
+              <Text style={styles.bkBadgeTxt}>{sum.unclear.length}</Text>
             </View>
-          );
-        })}
-        {!sum.expenses.length ? (
-          <View style={styles.lRow}>
-            <Text style={styles.lSub}>Трат в этом периоде нет</Text>
           </View>
-        ) : null}
-      </ItemCard>
-
-      {sum.incomes.length ? (
-        <>
-          <Text style={styles.sectionLabel}>Пополнения</Text>
-          <ItemCard style={styles.listCard}>
-            {sum.incomes.map((c, i) => {
-              const on = openCat === c.cat;
-              return (
-                <View key={c.cat}>
-                  <Pressable
-                    onPress={() => setOpenCat(on ? null : c.cat)}
-                    style={[styles.lRow, i < sum.incomes.length - 1 && styles.lRowSep]}
-                  >
-                    <Text style={styles.lKey}>
-                      {c.label} · {c.n}
-                    </Text>
-                    <Text style={[styles.lVal, styles.good]}>+{money(c.sum)}</Text>
-                  </Pressable>
-                  {on ? (
-                    <View style={styles.bankSub}>
-                      {c.ops.map((op, j) => (
-                        <BankOpRow
-                          key={op.id}
-                          op={op}
-                          bank={bank}
-                          last={j === c.ops.length - 1}
-                          open={openOp === op.id}
-                          onOpen={setOpenOp}
-                          onTag={onTag}
-                          accent={accent}
-                        />
-                      ))}
-                    </View>
-                  ) : null}
+          <Glass style={styles.bkList} intensity={34}>
+            {sum.unclear.map((v, i) => (
+              <Pressable key={v.id} onPress={() => openExplain(v)} style={[styles.bkURow, i < sum.unclear.length - 1 && styles.lRowSep]}>
+                <View style={styles.bkQ}>
+                  <Text style={styles.bkQTxt}>?</Text>
                 </View>
-              );
-            })}
-          </ItemCard>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={styles.lTitle} numberOfLines={1}>
+                    {v.label}
+                  </Text>
+                  <Text style={styles.lSub}>
+                    {fmtOpDate(v.date)} · {v.time}
+                  </Text>
+                </View>
+                <Text style={[styles.lVal, { color: NEON_OUT }]}>{signed(v.amount)}</Text>
+              </Pressable>
+            ))}
+          </Glass>
         </>
       ) : null}
 
-      <Text style={styles.sectionLabel}>Счета</Text>
-      <ItemCard style={styles.listCard}>
-        {accounts.map((a, i) => (
-          <Pressable key={a.num} onLongPress={() => askRemove(a.num)} style={[styles.lRow, styles.lRowSep]}>
-            <View>
-              <Text style={styles.lTitle}>Счёт {shortAcc(a.num)}</Text>
-              <Text style={styles.lSub}>
-                {fmtOpDate(a.from)} – {fmtOpDate(a.to)} · удерживай, чтобы убрать
+      <Glass style={styles.bkCard} intensity={42}>
+        <View style={styles.bkTop}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <View style={styles.bkFlow}>
+              <Text style={[styles.bkArrow, { color: NEON_IN }]}>↑</Text>
+              <Text style={[styles.bkFlowNum, { color: NEON_IN }]} numberOfLines={1} adjustsFontSizeToFit>
+                {money(sum.income)}
               </Text>
             </View>
-          </Pressable>
-        ))}
-        <Pressable onPress={importFiles} style={styles.lRow}>
-          <Text style={[styles.lTitle, { color: accent }]}>Загрузить выписки</Text>
-          <GlyphChev />
-        </Pressable>
-      </ItemCard>
+            <View style={styles.bkFlow}>
+              <Text style={[styles.bkArrow, { color: NEON_OUT }]}>↓</Text>
+              <Text style={[styles.bkFlowNum, { color: NEON_OUT }]} numberOfLines={1} adjustsFontSizeToFit>
+                {money(sum.spent)}
+              </Text>
+            </View>
+          </View>
+          <ScaleButton style={styles.bkGoalHit} onPress={() => setSheet('goal')} accessibilityLabel="Цель">
+            <View style={[styles.bkGoal, { borderColor: color, boxShadow: `0px 0px 14px ${color}55` }]}>
+              <View style={[styles.bkDot, { backgroundColor: color }]} />
+              <Text style={styles.bkGoalTxt}>
+                {bank.goal.k === 'turbo' ? '⚡ ' : ''}
+                {sum.pct}%
+              </Text>
+            </View>
+          </ScaleButton>
+        </View>
+        <BankChart chart={chart} status={sum.status} period={period} />
+        <Text style={[styles.bkFoot, { color }]}>
+          {pctLine} · цель {sum.pct}%
+        </Text>
+      </Glass>
+
+      <View style={styles.tileGrid}>
+        <CalcTile icon="pie" title="Можно урезать" sub={cutNames || 'необязательные расходы'} big={money(cut.total)} onPress={() => setSheet('cut')} />
+        <CalcTile icon="lightning" title="Предложения" sub="чем заменить" big={tipsSave ? `−${money(tipsSave)}` : String(tips.length)} onPress={() => setSheet('tips')} />
+        {sum.own.length ? (
+          <CalcTile icon="bank" title="Между своими счетами" sub="не считается в приход и расход" big={String(sum.own.length)} onPress={() => setSheet('own')} />
+        ) : null}
+        <CalcTile
+          icon="document"
+          title="Выписки"
+          sub={`${Object.keys(bank.accounts).length} ${plural(Object.keys(bank.accounts).length, 'счёт', 'счёта', 'счетов')} Mbank`}
+          big=""
+          onPress={() => setSheet('accounts')}
+        />
+      </View>
+
+      <SheetHost active={sheet} render={renderSheet} onClosed={noop} />
+
+      <WheelModal
+        open={!!explain}
+        title={explain ? explain.v.label : ''}
+        sub={explain ? `${signed(explain.v.amount)} · ${fmtOpDate(explain.v.date)} ${explain.v.time}` : ''}
+        accent={accent}
+        onCancel={() => setExplain(null)}
+        onDone={doneExplain}
+      >
+        {explain ? (
+          <>
+            <Picker
+              selectedValue={explain.k}
+              onValueChange={(k) => {
+                Haptics.selectionAsync().catch(noop);
+                setExplain((e) => ({ ...e, k }));
+              }}
+              style={{ width: SCREEN_W - 40, height: 216 }}
+              itemStyle={WHEEL_ITEM}
+            >
+              {explain.opts.map((k) => (
+                <Picker.Item key={k} label={BANK_EXPLAIN[k].label} value={k} color="#fff" />
+              ))}
+            </Picker>
+            {exOpt && exOpt.need ? (
+              <TextInput
+                value={explain.text}
+                onChangeText={(t) => setExplain((e) => ({ ...e, text: t }))}
+                placeholder={exOpt.need}
+                placeholderTextColor="rgba(235,235,245,0.35)"
+                style={styles.bkInput}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={doneExplain}
+              />
+            ) : null}
+            {bank.notes[explain.v.id] ? (
+              <Pressable onPress={clearExplain} hitSlop={8} style={{ marginTop: 6 }}>
+                <Text style={styles.linkMuted}>Убрать объяснение</Text>
+              </Pressable>
+            ) : null}
+          </>
+        ) : null}
+      </WheelModal>
+
+      <WheelModal open={!!perPick} title="Период" accent={accent} onCancel={() => setPerPick(null)} onDone={donePeriod}>
+        {perPick ? (
+          <>
+            <View style={{ width: SCREEN_W - 48, marginBottom: 4 }}>
+              <SegmentCapsule
+                value={BANK_PERIOD_MODES.indexOf(perPick.mode)}
+                labels={['2 недели', 'Месяц']}
+                height={44}
+                onChange={(i) => setPerPick({ mode: BANK_PERIOD_MODES[i], key: null })}
+              />
+            </View>
+            <Picker
+              selectedValue={perPick.key || (perList[perPick.mode === mode ? idx : 0] || {}).key}
+              onValueChange={(key) => {
+                Haptics.selectionAsync().catch(noop);
+                setPerPick((p) => ({ ...p, key }));
+              }}
+              style={{ width: SCREEN_W - 40, height: 216 }}
+              itemStyle={WHEEL_ITEM}
+            >
+              {perList.map((p) => (
+                <Picker.Item key={p.key} label={p.full} value={p.key} color="#fff" />
+              ))}
+            </Picker>
+          </>
+        ) : null}
+      </WheelModal>
     </>
   );
 }
+
+const BANK_PERIOD_MODES = ['pay', 'month'];
 
 // ───────────────────────── Расчёт смены ─────────────────────────
 
@@ -4709,6 +5070,7 @@ export default function App() {
   );
   const mainScroll = useRef(null);
   const bankApi = useRef(null);
+  const [bankHead, setBankHead] = useState(null);
   const bankToast = useCallback((text) => setToast({ k: Date.now(), text }), []);
   const mainScrollY = useRef(0);
   const mainScrollTop = useRef(0);
@@ -7526,11 +7888,21 @@ export default function App() {
             <View style={styles.hCenter}>
               <View style={styles.hCenterIn}>
                 <Text style={styles.eyebrow} numberOfLines={1}>
-                  {DOCK_LABELS[3]} · MBANK
+                  Анализ трат · Mbank
                 </Text>
-                <Text style={styles.h1C} numberOfLines={1}>
-                  Анализ трат
-                </Text>
+                {bankHead ? (
+                  <ScaleButton style={styles.hDateHit} hitSlop={4} onPress={() => bankApi.current?.openPeriod?.()}>
+                    <Glass style={styles.hDatePill} intensity={40}>
+                      <Text style={styles.hDateTxt} numberOfLines={1} adjustsFontSizeToFit>
+                        {bankHead}
+                      </Text>
+                    </Glass>
+                  </ScaleButton>
+                ) : (
+                  <Text style={styles.h1C} numberOfLines={1}>
+                    Банк
+                  </Text>
+                )}
               </View>
             </View>
           </>
@@ -7655,7 +8027,7 @@ export default function App() {
               contentContainerStyle={styles.pagesContent}
               showsVerticalScrollIndicator={false}
             >
-              <BankView accent={accent} apiRef={bankApi} onToast={bankToast} />
+              <BankView accent={accent} apiRef={bankApi} onToast={bankToast} onHead={setBankHead} />
             </ScrollView>
           </TabPane>
         )}
@@ -8498,15 +8870,40 @@ const styles = StyleSheet.create({
   colorFill: { flex: 1, borderRadius: 20 },
   hueSegOn: { borderWidth: 2, borderColor: '#fff' },
   padCard: { padding: 16 },
-  bankTags: { marginTop: 10, marginHorizontal: -4 },
-  bankNav: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, gap: 10 },
-  bankNavBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
+  bkHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10, paddingHorizontal: 4 },
+  bkHeadTxt: { color: '#fff', fontSize: 20, fontWeight: '700', letterSpacing: -0.3 },
+  bkBadge: { minWidth: 24, height: 24, borderRadius: 12, paddingHorizontal: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ff9f0a' },
+  bkBadgeTxt: { color: '#000', fontSize: 13, fontWeight: '800' },
+  bkList: { borderRadius: 24, marginBottom: 16, paddingHorizontal: 14 },
+  bkURow: { flexDirection: 'row', alignItems: 'center', minHeight: 62, gap: 12 },
+  bkQ: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,159,10,0.16)', borderWidth: 1, borderColor: 'rgba(255,159,10,0.5)' },
+  bkQTxt: { color: '#ff9f0a', fontSize: 17, fontWeight: '800' },
+  bkCard: { borderRadius: 30, padding: 20, paddingBottom: 16, marginBottom: 6 },
+  bkTop: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 12 },
+  bkFlow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  bkArrow: { fontSize: 24, fontWeight: '800', width: 20, textAlign: 'center' },
+  bkFlowNum: { fontSize: 30, fontWeight: '800', letterSpacing: -0.8, fontVariant: ['tabular-nums'], flexShrink: 1 },
+  bkGoalHit: { marginLeft: 10 },
+  bkGoal: { flexDirection: 'row', alignItems: 'center', gap: 7, height: 34, paddingHorizontal: 13, borderRadius: 17, borderWidth: 1, backgroundColor: 'rgba(255,255,255,0.06)' },
+  bkDot: { width: 8, height: 8, borderRadius: 4 },
+  bkGoalTxt: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  bkAxis: { position: 'absolute', left: 0, right: 0, bottom: 0, flexDirection: 'row', justifyContent: 'space-between' },
+  bkAxisTxt: { color: 'rgba(235,235,245,0.4)', fontSize: 11, fontWeight: '600' },
+  bkFoot: { fontSize: 13, fontWeight: '700', marginTop: 10 },
+  bkTip: { borderRadius: 22, padding: 16, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  bkSave: { color: '#30d158', fontSize: 17, fontWeight: '800' },
+  bkCheck: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.3)', alignItems: 'center', justifyContent: 'center' },
+  bkStep: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  bkStepBtn: { flex: 1, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.08)' },
+  bkInput: {
+    width: SCREEN_W - 48,
+    height: 46,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    color: '#fff',
+    fontSize: 17,
     backgroundColor: 'rgba(255,255,255,0.08)',
+    marginBottom: 6,
   },
   bankSub: { backgroundColor: 'rgba(255,255,255,0.03)', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
   // неоновый график: прозрачная карточка — только тонкая кромка, без заливки

@@ -1,73 +1,98 @@
 /**
- * «Банк»: выписки MBANK (PDF «Выписка по счету №…») → операции, категории, периоды, советы.
+ * «Банк» (анализ трат Mbank): PDF-выписки по нескольким счетам → одна картина.
  * Чистые функции без React — тесты в tests/bank.test.mjs.
  *
- * parseStatement(lines)      → { account, from, to, client, ops, totals } (строки — из pdfLines)
- * mergeStatement(bank, st)   → { bank, added, skipped }   — повторная загрузка не задваивает
- * catOf(op, bank)            → ключ категории с учётом ручных отметок
- * periodsOf(bank, mode)      → [{ key, start, end, title }] (mode: 'month' | 'pay')
- * summarize(bank, period)    → итоги периода по категориям
- * advice(bank, period, prev) → советы, где урезать (только необязательные траты)
+ * Правила подсчёта (согласованы с владельцем):
+ *  - приход: пополнения, переводы мне, переводы со своих счетов в ДРУГИХ банках, возвраты за курс;
+ *  - расход: всё потраченное, включая переводы на свои счета в других банках;
+ *  - переводы между своими счетами ВНУТРИ Mbank не считаются — отдельная строка;
+ *  - «непонятные» расходы (переводы людям, QR без названия) ждут объяснения.
  */
 import { addDays, MONTHS, MONTHS_R, paydayOnOrBefore, parse } from './periods.js';
 
 export const BANK_KEY = 'zp_bank_v1';
 
-/** Категории. kind: own — не считается; in — пополнение; must — обязательное; opt — можно урезать; ask — ждёт отметки. */
+/** Категории. kind: own — не считается; in — приход; out — расход; ask — ждёт объяснения. */
 export const CATS = {
-  own: { label: 'Свои счета', kind: 'own', icon: 'swap' },
+  own: { label: 'Между своими счетами', kind: 'own' },
   income: { label: 'Пополнения', kind: 'in' },
   incomeTr: { label: 'Переводы мне', kind: 'in' },
-  refund: { label: 'Возвраты', kind: 'back' }, // корректировки платежей: уменьшают траты, не доход
-  loan: { label: 'Кредиты и рассрочка', kind: 'must' },
-  bills: { label: 'Связь и услуги', kind: 'must' },
-  delivery: { label: 'Доставка еды', kind: 'opt' },
-  cafe: { label: 'Кафе и фастфуд', kind: 'opt' },
-  shops: { label: 'Магазины', kind: 'opt' },
-  market: { label: 'Маркетплейсы', kind: 'opt' },
-  taxi: { label: 'Такси и Яндекс Go', kind: 'opt' },
-  bus: { label: 'Автобус', kind: 'opt' },
-  subs: { label: 'Подписки', kind: 'opt' },
-  transfer: { label: 'Переводы без отметки', kind: 'ask' },
-  other: { label: 'Другое', kind: 'opt' },
+  myBanksIn: { label: 'С моих счетов в других банках', kind: 'in' },
+  refund: { label: 'Возвраты за курс', kind: 'in' },
+  myBanks: { label: 'На мои счета в других банках', kind: 'out' },
+  loan: { label: 'Кредиты и рассрочка', kind: 'out' },
+  bills: { label: 'Связь и услуги банка', kind: 'out' },
+  delivery: { label: 'Доставка еды', kind: 'out' },
+  cafe: { label: 'Кафе и фастфуд', kind: 'out' },
+  food: { label: 'Еда', kind: 'out' },
+  shops: { label: 'Магазины', kind: 'out' },
+  market: { label: 'Маркетплейсы', kind: 'out' },
+  taxi: { label: 'Такси', kind: 'out' },
+  bus: { label: 'Автобус', kind: 'out' },
+  subs: { label: 'Подписки', kind: 'out' },
+  toilet: { label: 'Туалет', kind: 'out' },
+  service: { label: 'Услуги', kind: 'out' },
+  buy: { label: 'Покупки', kind: 'out' },
+  debt: { label: 'Долги', kind: 'out' },
+  family: { label: 'Родным', kind: 'out' },
+  gift: { label: 'Подарки', kind: 'out' },
+  other: { label: 'Другое', kind: 'out' },
+  transfer: { label: 'Перевод', kind: 'ask' },
+  unknown: { label: 'Оплата по QR', kind: 'ask' },
 };
 
-/** Ручные отметки перевода → категория. */
-export const TAGS = [
-  { k: 'food', label: 'Еда', cat: 'shops' },
-  { k: 'loan', label: 'Кредит', cat: 'loan' },
-  { k: 'debt', label: 'Долг', cat: 'tDebt' },
-  { k: 'family', label: 'Родным', cat: 'tFamily' },
-  { k: 'buy', label: 'Покупка', cat: 'tBuy' },
-  { k: 'gift', label: 'Подарок', cat: 'tGift' },
-  { k: 'own', label: 'Свой счёт', cat: 'own' },
-  { k: 'other', label: 'Другое', cat: 'other' },
-];
-/** Отметки для входящих переводов. */
-export const IN_TAGS = [
-  { k: 'income', label: 'Доход', cat: 'incomeTr' },
-  { k: 'own', label: 'Свой счёт', cat: 'own' },
-];
-const ALL_TAGS = [...TAGS, IN_TAGS[0]];
-/** Можно ли отметить операцию вручную (переводы людям и на свои номера). */
-export const taggable = (op) => op.cat === 'transfer' || op.cat === 'incomeTr';
-export const tagsFor = (op) => (op.amount > 0 ? IN_TAGS : TAGS);
-CATS.tDebt = { label: 'Долги', kind: 'opt' };
-CATS.tFamily = { label: 'Родным', kind: 'opt' };
-CATS.tBuy = { label: 'Покупки у людей', kind: 'opt' };
-CATS.tGift = { label: 'Подарки', kind: 'opt' };
+/** Расходы не первой необходимости по умолчанию (список можно менять). */
+export const DEFAULT_CUT = ['taxi', 'delivery', 'cafe', 'subs', 'market', 'gift'];
 
-export const emptyBank = () => ({ v: 1, accounts: {}, ops: {}, tags: {}, ownPhones: [], mode: 'pay' });
+/** Объяснения непонятного расхода. need: нужно уточнить текстом. */
+export const EXPLAIN = {
+  shop: { label: 'Магазин', cat: 'shops' },
+  food: { label: 'Еда', cat: 'food' },
+  toilet: { label: 'Туалет', cat: 'toilet' },
+  service: { label: 'Услуга', cat: 'service', need: 'Какая услуга?' },
+  buy: { label: 'Покупка', cat: 'buy' },
+  taxi: { label: 'Такси', cat: 'taxi' },
+  cafe: { label: 'Кафе', cat: 'cafe' },
+  debt: { label: 'Долг', cat: 'debt' },
+  family: { label: 'Родным', cat: 'family' },
+  gift: { label: 'Подарок', cat: 'gift' },
+  loan: { label: 'Кредит', cat: 'loan' },
+  other: { label: 'Другое', cat: 'other', need: 'Что это было?' },
+};
+
+/** Режимы цели: приход должен превышать расход на pct %. turbo — скрытый, свой процент. */
+export const MODES = [
+  { k: 'min', label: 'Минимальный', pct: 10 },
+  { k: 'opt', label: 'Оптимальный', pct: 20 },
+  { k: 'active', label: 'Активный', pct: 30 },
+];
+export const TURBO = { k: 'turbo', label: 'Агрессивный' };
+export const YELLOW_GAP = 5; // жёлтый, если до цели осталось меньше 5 п.п.
+
+export const emptyBank = () => normalizeBank(null);
 
 export function normalizeBank(raw) {
   const b = raw && typeof raw === 'object' ? raw : {};
+  const notes = b.notes && typeof b.notes === 'object' ? { ...b.notes } : {};
+  // старые отметки (v1) → объяснения
+  const OLD = { food: 'food', loan: 'loan', debt: 'debt', family: 'family', buy: 'buy', gift: 'gift', other: 'other' };
+  if (b.tags && typeof b.tags === 'object') {
+    for (const [id, t] of Object.entries(b.tags)) if (OLD[t] && !notes[id]) notes[id] = { k: OLD[t] };
+  }
+  const goal = b.goal && typeof b.goal === 'object' ? b.goal : {};
+  const pct = Number(goal.pct);
   return {
-    v: 1,
+    v: 2,
     accounts: b.accounts && typeof b.accounts === 'object' ? b.accounts : {},
     ops: b.ops && typeof b.ops === 'object' ? b.ops : {},
-    tags: b.tags && typeof b.tags === 'object' ? b.tags : {},
+    notes,
     ownPhones: Array.isArray(b.ownPhones) ? b.ownPhones : [],
     mode: b.mode === 'month' ? 'month' : 'pay',
+    cut: Array.isArray(b.cut) ? b.cut : DEFAULT_CUT.slice(),
+    goal: {
+      k: [...MODES.map((m) => m.k), TURBO.k].includes(goal.k) ? goal.k : 'opt',
+      pct: Number.isFinite(pct) && pct > 0 && pct < 100 ? pct : 20,
+    },
   };
 }
 
@@ -151,12 +176,6 @@ export function parseStatement(lines) {
     seen[base] = (seen[base] || 0) + 1;
     op.id = `${base}#${seen[base]}`;
     op.account = account;
-    op.cat = autoCat(op);
-    const ph = phoneOf(op);
-    if (ph) op.phone = ph;
-    const who = personOf(op);
-    if (who) op.who = who;
-    op.label = labelOf(op);
   }
   return { account, from, to, client, ops, totals };
 }
@@ -194,6 +213,7 @@ export function personOf(op) {
   return null;
 }
 
+
 export function autoCat(op) {
   const t = op.type || '';
   const d = op.desc || '';
@@ -207,8 +227,7 @@ export function autoCat(op) {
   if (/потребительск|рассрочк|погашение по кредиту/i.test(all) || /автосписание.*кредит/i.test(d)) return 'loan';
   if (/^(megaline|megacom|beeline|o!|мой дом|элсом|ксэ|газ|водоканал|тазалык)/i.test(t) && !/o!bank/i.test(t)) return 'bills';
   if (/годовое обслуживание|комиссия/i.test(d)) return 'bills';
-  if (/o!bank/i.test(t)) return 'transfer';
-  if (/перевод/i.test(t)) return 'transfer';
+  if (/o!bank/i.test(t) || /перевод/i.test(t)) return 'transfer';
   if (/тулпар|tulpar/i.test(all)) return 'bus';
   const shop = (t === 'Операции по карте' ? cardMerchant(d) : quoted(d) || d).toUpperCase();
   if (/APPLE\.COM|ITUNES|SPOTIFY|NETFLIX|YOUTUBE|GOOGLE \*|ICLOUD|TELEGRAM/.test(d.toUpperCase())) return 'subs';
@@ -216,22 +235,32 @@ export function autoCat(op) {
   if (/TAXI|YANDEX\.GO|ЯНДЕКС GO|NAMBA TAXI|INDRIVE|ТАКСИ/.test(shop)) return 'taxi';
   if (/WILDBERRIES|OZON|LALAFO|ALIEXPRESS|TEMU/.test(shop)) return 'market';
   if (/KFC|BEGEMOT|БЕГЕМОТ|ЛОЖКА|BURGER|CAFE|КАФЕ|COFFEE|КОФЕ|ДОНЕР|SHAURMA|ШАУРМ|PIZZA|ПИЦЦ/.test(shop)) return 'cafe';
+  // QR/MPay без понятного названия получателя — непонятный
+  if (/QR|MPay/i.test(t) && isNameless(op)) return 'unknown';
   if (/^(Операции по карте|Оплата по QR|Оплата по MPay)$/i.test(t)) return 'shops';
   return 'other';
 }
+function isNameless(op) {
+  const q = quoted(op.desc);
+  if (q) return false;
+  const r = /Получатель: [^.]+\. ([^/]+)\//.exec(op.desc || '');
+  return !(r && !/^[\dA-Z]+$/.test(r[1].trim()));
+}
 
 /** Название для списка: магазин / человек / тип операции. */
-export function labelOf(op) {
+export function labelOf(op, cat = autoCat(op)) {
   const d = op.desc || '';
-  if (op.cat === 'own') return 'Между своими счетами';
-  if (op.cat === 'refund') return 'Возврат';
-  if (op.cat === 'loan') return op.type === 'Операции по карте' ? 'Автосписание по кредиту' : op.type;
-  if (op.cat === 'bills') return /годовое обслуживание/i.test(d) ? 'Обслуживание карты' : op.type;
-  if (op.cat === 'bus') return 'Тулпар';
-  if (op.who) return op.who;
+  const who = personOf(op);
+  if (cat === 'own') return 'Между своими счетами';
+  if (cat === 'refund') return 'Возврат за курс';
+  if (cat === 'loan') return op.type === 'Операции по карте' ? 'Автосписание по кредиту' : op.type;
+  if (cat === 'bills') return /годовое обслуживание/i.test(d) ? 'Обслуживание карты' : op.type;
+  if (cat === 'bus') return 'Тулпар';
+  if (cat === 'myBanks' || cat === 'myBanksIn') return /o!bank/i.test(`${op.type} ${d}`) ? 'O!Bank · мой номер' : who === 'Simbank' ? 'Simbank · мой номер' : 'Мой номер';
+  if (who) return who;
   if (op.type === 'Операции по карте') {
     const m = cardMerchant(d);
-    if (/APPLE|ITUNES|^\d{9,}$/.test(m.toUpperCase()) && /APPLE/i.test(d)) return 'Apple';
+    if (/APPLE/i.test(d)) return 'Apple';
     if (/SPOTIFY/i.test(d)) return 'Spotify';
     return titleCase(m);
   }
@@ -249,21 +278,30 @@ const titleCase = (s) =>
     .replace(/(^|[\s.(-])([a-zа-яё])/g, (x, a, b) => a + b.toUpperCase())
     .trim();
 
-/** Итоговая категория: ручная отметка → свой номер → авто. */
-export function catOf(op, bank) {
-  const tag = bank.tags[op.id];
-  if (tag) return (ALL_TAGS.find((x) => x.k === tag) || {}).cat || op.cat;
-  if (isOwnAuto(op, bank)) return 'own';
-  return op.cat;
+/**
+ * Итоговый вид операции с учётом объяснений и своих номеров:
+ * { ...op, cat, kind, label, note, unclear }
+ */
+export function viewOp(op, bank) {
+  let cat = autoCat(op);
+  const phone = phoneOf(op);
+  if (phone && bank.ownPhones.includes(phone) && (cat === 'transfer' || cat === 'incomeTr')) {
+    cat = op.amount > 0 ? 'myBanksIn' : 'myBanks';
+  }
+  let label = labelOf(op, cat);
+  let note = null;
+  const ex = bank.notes[op.id];
+  if (ex && EXPLAIN[ex.k] && (cat === 'transfer' || cat === 'unknown')) {
+    cat = EXPLAIN[ex.k].cat;
+    note = ex.text ? `${EXPLAIN[ex.k].label}: ${ex.text}` : EXPLAIN[ex.k].label;
+  }
+  const kind = (CATS[cat] || CATS.other).kind;
+  return { ...op, cat, kind, label, note, who: personOf(op), unclear: kind === 'ask' && op.amount < 0 };
 }
-
-/** Перевод на/с собственного номера (кошелёк в другом банке) — авто «Свой счёт», можно переотметить. */
-export const isOwnAuto = (op, bank) =>
-  !!op.phone && bank.ownPhones.includes(op.phone) && taggable(op) && /перевод/i.test(op.type);
 
 /**
  * Свой номер телефона: входящий перевод от «Имя Ф.», совпадающего с владельцем выписки
- * («УСУПЕКОВ АДИЛ» → «Адил У.»). Такие переводы — деньги со своего кошелька в другом банке.
+ * («УСУПЕКОВ АДИЛ» → «Адил У.»). Такие переводы — мои счета в других банках (считаются).
  */
 export function ownPhonesOf(st) {
   const words = String(st.client || '').trim().split(/\s+/);
@@ -271,7 +309,11 @@ export function ownPhonesOf(st) {
   const [last, first] = words;
   const re = new RegExp(`^${first}\\s+${last[0]}\\.?$`, 'i');
   const set = new Set();
-  for (const op of st.ops) if (op.amount > 0 && op.phone && op.who && re.test(op.who)) set.add(op.phone);
+  for (const op of st.ops) {
+    const ph = phoneOf(op);
+    const who = personOf(op);
+    if (op.amount > 0 && ph && who && re.test(who)) set.add(ph);
+  }
   return [...set];
 }
 
@@ -301,18 +343,45 @@ export function mergeStatement(bank, st) {
   return { bank: { ...bank, ops, accounts, ownPhones }, added, skipped };
 }
 
-/** Убрать счёт со всеми его операциями и отметками. */
+/** Убрать счёт со всеми его операциями и объяснениями. */
 export function removeAccount(bank, num) {
   const ops = {};
-  const tags = {};
+  const notes = {};
   for (const [id, op] of Object.entries(bank.ops)) if (op.account !== num) ops[id] = op;
-  for (const [id, t] of Object.entries(bank.tags)) if (ops[id]) tags[id] = t;
+  for (const [id, t] of Object.entries(bank.notes)) if (ops[id]) notes[id] = t;
   const accounts = { ...bank.accounts };
   delete accounts[num];
-  return { ...bank, ops, tags, accounts };
+  return { ...bank, ops, notes, accounts };
 }
 
 export const shortAcc = (num) => `•${String(num || '').slice(-4)}`;
+
+// ── объяснения: самые вероятные варианты первыми ───────────────────────────
+/**
+ * Порядок вариантов для непонятного расхода: сначала то, что ты уже выбирал для этого
+ * же получателя (только порядок — сама отметка всегда ручная), потом по типу и сумме.
+ */
+export function explainOptions(v, bank) {
+  const a = Math.abs(v.amount);
+  let base;
+  if (v.cat === 'unknown') {
+    if (a <= 30) base = ['toilet', 'shop', 'food', 'buy', 'service', 'other'];
+    else if (a <= 1500) base = ['shop', 'food', 'cafe', 'buy', 'service', 'taxi', 'toilet', 'other'];
+    else base = ['buy', 'shop', 'service', 'food', 'other'];
+  } else if (a <= 300) base = ['food', 'buy', 'service', 'taxi', 'shop', 'debt', 'gift', 'family', 'other'];
+  else base = ['buy', 'debt', 'service', 'family', 'gift', 'food', 'loan', 'shop', 'other'];
+  const key = v.who || v.label;
+  const seen = {};
+  for (const op of Object.values(bank.ops)) {
+    const ex = bank.notes[op.id];
+    if (!ex || op.id === v.id) continue;
+    const w = personOf(op) || labelOf(op);
+    if (w === key) seen[ex.k] = (seen[ex.k] || 0) + 1;
+  }
+  const first = Object.keys(seen).sort((x, y) => seen[y] - seen[x]);
+  const all = [...first, ...base, ...Object.keys(EXPLAIN)];
+  return [...new Set(all)].filter((k) => EXPLAIN[k]);
+}
 
 // ── периоды ────────────────────────────────────────────────────────────────
 /** Ключ периода для даты. pay — от зарплаты до дня перед следующей (14 дней). */
@@ -321,17 +390,18 @@ export function periodOf(date, mode) {
     const [y, m] = date.split('-').map(Number);
     const start = `${date.slice(0, 7)}-01`;
     const end = `${date.slice(0, 7)}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
-    return { key: date.slice(0, 7), start, end, title: `${MONTHS[m - 1]} ${y}` };
+    return { key: date.slice(0, 7), start, end, title: MONTHS[m - 1], full: `${MONTHS[m - 1]} ${y}` };
   }
   const p = paydayOnOrBefore(date);
   const end = addDays(p, 13);
-  return { key: p, start: p, end, title: fmtRange(p, end) };
+  const t = fmtRange(p, end);
+  return { key: p, start: p, end, title: t, full: t };
 }
 function fmtRange(a, b) {
   const da = parse(a);
   const db = parse(b);
   if (da.getMonth() === db.getMonth()) return `${da.getDate()}–${db.getDate()} ${MONTHS_R[db.getMonth()]}`;
-  return `${da.getDate()} ${MONTHS_R[da.getMonth()]} – ${db.getDate()} ${MONTHS_R[db.getMonth()]}`;
+  return `${da.getDate()} ${MONTHS_R[da.getMonth()].slice(0, 3)} – ${db.getDate()} ${MONTHS_R[db.getMonth()].slice(0, 3)}`;
 }
 
 /** Все периоды, где есть операции, от новых к старым. */
@@ -344,134 +414,153 @@ export function periodsOf(bank, mode) {
   return Object.values(map).sort((a, b) => (a.key < b.key ? 1 : -1));
 }
 
-// ── итоги и советы ─────────────────────────────────────────────────────────
-export function opsIn(bank, period) {
-  return Object.values(bank.ops)
-    .filter((o) => o.date >= period.start && o.date <= period.end)
-    .sort((a, b) => (a.date + a.time < b.date + b.time ? 1 : -1));
+// ── итоги ──────────────────────────────────────────────────────────────────
+export const goalPct = (bank) => {
+  const m = MODES.find((x) => x.k === bank.goal.k);
+  return m ? m.pct : bank.goal.pct;
+};
+export const goalLabel = (bank) => (MODES.find((x) => x.k === bank.goal.k) || TURBO).label;
+
+/** Состояние относительно цели: good / near (жёлтый) / bad (угроза). */
+export function statusOf(income, spent, pct) {
+  if (income <= 0) return spent > 0 ? 'bad' : 'good';
+  const rate = ((income - spent) / income) * 100;
+  if (rate < pct) return 'bad';
+  if (rate < pct + YELLOW_GAP) return 'near';
+  return 'good';
 }
 
 export function summarize(bank, period) {
-  const ops = opsIn(bank, period);
+  const views = Object.values(bank.ops)
+    .filter((o) => o.date >= period.start && o.date <= period.end)
+    .map((o) => viewOp(o, bank))
+    .sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1)); // старые → новые
   const cats = {};
+  const own = [];
+  const unclear = [];
   let income = 0;
-  let must = 0;
-  let opt = 0;
-  let ask = 0;
-  let own = 0;
-  let refunds = 0;
-  for (const op of ops) {
-    const c = catOf(op, bank);
-    const kind = (CATS[c] || CATS.other).kind;
-    if (kind === 'own') {
-      own++;
+  let spent = 0;
+  for (const v of views) {
+    if (v.kind === 'own') {
+      own.push(v);
       continue;
     }
-    const a = op.amount;
-    if (kind === 'back') {
-      refunds += a;
-      continue;
-    }
-    if (!cats[c]) cats[c] = { cat: c, label: (CATS[c] || CATS.other).label, kind, sum: 0, n: 0, ops: [] };
-    cats[c].sum += Math.abs(a);
-    cats[c].n++;
-    cats[c].ops.push(op);
-    if (kind === 'in') income += a;
-    else if (a < 0) {
-      if (kind === 'must') must -= a;
-      else if (kind === 'ask') ask -= a;
-      else opt -= a;
-    } else income += a; // редкий плюс в расходной категории
+    if (v.unclear) unclear.push(v);
+    if (v.amount > 0) income += v.amount;
+    else spent -= v.amount;
+    if (!cats[v.cat]) cats[v.cat] = { cat: v.cat, label: (CATS[v.cat] || CATS.other).label, kind: v.kind, sum: 0, n: 0, ops: [] };
+    const c = cats[v.cat];
+    c.sum += Math.abs(v.amount);
+    c.n++;
+    c.ops.push(v);
   }
-  opt = Math.max(0, opt - refunds);
-  const spent = must + opt + ask;
-  const list = Object.values(cats).sort((a, b) => b.sum - a.sum);
+  const list = Object.values(cats)
+    .map((c) => ({ ...c, sum: round(c.sum), ops: c.ops.slice().reverse() }))
+    .sort((a, b) => b.sum - a.sum);
+  const pct = goalPct(bank);
+  income = round(income);
+  spent = round(spent);
+  const ownIn = own.filter((v) => v.amount > 0).reduce((a, v) => a + v.amount, 0);
   return {
     period,
-    income: round(income),
-    must: round(must),
-    opt: round(opt),
-    ask: round(ask),
-    spent: round(spent),
+    income,
+    spent,
     net: round(income - spent),
-    own,
-    refunds: round(refunds),
-    unmarked: cats.transfer ? cats.transfer.ops : [],
-    expenses: list.filter((c) => c.kind !== 'in'),
+    rate: income > 0 ? ((income - spent) / income) * 100 : null,
+    pct,
+    status: statusOf(income, spent, pct),
+    views: views.filter((v) => v.kind !== 'own'),
+    own: own.slice().reverse(),
+    ownSum: round(ownIn),
+    unclear: unclear.slice().reverse(),
+    expenses: list.filter((c) => c.kind === 'out' || c.kind === 'ask'),
     incomes: list.filter((c) => c.kind === 'in'),
-    count: ops.length,
   };
 }
 const round = (n) => Math.round(n * 100) / 100;
 
 /**
- * Советы по периоду: где больше всего уходит, частые мелкие траты, подписки, такси,
- * рост к прошлому периоду, неотмеченные переводы. Только необязательные траты.
+ * Точки графика: каждое пополнение — зелёный столбик вверх, каждый расход — красный вниз
+ * (длина ∝ сумме), линия — накопленный итог (приход − расход), пунктир — цель (pct% прихода).
+ * t — доля периода 0…1.
  */
-export function advice(sum, prevSum) {
+export function chartOf(sum) {
+  const p = sum.period;
+  const t0 = parse(p.start).getTime();
+  const t1 = parse(addDays(p.end, 1)).getTime();
+  const span = Math.max(1, t1 - t0);
+  const at = (date, time) => {
+    const [hh, mm] = (time || '00:00').split(':').map(Number);
+    return Math.min(1, Math.max(0, (parse(date).getTime() + (hh * 60 + mm) * 60000 - t0) / span));
+  };
+  const bars = [];
+  // линия — итог на конец каждого дня с операциями (внутри дня приход и расход не дают ложных пиков)
+  const line = [{ t: 0, v: 0, g: 0 }];
+  let inc = 0;
+  let net = 0;
+  let day = null;
+  for (const v of sum.views) {
+    bars.push({ t: at(v.date, v.time), a: v.amount });
+    if (day && v.date !== day) line.push({ t: at(day, '23:59'), v: net, g: (inc * sum.pct) / 100 });
+    day = v.date;
+    net += v.amount;
+    if (v.amount > 0) inc += v.amount;
+  }
+  if (day) line.push({ t: at(day, '23:59'), v: net, g: (inc * sum.pct) / 100 });
+  return { bars, line };
+}
+
+/** Расходы не первой необходимости (по списку cut). */
+export function cutOf(sum, bank) {
+  const set = new Set(bank.cut);
+  const list = sum.expenses.filter((c) => set.has(c.cat));
+  return { list, total: round(list.reduce((a, c) => a + c.sum, 0)) };
+}
+
+/**
+ * Предложения: чем заменить необязательные траты и сколько это даст.
+ * Первым — сколько нужно сократить, чтобы выйти на цель.
+ */
+export function suggestionsOf(sum, bank) {
   const out = [];
-  const opt = sum.expenses.filter((c) => c.kind === 'opt');
-  const optTotal = opt.reduce((a, c) => a + c.sum, 0);
-  if (sum.net < 0) out.push({ k: 'minus', tone: 'bad', title: `В минусе на ${fmt(-sum.net)} сом`, text: `Ушло ${fmt(sum.spent)}, пришло ${fmt(sum.income)}. Ниже — где проще всего урезать.` });
-  const by = (k) => opt.find((c) => c.cat === k);
-  const del = by('delivery');
-  if (del && del.sum >= 300) {
+  const need = sum.income > 0 ? sum.spent - (sum.income * (100 - sum.pct)) / 100 : sum.spent;
+  if (need > 0) {
     out.push({
-      k: 'delivery',
-      title: `Доставка еды: ${fmt(del.sum)} сом`,
-      text: `${del.n} ${pl(del.n, 'заказ', 'заказа', 'заказов')}, в среднем ${fmt(del.sum / del.n)}. Если заказывать вдвое реже — останется около ${fmt(del.sum / 2)} сом.`,
+      k: 'goal',
+      tone: 'bad',
+      title: `До цели ${sum.pct}% не хватает ${fmt(need)} сом`,
+      text: sum.income > 0 ? `Столько нужно было потратить меньше в этом периоде.` : 'В этом периоде не было прихода.',
+      save: 0,
     });
   }
+  const by = (k) => sum.expenses.find((c) => c.cat === k);
+  const add = (k, title, text, save) => save > 0 && out.push({ k, title, text, save: Math.round(save) });
   const taxi = by('taxi');
-  if (taxi && taxi.sum >= 300) {
-    out.push({
-      k: 'taxi',
-      title: `Такси и Яндекс Go: ${fmt(taxi.sum)} сом`,
-      text: `${taxi.n} ${pl(taxi.n, 'поездка', 'поездки', 'поездок')}. Автобус — 17 сом: каждая поездка вместо такси экономит примерно ${fmt(Math.max(0, taxi.sum / taxi.n - 17))}.`,
-    });
+  if (taxi) {
+    const avg = taxi.sum / taxi.n;
+    add('taxi', 'Автобус вместо такси', `${taxi.n} ${pl(taxi.n, 'поездка', 'поездки', 'поездок')} в среднем по ${fmt(avg)}. Автобус — 17 сом. Половина поездок на автобусе:`, ((avg - 17) * taxi.n) / 2);
   }
+  const del = by('delivery');
+  if (del) add('delivery', 'Готовить или забирать самому', `Доставка: ${del.n} ${pl(del.n, 'заказ', 'заказа', 'заказов')} на ${fmt(del.sum)}. Вдвое реже:`, del.sum / 2);
+  const cafe = by('cafe');
+  if (cafe) add('cafe', 'Еда из дома вместо кафе', `Кафе и фастфуд: ${fmt(cafe.sum)}. Через раз брать еду с собой:`, cafe.sum / 2);
   const subs = by('subs');
   if (subs) {
     const names = [...new Set(subs.ops.map((o) => o.label))].join(', ');
-    out.push({ k: 'subs', title: `Подписки: ${fmt(subs.sum)} сом`, text: `${names}. Проверь, всем ли пользуешься: подписки списываются сами каждый месяц.` });
-  }
-  // мелкие частые траты в магазинах и кафе
-  const small = opt
-    .filter((c) => c.cat === 'shops' || c.cat === 'cafe')
-    .flatMap((c) => c.ops)
-    .filter((o) => -o.amount > 0 && -o.amount <= 300);
-  const smallSum = small.reduce((a, o) => a - o.amount, 0);
-  if (small.length >= 5) {
-    out.push({
-      k: 'small',
-      title: `Мелкие покупки: ${small.length} раз на ${fmt(smallSum)} сом`,
-      text: 'Каждая до 300 сом, но вместе набегает заметно. Это перекусы и «по мелочи» в магазинах и кафе.',
-    });
+    add('subs', 'Проверить подписки', `${names}. Отмени те, которыми не пользуешься:`, subs.sum / 2);
   }
   const mk = by('market');
-  if (mk && mk.sum >= 500) out.push({ k: 'market', title: `Маркетплейсы: ${fmt(mk.sum)} сом`, text: `${mk.n} ${pl(mk.n, 'покупка', 'покупки', 'покупок')}. Перед заказом можно выждать день — часть покупок отпадёт сама.` });
-  // рост к прошлому периоду
-  if (prevSum) {
-    for (const c of opt) {
-      const p = prevSum.expenses.find((x) => x.cat === c.cat);
-      if (p && p.sum >= 300 && c.sum >= p.sum * 1.3 && c.sum - p.sum >= 300) {
-        out.push({ k: `up_${c.cat}`, title: `${c.label}: +${fmt(c.sum - p.sum)} сом`, text: `В прошлом периоде было ${fmt(p.sum)}, сейчас ${fmt(c.sum)}.` });
-      }
-    }
+  if (mk) add('market', 'Правило 24 часов', `Маркетплейсы: ${fmt(mk.sum)}. Положи в корзину и купи завтра — часть отпадёт:`, mk.sum / 3);
+  const small = sum.views.filter((v) => (v.cat === 'shops' || v.cat === 'food') && v.amount < 0 && -v.amount <= 300);
+  if (small.length >= 5) {
+    const s = small.reduce((a, v) => a - v.amount, 0);
+    add('small', 'Покупки по списку', `${small.length} мелких покупок до 300 сом на ${fmt(s)}. Список заранее срезает «по мелочи»:`, s / 3);
   }
-  if (sum.unmarked.length) {
-    const s = sum.unmarked.reduce((a, o) => a - Math.min(0, o.amount), 0);
-    out.push({
-      k: 'unmarked',
-      tone: 'info',
-      title: `Не отмечено: ${sum.unmarked.length} ${pl(sum.unmarked.length, 'перевод', 'перевода', 'переводов')} на ${fmt(s)} сом`,
-      text: 'Отметь, что это было, — тогда анализ будет точнее.',
-    });
-  }
-  if (!out.length && optTotal > 0) out.push({ k: 'ok', tone: 'good', title: 'Явных лишних трат нет', text: 'Необязательные траты небольшие — так держать.' });
+  const gift = by('gift');
+  if (gift) add('gift', 'Подарки — заранее и по бюджету', `Подарки: ${fmt(gift.sum)}. Заложи сумму заранее:`, gift.sum / 4);
   return out;
 }
-const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(n));
+export const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(n));
 const pl = (n, a, b, c) => {
   const m10 = n % 10;
   const m100 = n % 100;
