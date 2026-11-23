@@ -15,6 +15,8 @@ export const BANK_KEY = 'zp_bank_v1';
 /** Категории. kind: own — не считается; in — приход; out — расход; ask — ждёт объяснения. */
 export const CATS = {
   own: { label: 'Между своими счетами', kind: 'own' },
+  mbankIn: { label: 'С другого счёта Mbank', kind: 'in' }, // выписка того счёта не загружена
+  mbankOut: { label: 'На другой счёт Mbank', kind: 'out' },
   income: { label: 'Пополнения', kind: 'in' },
   incomeTr: { label: 'Переводы мне', kind: 'in' },
   myBanksIn: { label: 'С моих счетов в других банках', kind: 'in' },
@@ -121,6 +123,8 @@ export function parseStatement(lines) {
   let from = null;
   let to = null;
   let client = '';
+  let open = null;
+  let close = null;
   const totals = { out: null, in: null };
   const ops = [];
   let cur = null;
@@ -141,6 +145,11 @@ export function parseStatement(lines) {
       // следующая строка — «ФАМИЛИЯ ИМЯ», дальше отчество и балансы
       const nx = L[i + 2] && /^[А-ЯЁA-Z]+ [А-ЯЁA-Z]+$/.test(L[i + 2]) ? L[i + 2] : L[i + 1] || '';
       client = nx.replace(/[^А-ЯЁA-Zа-яёa-z ]/g, '').trim();
+      continue;
+    }
+    if (open == null && !ops.length && (m = /(-?[\d ]+,\d\d)\s*KGS\s+(-?[\d ]+,\d\d)\s*KGS/i.exec(s))) {
+      open = num(m[1]); // «Баланс на начало периода … Баланс на конец»
+      close = num(m[2]);
       continue;
     }
     if ((m = /^Всего списаний\s+([\d ]+,\d\d)/i.exec(s))) {
@@ -177,7 +186,7 @@ export function parseStatement(lines) {
     op.id = `${base}#${seen[base]}`;
     op.account = account;
   }
-  return { account, from, to, client, ops, totals };
+  return { account, from, to, client, open, close, ops, totals };
 }
 
 /** Сходится ли сумма разобранных операций с итогом банка (защита от поломки формата). */
@@ -282,8 +291,10 @@ const titleCase = (s) =>
  * Итоговый вид операции с учётом объяснений и своих номеров:
  * { ...op, cat, kind, label, note, unclear }
  */
-export function viewOp(op, bank) {
+export function viewOp(op, bank, pairs = ownPairs(bank)) {
   let cat = autoCat(op);
+  // перевод между своими считается только если вторая сторона — тоже загруженный счёт
+  if (cat === 'own' && !pairs.has(op.id)) cat = op.amount > 0 ? 'mbankIn' : 'mbankOut';
   const phone = phoneOf(op);
   if (phone && bank.ownPhones.includes(phone) && (cat === 'transfer' || cat === 'incomeTr')) {
     cat = op.amount > 0 ? 'myBanksIn' : 'myBanks';
@@ -297,6 +308,42 @@ export function viewOp(op, bank) {
   }
   const kind = (CATS[cat] || CATS.other).kind;
   return { ...op, cat, kind, label, note, who: personOf(op), unclear: kind === 'ask' && op.amount < 0 };
+}
+
+/**
+ * Пары «между своими счетами» среди загруженных выписок: списание с одного счёта и зачисление
+ * на другой той же суммы в пределах 2 минут. Только такие переводы не считаются в приход/расход.
+ */
+const pairsCache = new WeakMap();
+export function ownPairs(bank) {
+  const hit = pairsCache.get(bank.ops);
+  if (hit) return hit;
+  const own = Object.values(bank.ops).filter((o) => autoCat(o) === 'own');
+  const at = (o) => parse(o.date).getTime() + (+o.time.slice(0, 2) * 60 + +o.time.slice(3)) * 60000;
+  const ins = own.filter((o) => o.amount > 0).sort((a, b) => at(a) - at(b));
+  const used = new Set();
+  for (const o of own.filter((x) => x.amount < 0).sort((a, b) => at(a) - at(b))) {
+    const m = ins.find((i) => !used.has(i.id) && i.account !== o.account && Math.abs(i.amount + o.amount) < 0.005 && Math.abs(at(i) - at(o)) <= 120000);
+    if (m) {
+      used.add(m.id);
+      used.add(o.id);
+    }
+  }
+  pairsCache.set(bank.ops, used);
+  return used;
+}
+
+/** Сколько денег было на загруженных счетах к началу дня date (по балансу из выписки). */
+export function balanceAt(bank, date) {
+  let sum = 0;
+  let known = false;
+  for (const a of Object.values(bank.accounts)) {
+    if (a.open == null || !a.from || a.from > date) continue;
+    known = true;
+    sum += a.open;
+    for (const o of Object.values(bank.ops)) if (o.account === a.num && o.date >= a.from && o.date < date) sum += o.amount;
+  }
+  return known ? round(sum) : null;
 }
 
 /**
@@ -337,6 +384,8 @@ export function mergeStatement(bank, st) {
       num: st.account,
       from: prev.from && prev.from < st.from ? prev.from : st.from,
       to: prev.to && prev.to > st.to ? prev.to : st.to,
+      open: prev.from && prev.from < st.from ? prev.open : st.open,
+      close: prev.to && prev.to > st.to ? prev.close : st.close,
     },
   };
   const ownPhones = [...new Set([...bank.ownPhones, ...ownPhonesOf(st)])];
@@ -431,9 +480,10 @@ export function statusOf(income, spent, pct) {
 }
 
 export function summarize(bank, period) {
+  const pairs = ownPairs(bank);
   const views = Object.values(bank.ops)
     .filter((o) => o.date >= period.start && o.date <= period.end)
-    .map((o) => viewOp(o, bank))
+    .map((o) => viewOp(o, bank, pairs))
     .sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1)); // старые → новые
   const cats = {};
   const own = [];
@@ -461,8 +511,13 @@ export function summarize(bank, period) {
   income = round(income);
   spent = round(spent);
   const ownIn = own.filter((v) => v.amount > 0).reduce((a, v) => a + v.amount, 0);
+  const start = balanceAt(bank, period.start);
   return {
     period,
+    start, // остаток на начало периода (null — неизвестен)
+    end: start == null ? null : round(start + income - spent),
+    fromStock: start != null && spent > income ? round(Math.min(spent - income, start)) : 0,
+    mbankExt: list.some((c) => c.cat === 'mbankIn' || c.cat === 'mbankOut'),
     income,
     spent,
     net: round(income - spent),
@@ -495,18 +550,19 @@ export function chartOf(sum) {
   };
   const bars = [];
   // линия — итог на конец каждого дня с операциями (внутри дня приход и расход не дают ложных пиков)
-  const line = [{ t: 0, v: 0, g: 0 }];
+  const base = sum.start || 0; // линия — деньги на счетах: от остатка на начало периода
+  const line = [{ t: 0, v: base, g: base }];
   let inc = 0;
-  let net = 0;
+  let net = base;
   let day = null;
   for (const v of sum.views) {
     bars.push({ t: at(v.date, v.time), a: v.amount });
-    if (day && v.date !== day) line.push({ t: at(day, '23:59'), v: net, g: (inc * sum.pct) / 100 });
+    if (day && v.date !== day) line.push({ t: at(day, '23:59'), v: net, g: base + (inc * sum.pct) / 100 });
     day = v.date;
     net += v.amount;
     if (v.amount > 0) inc += v.amount;
   }
-  if (day) line.push({ t: at(day, '23:59'), v: net, g: (inc * sum.pct) / 100 });
+  if (day) line.push({ t: at(day, '23:59'), v: net, g: base + (inc * sum.pct) / 100 });
   return { bars, line };
 }
 

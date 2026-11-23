@@ -95,15 +95,47 @@ test('повторная загрузка не задваивает, неско�
   assert.equal(Object.keys(left.ops).length, 9);
 });
 
-test('свои счета Mbank не считаются; свой номер в другом банке — считается', () => {
-  const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
+test('остаток из выписки и перевод с незагруженного счёта Mbank — приход', () => {
+  const st = parseStatement(ST('1030000000000111'));
+  assert.equal(st.open, 0);
+  assert.equal(st.close, 10);
+  const { bank } = mergeStatement(emptyBank(), st);
   assert.deepEqual(bank.ownPhones, ['996507000001']);
   const s = summarize(bank, periodOf('2026-10-10', 'month'));
-  assert.equal(s.own.length, 1); // 1097 между своими — отдельно
-  assert.equal(s.income, 11500); // 9500 наличными + 2000 с моего номера
+  assert.equal(s.own.length, 0); // второго счёта нет — 1097 считается как приход
+  assert.equal(s.income, 12597); // 1097 с другого счёта Mbank + 9500 наличными + 2000 с моего номера
   assert.equal(s.spent, 4535.75);
+  assert.equal(s.start, 0);
+  assert.ok(s.incomes.some((c) => c.cat === 'mbankIn'));
   assert.ok(s.incomes.some((c) => c.cat === 'myBanksIn'));
   assert.equal(s.unclear.length, 1); // перевод Бактыгул М.
+});
+
+test('между своими счетами: пара из двух загруженных выписок не считается', () => {
+  const a = parseStatement(ST('1030000000000111'));
+  const bLines = [
+    'Выписка по счету №1030000000000222',
+    'За период с  01.10.2026 по 31.10.2026',
+    'Клиент Баланс на начало периода Баланс на конец',
+    'периода',
+    'ИВАНОВ ПЕТР',
+    'СЕРГЕЕВИЧ 2 000,00 KGS 903,00 KGS',
+    'Дата операции Описание операции Сумма операции',
+    '02.10.2026 09:37 Перевод между своими счетами: - 1 097,00',
+    'Перевод между счетами',
+    'Всего списаний 1 097,00 KGS',
+    'Всего пополнений 0,00 KGS',
+  ];
+  const b = parseStatement(bLines);
+  let r = mergeStatement(emptyBank(), a);
+  r = mergeStatement(r.bank, b);
+  const s = summarize(r.bank, periodOf('2026-10-10', 'month'));
+  assert.equal(s.own.length, 2);
+  assert.equal(s.income, 11500);
+  assert.equal(s.spent, 4535.75);
+  assert.equal(s.start, 2000); // остатки двух счетов на 1 октября
+  assert.equal(s.end, 2000 + 11500 - 4535.75);
+  assert.equal(chartOf(s).line[0].v, 2000);
 });
 
 test('объяснение убирает расход из непонятных и задаёт категорию', () => {
@@ -140,16 +172,16 @@ test('возвраты за курс — приход', () => {
   );
   const { bank } = mergeStatement(emptyBank(), parseStatement(lines));
   const s = summarize(bank, periodOf('2026-10-10', 'month'));
-  assert.equal(s.income, 11503);
+  assert.equal(s.income, 12600);
 });
 
 test('цель и статус: режимы 10/20/30 и свой процент', () => {
   const { bank } = mergeStatement(emptyBank(), parseStatement(ST('1030000000000111')));
-  // приход 11500, расход 4535.75 → сохранено ≈60.6%
+  // приход 12597, расход 4535.75 → сохранено ≈64%
   const p = periodOf('2026-10-10', 'month');
   assert.equal(summarize(bank, p).status, 'good');
-  const turbo = normalizeBank({ ...bank, goal: { k: 'turbo', pct: 58 } });
-  assert.equal(summarize(turbo, p).pct, 58);
+  const turbo = normalizeBank({ ...bank, goal: { k: 'turbo', pct: 62 } });
+  assert.equal(summarize(turbo, p).pct, 62);
   assert.equal(summarize(turbo, p).status, 'near');
   const t2 = normalizeBank({ ...bank, goal: { k: 'turbo', pct: 70 } });
   assert.equal(summarize(t2, p).status, 'bad');

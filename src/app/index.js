@@ -111,7 +111,7 @@ import { File, Paths } from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
 import { pdfLines } from '../lib/pdfText';
 import { buildImport, calcCountsFromImport } from '../lib/salesImport';
-import { CATS as CATS_BANK, chartOf as bankChart, checkTotals, cutOf as bankCut, EXPLAIN as BANK_EXPLAIN, explainOptions, MODES as BANK_MODES, mergeStatement, normalizeBank, parseStatement, periodsOf, removeAccount, shortAcc, suggestionsOf as bankTips, summarize as bankSummary, TURBO as BANK_TURBO, BANK_KEY } from '../lib/bank';
+import { balanceAt, CATS as CATS_BANK, chartOf as bankChart, checkTotals, cutOf as bankCut, EXPLAIN as BANK_EXPLAIN, explainOptions, MODES as BANK_MODES, mergeStatement, normalizeBank, parseStatement, periodsOf, removeAccount, shortAcc, suggestionsOf as bankTips, summarize as bankSummary, TURBO as BANK_TURBO, BANK_KEY } from '../lib/bank';
 import { Picker } from '@react-native-picker/picker';
 import Svg, { Circle, Defs, G, Line, LinearGradient, Path as SvgPath, Stop, Text as SvgText } from 'react-native-svg';
 import { areaPath, chartPoints, chartScale, chartSeries, shortMoney, smoothPath, trendOf } from '../lib/chart';
@@ -2740,32 +2740,52 @@ function BankView({ accent, apiRef, onToast, onHead }) {
           ),
         };
       }
-      case 'accounts':
+      case 'accounts': {
+        const list = Object.values(bank.accounts).sort((x, y) => (x.num < y.num ? -1 : 1));
         return {
-          title: 'Выписки Mbank',
+          title: 'Выписки',
           onClose: close,
           body: (
             <>
-              <ItemCard style={styles.listCard}>
-                {Object.values(bank.accounts).map((a, i) => (
-                  <Pressable key={a.num} onLongPress={() => askRemove(a.num)} style={[styles.lRow, styles.lRowSep]}>
-                    <View>
-                      <Text style={styles.lTitle}>Счёт {shortAcc(a.num)}</Text>
-                      <Text style={styles.lSub}>
-                        {fmtOpDate(a.from)} – {fmtOpDate(a.to)}
-                      </Text>
-                    </View>
+              {list.map((a) => {
+                const endBal = balanceAt(bank, addDays(a.to, 1));
+                return (
+                  <Pressable key={a.num} onLongPress={() => askRemove(a.num)} delayLongPress={600}>
+                    <Glass style={styles.bkAcc} intensity={34}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.bkAccNum}>{shortAcc(a.num)}</Text>
+                        <Text style={styles.lSub}>
+                          {fmtOpDate(a.from)} – {fmtOpDate(a.to)}
+                        </Text>
+                      </View>
+                      {endBal != null ? (
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.k}>Остаток</Text>
+                          <Text style={styles.bkAccBal}>{money(endBal)}</Text>
+                        </View>
+                      ) : null}
+                    </Glass>
                   </Pressable>
-                ))}
-                <Pressable onPress={importFiles} style={styles.lRow}>
-                  <Text style={[styles.lTitle, { color: accent }]}>Загрузить выписки</Text>
-                  <GlyphChev />
-                </Pressable>
-              </ItemCard>
+                );
+              })}
+              <ScaleButton style={[styles.actBtn, styles.okBtn, { marginTop: 4, marginBottom: 12 }]} onPress={importFiles}>
+                <Text style={[styles.actBtnTxt, styles.solidTxt]}>Загрузить выписку</Text>
+              </ScaleButton>
+              {sum.mbankExt ? (
+                <Glass style={[styles.bkTip, { borderWidth: 1, borderColor: 'rgba(255,214,10,0.45)' }]} intensity={34}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.lTitle, { color: '#ffd60a' }]}>Загружены не все счета</Text>
+                    <Text style={[styles.lSub, { fontSize: 14, marginTop: 4, lineHeight: 19 }]}>
+                      Есть переводы с другого твоего счёта Mbank, выписки которого здесь нет. Пока они считаются как приход и расход. Загрузи все счета за одни и те же даты — переводы между ними перестанут считаться.
+                    </Text>
+                  </View>
+                </Glass>
+              ) : null}
               <Text style={styles.hint}>Удерживай счёт, чтобы убрать его.</Text>
             </>
           ),
         };
+      }
       default:
         return { title: '', onClose: close, body: null };
     }
@@ -2787,14 +2807,16 @@ function BankView({ accent, apiRef, onToast, onHead }) {
   }
 
   const color = BK_NEON[sum.status];
+  // честно: потратить больше, чем было, нельзя — разница берётся из остатка на начало периода
   const pctLine =
     sum.rate == null
       ? sum.spent > 0
-        ? 'Прихода не было'
+        ? 'Тратил из остатка'
         : 'Операций нет'
       : sum.rate < 0
-        ? `Расход больше прихода на ${money(sum.spent - sum.income)}`
+        ? `Из остатка потрачено ${money(sum.spent - sum.income)}`
         : `Сохранено ${Math.round(sum.rate)}%`;
+  const accs = Object.values(bank.accounts);
   const cutNames = cut.list.slice(0, 3).map((c) => c.label.toLowerCase()).join(', ');
   const perList = perPick ? periodsOf(bank, perPick.mode) : [];
   const exOpt = explain ? BANK_EXPLAIN[explain.k] : null;
@@ -2860,6 +2882,11 @@ function BankView({ accent, apiRef, onToast, onHead }) {
         <Text style={[styles.bkFoot, { color }]}>
           {pctLine} · цель {sum.pct}%
         </Text>
+        {sum.start != null ? (
+          <Text style={styles.bkFootSub}>
+            На счетах: {money(sum.start)} → {money(sum.end)}
+          </Text>
+        ) : null}
       </Glass>
 
       <View style={styles.tileGrid}>
@@ -2871,8 +2898,8 @@ function BankView({ accent, apiRef, onToast, onHead }) {
         <CalcTile
           icon="document"
           title="Выписки"
-          sub={`${Object.keys(bank.accounts).length} ${plural(Object.keys(bank.accounts).length, 'счёт', 'счёта', 'счетов')} Mbank`}
-          big=""
+          sub={accs.map((a) => shortAcc(a.num)).join('  ')}
+          big={sum.mbankExt ? '!' : String(accs.length)}
           onPress={() => setSheet('accounts')}
         />
       </View>
@@ -8890,6 +8917,10 @@ const styles = StyleSheet.create({
   bkAxis: { position: 'absolute', left: 0, right: 0, bottom: 0, flexDirection: 'row', justifyContent: 'space-between' },
   bkAxisTxt: { color: 'rgba(235,235,245,0.4)', fontSize: 11, fontWeight: '600' },
   bkFoot: { fontSize: 13, fontWeight: '700', marginTop: 10 },
+  bkFootSub: { color: 'rgba(235,235,245,0.5)', fontSize: 13, fontWeight: '600', marginTop: 3 },
+  bkAcc: { borderRadius: 22, padding: 16, marginBottom: 10, flexDirection: 'row', alignItems: 'center' },
+  bkAccNum: { color: '#fff', fontSize: 26, fontWeight: '800', letterSpacing: 1, fontVariant: ['tabular-nums'] },
+  bkAccBal: { color: '#fff', fontSize: 18, fontWeight: '700', marginTop: 2 },
   bkTip: { borderRadius: 22, padding: 16, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12 },
   bkSave: { color: '#30d158', fontSize: 17, fontWeight: '800' },
   bkCheck: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.3)', alignItems: 'center', justifyContent: 'center' },
