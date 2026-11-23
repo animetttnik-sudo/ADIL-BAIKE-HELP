@@ -18,7 +18,7 @@ export const CATS = {
   own: { label: 'Свои счета', kind: 'own', icon: 'swap' },
   income: { label: 'Пополнения', kind: 'in' },
   incomeTr: { label: 'Переводы мне', kind: 'in' },
-  refund: { label: 'Возвраты', kind: 'in' },
+  refund: { label: 'Возвраты', kind: 'back' }, // корректировки платежей: уменьшают траты, не доход
   loan: { label: 'Кредиты и рассрочка', kind: 'must' },
   bills: { label: 'Связь и услуги', kind: 'must' },
   delivery: { label: 'Доставка еды', kind: 'opt' },
@@ -359,6 +359,7 @@ export function summarize(bank, period) {
   let opt = 0;
   let ask = 0;
   let own = 0;
+  let refunds = 0;
   for (const op of ops) {
     const c = catOf(op, bank);
     const kind = (CATS[c] || CATS.other).kind;
@@ -367,6 +368,10 @@ export function summarize(bank, period) {
       continue;
     }
     const a = op.amount;
+    if (kind === 'back') {
+      refunds += a;
+      continue;
+    }
     if (!cats[c]) cats[c] = { cat: c, label: (CATS[c] || CATS.other).label, kind, sum: 0, n: 0, ops: [] };
     cats[c].sum += Math.abs(a);
     cats[c].n++;
@@ -378,6 +383,7 @@ export function summarize(bank, period) {
       else opt -= a;
     } else income += a; // редкий плюс в расходной категории
   }
+  opt = Math.max(0, opt - refunds);
   const spent = must + opt + ask;
   const list = Object.values(cats).sort((a, b) => b.sum - a.sum);
   return {
@@ -389,6 +395,7 @@ export function summarize(bank, period) {
     spent: round(spent),
     net: round(income - spent),
     own,
+    refunds: round(refunds),
     unmarked: cats.transfer ? cats.transfer.ops : [],
     expenses: list.filter((c) => c.kind !== 'in'),
     incomes: list.filter((c) => c.kind === 'in'),

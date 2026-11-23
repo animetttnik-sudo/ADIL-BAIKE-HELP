@@ -139,3 +139,15 @@ test('советы: минус, доставка, подписки, неотме
   assert.ok(ks.includes('unmarked'));
   assert.ok(!ks.some((k) => k.includes('loan')));
 });
+
+test('возвраты банка не доход — уменьшают траты', () => {
+  const extra = ['09.10.2026 10:00 Операции по карте: + 3,00', 'Возврат после корректировки платежа'];
+  const lines = ST('1030000000000111', extra).map((l) =>
+    l.startsWith('Всего пополнений') ? 'Всего пополнений 12 600,00 KGS' : l
+  );
+  const { bank } = mergeStatement(emptyBank(), parseStatement(lines));
+  const s = summarize(bank, periodOf('2026-10-10', 'month'));
+  assert.equal(s.income, 9500);
+  assert.equal(s.refunds, 3);
+  assert.equal(s.opt, 698.25 + 34 + 803.5 - 3);
+});

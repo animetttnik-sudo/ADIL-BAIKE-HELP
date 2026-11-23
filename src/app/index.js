@@ -1320,9 +1320,9 @@ const ShiftCard = memo(function ShiftCard({ item, onEdit, onCalc, accent, dayTot
 
 const APressable = Animated.createAnimatedComponent(Pressable);
 /** Быстрый фильтр списка страницы: «Все · Не оплачено (N)». */
-function FilterChips({ options, value, onChange, accent }) {
+function FilterChips({ options, value, onChange, accent, wrap }) {
   return (
-    <View style={styles.fChips} accessibilityRole="tablist">
+    <View style={[styles.fChips, wrap && { flexWrap: 'wrap' }]} accessibilityRole="tablist">
       {options.map((o) => {
         const on = o.k === value;
         return (
@@ -2228,12 +2228,13 @@ const BankOpRow = memo(function BankOpRow({ op, bank, last, open, onOpen, onTag,
         <Text style={[styles.lVal, op.amount > 0 && styles.good]}>{signed(op.amount)}</Text>
       </Pressable>
       {open && can ? (
-        <View style={{ marginTop: 10 }}>
+        <View style={styles.bankTags}>
           <FilterChips
             options={tagsFor(op).map((t) => ({ k: t.k, label: t.label }))}
             value={tag || (auto ? 'own' : null)}
             onChange={(k) => onTag(op.id, k)}
             accent={accent}
+            wrap
           />
           {tag ? (
             <Pressable onPress={() => onTag(op.id, null)} hitSlop={8} style={{ marginTop: 8 }}>
@@ -2434,6 +2435,11 @@ function BankView({ accent, apiRef, onToast }) {
           <Stat k="Обязательное" v={money(sum.must)} />
           <Stat k="Можно урезать" v={money(sum.opt)} />
         </View>
+        {sum.refunds ? (
+          <Text style={[styles.lSub, { marginTop: 10 }]}>
+            Возвраты от банка {money(sum.refunds)} сом — уже вычтены из трат, это не доход
+          </Text>
+        ) : null}
         {sum.own ? (
           <Text style={[styles.lSub, { marginTop: 10 }]}>
             Не посчитано {sum.own} {plural(sum.own, 'перевод', 'перевода', 'переводов')} между своими счетами
@@ -4730,11 +4736,15 @@ export default function App() {
     const vis = [tv0, tv1, tv2, tv3];
     const xs = [tx0, tx1, tx2, tx3];
     const shift = reduceMotion ? 0 : TAB_SHIFT;
-    return (k) => {
+    const pages = DOCK_PAGES.slice();
+    const posOf = DOCK_POS.slice();
+    // pos — позиция в доке; направление сдвига — по позициям, состояние — по страницам
+    return (pos) => {
       'worklet';
+      const k = pages[pos];
       const from = tabCur.value;
       if (k === from) return;
-      const dir = k > from ? 1 : -1;
+      const dir = pos > posOf[from] ? 1 : -1;
       tabCur.value = k;
       for (let i = 0; i < vis.length; i++) {
         if (i === k) {
@@ -4758,15 +4768,16 @@ export default function App() {
     [tv0, tv1, tv2, tv3, tx0, tx1, tx2, tx3]
   );
 
-  const onDock = useCallback((i) => {
+  const onDock = useCallback((pos) => {
     // анимация уже идёт (стартовала на UI-потоке из жеста дока); здесь — только состояние
+    const i = DOCK_PAGES[pos];
     Keyboard.dismiss();
     setPage(i);
     if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => ({ ...m, [i]: true })), TAB_MOUNT_MS);
   }, []);
   const goPage = useCallback((i) => {
     if (!mountedRef.current[i]) setTimeout(() => setMounted((m) => (m[i] ? m : { ...m, [i]: true })), TAB_MOUNT_MS);
-    scheduleOnUI(tabAnim, i); // переход не из дока (бейдж, «Открыть в Расчёте») — та же анимация
+    scheduleOnUI(tabAnim, DOCK_POS[i]); // переход не из дока (бейдж, «Открыть в Расчёте») — та же анимация
     setPage(i);
   }, [tabAnim]);
 
@@ -7653,7 +7664,7 @@ export default function App() {
       {/* Dock */}
       <View style={styles.dock}>
         <View style={styles.capsuleWrap}>
-          <SegmentCapsule value={page} labels={DOCK_LABELS} icons={DOCK_ICONS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
+          <SegmentCapsule value={DOCK_POS[page]} labels={DOCK_LABELS_POS} icons={DOCK_ICONS_POS} height={64} glass onChange={onDock} onPickUI={tabAnim} />
         </View>
         <ScaleButton style={styles.gearDock} onPress={() => setSheet('settings')} accessibilityLabel="Настройки">
           <AppIcon name="gear" size={64} variant="tile" shape="circle" />
@@ -7684,6 +7695,11 @@ export default function App() {
 
 const DOCK_LABELS = ['Расходы', 'Смены', 'Расчёт', 'Банк'];
 const DOCK_ICONS = ['card', 'calendar', 'calculator', 'bank'];
+// порядок в доке: Банк первым, рядом с Расходами. Индексы страниц (page) не меняются.
+const DOCK_PAGES = [3, 0, 1, 2]; // позиция в доке → страница
+const DOCK_POS = [1, 2, 3, 0]; // страница → позиция в доке
+const DOCK_LABELS_POS = DOCK_PAGES.map((p) => DOCK_LABELS[p]);
+const DOCK_ICONS_POS = DOCK_PAGES.map((p) => DOCK_ICONS[p]);
 /** «12–25 сентября» или «29 сентября – 12 октября». */
 function fmtRange(a, b) {
   const da = parse(a);
@@ -8482,6 +8498,7 @@ const styles = StyleSheet.create({
   colorFill: { flex: 1, borderRadius: 20 },
   hueSegOn: { borderWidth: 2, borderColor: '#fff' },
   padCard: { padding: 16 },
+  bankTags: { marginTop: 10, marginHorizontal: -4 },
   bankNav: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, gap: 10 },
   bankNavBtn: {
     width: 40,
